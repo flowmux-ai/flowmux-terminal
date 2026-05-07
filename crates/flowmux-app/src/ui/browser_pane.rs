@@ -8,8 +8,16 @@
 //! * a scriptable API entry point — `evaluate_javascript_async` is
 //!   already exposed by webkit6, so the Task 15 work mostly involves
 //!   wrapping it in a stable IPC verb shape, not new widgets.
+//!
+//! 옵션 모델: cmux 원본은 단일 엔진(WKWebView) + 프로필별
+//! `WKWebsiteDataStore` 분리만 합니다 (`Sources/Panels/BrowserPanel.swift:443`).
+//! flowmux도 같은 모델을 따라 WebKitGTK 6.0 한 엔진으로만 그리고,
+//! 옵션의 엔진 라벨(WebKit / Chrome / Firefox / Custom)은
+//! [`BrowserProfile`]로 매핑되어 cookies / localStorage / IndexedDB
+//! 디렉토리를 분리한다.
 
 use crate::ui::terminal_pane::PaneCallbacks;
+use flowmux_browser::BrowserProfile;
 use flowmux_config::options::BrowserEngine;
 use flowmux_core::{PaneId, SurfaceId};
 use gtk::prelude::*;
@@ -31,19 +39,16 @@ impl BrowserPane {
         callbacks: PaneCallbacks,
         engine: BrowserEngine,
     ) -> Self {
-        // 옵션의 엔진 선택은 사용자가 새 탭브라우저를 만들 때 어떤
-        // 백엔드를 쓰고 싶은지를 기록한다. 이번 단계에서는 모든 엔진을
-        // WebKitGTK로 그리고, 외부 프로세스 spawn 분기는 별도 작업에서
-        // 추가한다. 사용자가 의도한 엔진은 trace 로그로 남겨 어떤 옵션
-        // 으로 만들어진 탭브라우저인지 추적 가능하게 한다.
-        if !matches!(engine, BrowserEngine::Webkit) {
-            tracing::warn!(
-                engine = ?engine,
-                "BrowserEngine ≠ WebKit 옵션은 현 단계에서 WebKitGTK로 동작합니다 (엔진 spawn은 다음 작업)"
-            );
-        } else {
-            tracing::debug!(engine = ?engine, "creating browser pane with WebKitGTK");
-        }
+        // 옵션의 BrowserEngine 라벨은 cmux 원본과 동일하게 WebsiteDataStore
+        // 격리에만 영향을 준다 — 모든 탭은 동일한 WebKitGTK 엔진으로 그려
+        // 진다. flowmux-browser::BrowserProfile으로 1:1 매핑해 데이터
+        // 디렉토리를 분리한다.
+        let profile = engine_to_profile(&engine);
+        tracing::debug!(
+            engine = ?engine,
+            profile = ?profile,
+            "creating browser pane (WebKitGTK + profile-isolated NetworkSession)"
+        );
         // Idempotent webkit sandbox bypass — main.rs entry에서도 같은
         // env를 설정하지만, 단위 테스트(bin이 아닌 lib 경로)에서는
         // main.rs를 거치지 않으므로 BrowserPane을 만드는 시점에 한
@@ -52,9 +57,55 @@ impl BrowserPane {
         if std::env::var_os("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS").is_none() {
             std::env::set_var("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS", "1");
         }
-        let web_view = webkit6::WebView::new();
+
+        // 프로필별 NetworkSession 구성. Default는 webkit이 관리하는
+        // 글로벌 default 세션을 그대로 써서 시스템 표준 위치에 영속,
+        // 그 외 프로필은 `$XDG_DATA_HOME/flowmux/browser/<slug>/` 아래로
+        // 분리되어 같은 flowmux 안에서도 쿠키/localStorage가 섞이지 않는다.
+        let network_session = build_network_session(&profile);
+        let web_view = webkit6::WebView::builder()
+            .network_session(&network_session)
+            .build();
         web_view.set_hexpand(true);
         web_view.set_vexpand(true);
+
+        // cmux의 `configureWebViewConfiguration` (BrowserPanel.swift:2586-)와
+        // 동일한 핵심 옵션을 WebKitGTK Settings로 매핑:
+        //   * mediaTypesRequiringUserActionForPlayback = []
+        //         → media-playback-requires-user-gesture = false
+        //         + media-playback-allows-inline = true
+        //   * developerExtrasEnabled = true
+        //         → enable-developer-extras = true
+        //   * isElementFullscreenEnabled = true
+        //         → enable-fullscreen = true
+        //   * defaultWebpagePreferences.allowsContentJavaScript = true
+        //         → enable-javascript = true (WebKitGTK 기본값)
+        //
+        // 추가로 WebKitGTK 기본값이 비활성인 미디어 관련 항목을 켠다
+        // (cmux의 WKWebView는 macOS WebKit 기본 켜져 있는 것을 명시하지
+        // 않은 것뿐이라, 동일 동작을 보장하려면 명시적으로 set):
+        //   * enable-mediasource (HLS / DASH 등 adaptive streaming)
+        //   * enable-encrypted-media (DRM — Netflix/Disney+ 등)
+        //   * enable-webaudio (오디오 컨텍스트)
+        //   * hardware-acceleration-policy = ALWAYS (영상 디코딩 GPU 가속)
+        // WebView가 갓 만들어진 시점이라 settings는 항상 Some. 보수적으로
+        // Option을 펴서 미디어 옵션을 적용한다 (None이면 webkit 측 이슈로
+        // 미디어 옵션은 시스템 기본값이 적용됨).
+        if let Some(settings) = webkit6::prelude::WebViewExt::settings(&web_view) {
+            settings.set_media_playback_requires_user_gesture(false);
+            settings.set_media_playback_allows_inline(true);
+            settings.set_enable_developer_extras(true);
+            settings.set_enable_fullscreen(true);
+            settings.set_enable_javascript(true);
+            settings.set_enable_mediasource(true);
+            settings.set_enable_encrypted_media(true);
+            settings.set_enable_webaudio(true);
+            settings.set_hardware_acceleration_policy(
+                webkit6::HardwareAccelerationPolicy::Always,
+            );
+        } else {
+            tracing::warn!("WebView::settings() returned None — media options skipped");
+        }
 
         let back = gtk::Button::from_icon_name("go-previous-symbolic");
         let forward = gtk::Button::from_icon_name("go-next-symbolic");
@@ -251,4 +302,54 @@ fn urlencode(s: &str) -> String {
             other => format!("%{:02X}", other),
         })
         .collect()
+}
+
+/// 옵션 다이얼로그가 저장하는 [`BrowserEngine`] 라벨을 flowmux-browser
+/// 의 [`BrowserProfile`]로 1:1 매핑한다. 매핑 자체는 의미적이며,
+/// 모든 결과는 동일한 WebKitGTK 엔진으로 그려진다.
+///
+/// * `Webkit`  → `Default` (flowmux 기본 데이터 디렉토리)
+/// * `Chrome`  → `ChromeImport` (Chromium 계열 쿠키 import 슬롯)
+/// * `Firefox` → `FirefoxImport` (Firefox 쿠키 import 슬롯)
+/// * `Custom { name }` → `Custom { name }` (사용자 정의 격리 슬롯)
+fn engine_to_profile(engine: &BrowserEngine) -> BrowserProfile {
+    match engine {
+        BrowserEngine::Webkit => BrowserProfile::Default,
+        BrowserEngine::Chrome => BrowserProfile::ChromeImport,
+        BrowserEngine::Firefox => BrowserProfile::FirefoxImport,
+        BrowserEngine::Custom { name } => BrowserProfile::Custom {
+            name: name.clone(),
+        },
+    }
+}
+
+/// 프로필별 [`webkit6::NetworkSession`]을 만들어 반환한다.
+///
+/// * [`BrowserProfile::Default`]는 시스템이 관리하는 글로벌 기본
+///   세션을 재사용 — 다른 flowmux 인스턴스가 켜져 있을 때도 같은
+///   쿠키 풀을 공유하게 된다 (cmux의 sharedProcessPool과 동일 정신).
+/// * 그 외 프로필은 `$XDG_DATA_HOME/flowmux/browser/<slug>/` 아래로
+///   data + cache 디렉토리를 분리해 영속 NetworkSession을 만든다.
+///   디렉토리 생성에 실패하면(권한 등) 경고를 남기고 글로벌 기본
+///   세션으로 폴백해 적어도 페이지는 뜨도록 한다.
+fn build_network_session(profile: &BrowserProfile) -> webkit6::NetworkSession {
+    match profile {
+        BrowserProfile::Default => webkit6::NetworkSession::default()
+            .unwrap_or_else(|| webkit6::NetworkSession::new(None, None)),
+        other => match other.data_dir() {
+            Ok(dir) => {
+                let dir_str = dir.to_string_lossy().into_owned();
+                webkit6::NetworkSession::new(Some(&dir_str), Some(&dir_str))
+            }
+            Err(e) => {
+                tracing::warn!(
+                    profile = ?profile,
+                    error = %e,
+                    "browser profile data dir unavailable, falling back to default session"
+                );
+                webkit6::NetworkSession::default()
+                    .unwrap_or_else(|| webkit6::NetworkSession::new(None, None))
+            }
+        },
+    }
 }

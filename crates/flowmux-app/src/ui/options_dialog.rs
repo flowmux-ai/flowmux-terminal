@@ -68,8 +68,12 @@ fn build_dialog(
     body.append(&row("포커스 테두리 색", &focus_color_btn));
 
     let hint = gtk::Label::new(Some(
-        "이미 열려 있는 탭브라우저는 그대로 유지됩니다.",
+        "선택한 라벨은 새 탭브라우저의 쿠키/세션 디렉토리를 격리합니다 \
+         (모든 라벨이 WebKitGTK 엔진으로 그려집니다). 이미 열려 있는 \
+         탭브라우저는 그대로 유지됩니다.",
     ));
+    hint.set_wrap(true);
+    hint.set_max_width_chars(46);
     hint.add_css_class("dim-label");
     hint.set_xalign(0.0);
     body.append(&hint);
