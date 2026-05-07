@@ -1,8 +1,10 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 [package]
 name = "flowmux-cookies"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 description = "Browser cookie + session import for the flowmux in-app browser."
 
 [dependencies]
@@ -13,3 +15,6 @@ serde = { workspace = true }
 chrono = { workspace = true }
 dirs = { workspace = true }
 rusqlite = { version = "0.32", features = ["bundled"] }
+
+[dev-dependencies]
+tempfile = "3"

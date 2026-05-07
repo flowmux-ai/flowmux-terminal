@@ -1,8 +1,10 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 [package]
 name = "flowmux-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 description = "The `flowmux` command-line interface."
 
 [[bin]]

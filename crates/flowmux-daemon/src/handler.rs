@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Production [`Handler`] for the flowmux IPC server.
 //!
 //! Owns the [`StateStore`] and dispatches verbs against it. Verbs that
@@ -51,10 +52,7 @@ impl DaemonHandler {
 }
 
 impl Handler for DaemonHandler {
-    fn handle<'a>(
-        &'a self,
-        req: Request,
-    ) -> Pin<Box<dyn Future<Output = Response> + Send + 'a>> {
+    fn handle<'a>(&'a self, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + 'a>> {
         Box::pin(async move {
             match req {
                 Request::Ping => Response::Pong,
@@ -77,7 +75,12 @@ impl Handler for DaemonHandler {
                     Response::WorkspaceList { ids }
                 }
 
-                Request::Notify { pane, title, body, level } => {
+                Request::Notify {
+                    pane,
+                    title,
+                    body,
+                    level,
+                } => {
                     let n = Notification {
                         id: NotificationId::new(),
                         level,
@@ -97,17 +100,67 @@ impl Handler for DaemonHandler {
                     Response::Ok
                 }
 
-                Request::SshConnect { target } => {
-                    match SshTarget::parse(&target) {
-                        Ok(_) => Response::Error(RpcError::Unimplemented(
-                            "ssh authentication not yet wired".into(),
-                        )),
-                        Err(e) => Response::Error(RpcError::InvalidArgument(e.to_string())),
-                    }
-                }
+                Request::SshConnect { target } => match SshTarget::parse(&target) {
+                    Ok(_) => Response::Error(RpcError::Unimplemented(
+                        "ssh authentication not yet wired".into(),
+                    )),
+                    Err(e) => Response::Error(RpcError::InvalidArgument(e.to_string())),
+                },
 
                 other => Response::Error(RpcError::Unimplemented(format!("{other:?}"))),
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flowmux_state::State;
+
+    #[tokio::test]
+    async fn handles_ping_workspace_create_and_list() {
+        let handler = DaemonHandler::new(StateStore::new_lazy(State::default()));
+
+        assert!(matches!(
+            handler.handle(Request::Ping).await,
+            Response::Pong
+        ));
+
+        let root = std::path::PathBuf::from("/tmp/flowmux-handler-test");
+        let response = handler
+            .handle(Request::WorkspaceCreate {
+                name: Some("demo".into()),
+                root,
+            })
+            .await;
+        let id = match response {
+            Response::WorkspaceCreated { id } => id,
+            other => panic!("expected workspace creation, got {other:?}"),
+        };
+
+        let response = handler.handle(Request::WorkspaceList).await;
+        assert!(matches!(response, Response::WorkspaceList { ids } if ids == vec![id]));
+        assert_eq!(
+            handler.store().get_workspace(id).await.unwrap().name,
+            "demo"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_malformed_ssh_target_before_unimplemented_transport() {
+        let handler = DaemonHandler::new(StateStore::new_lazy(State::default()));
+
+        let response = handler
+            .handle(Request::SshConnect {
+                target: "alice@".into(),
+            })
+            .await;
+
+        assert!(matches!(
+            response,
+            Response::Error(RpcError::InvalidArgument(message))
+                if message.contains("invalid ssh target")
+        ));
     }
 }

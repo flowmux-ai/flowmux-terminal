@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! VTE 2.91 / GTK4 backend skeleton.
 //!
 //! The actual widgets live on the GTK main thread inside `flowmux-app`;
@@ -22,7 +23,9 @@ struct PaneSlot {
 
 impl VteBackend {
     pub fn new() -> Self {
-        Self { panes: HashMap::new() }
+        Self {
+            panes: HashMap::new(),
+        }
     }
 
     pub fn register(&mut self, id: PaneId) {
@@ -31,7 +34,9 @@ impl VteBackend {
 }
 
 impl Default for VteBackend {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TerminalBackend for VteBackend {
@@ -40,7 +45,9 @@ impl TerminalBackend for VteBackend {
         // main loop and return the pane id once the child is reaped or
         // an error surfaces. The `flowmux-app` crate owns the GTK runtime
         // and provides a thin shim that calls into here.
-        Err(TerminalError::Spawn("vte backend not yet wired into GTK runtime".into()))
+        Err(TerminalError::Spawn(
+            "vte backend not yet wired into GTK runtime".into(),
+        ))
     }
 
     fn send(&mut self, pane: PaneId, _bytes: &[u8]) -> Result<(), TerminalError> {
@@ -58,7 +65,40 @@ impl TerminalBackend for VteBackend {
     }
 
     fn close(&mut self, pane: PaneId) -> Result<(), TerminalError> {
-        self.panes.remove(&pane).ok_or(TerminalError::NotFound(pane))?;
+        self.panes
+            .remove(&pane)
+            .ok_or(TerminalError::NotFound(pane))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registered_panes_accept_send_resize_and_close() {
+        let pane = PaneId::new();
+        let mut backend = VteBackend::new();
+        backend.register(pane);
+
+        assert!(backend.send(pane, b"hello").is_ok());
+        assert!(backend.resize(pane, 24, 80).is_ok());
+        assert!(backend.close(pane).is_ok());
+        assert!(matches!(backend.send(pane, b"x"), Err(TerminalError::NotFound(id)) if id == pane));
+    }
+
+    #[test]
+    fn spawn_reports_runtime_not_wired() {
+        let mut backend = VteBackend::new();
+        let spec = SpawnSpec {
+            argv: &["sh"],
+            cwd: None,
+            env: &[],
+        };
+
+        assert!(
+            matches!(backend.spawn(spec), Err(TerminalError::Spawn(message)) if message.contains("not yet wired"))
+        );
     }
 }

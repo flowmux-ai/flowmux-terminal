@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Git + linked-PR detection for the workspace sidebar.
 //!
 //! `inspect(root)` returns a [`flowmux_core::GitInfo`] populated from the
@@ -57,22 +58,16 @@ fn local_info(root: &Path) -> Result<Option<Local>, VcsError> {
                 .map(|id| id.shorten_or_id().to_string())
                 .unwrap_or_else(|| "HEAD".into())
         });
-    let remote_url = repo
-        .find_remote("origin")
-        .ok()
-        .and_then(|r| {
-            r.url(gix::remote::Direction::Fetch)
-                .map(|u| u.to_bstring().to_string())
-        });
+    let remote_url = repo.find_remote("origin").ok().and_then(|r| {
+        r.url(gix::remote::Direction::Fetch)
+            .map(|u| u.to_bstring().to_string())
+    });
     Ok(Some(Local { branch, remote_url }))
 }
 
 async fn linked_pr(root: &Path, branch: &str) -> Result<Option<LinkedPr>, VcsError> {
     let out = Command::new("gh")
-        .args([
-            "pr", "view", branch,
-            "--json", "number,state,url,isDraft",
-        ])
+        .args(["pr", "view", branch, "--json", "number,state,url,isDraft"])
         .current_dir(root)
         .output()
         .await;
@@ -117,5 +112,47 @@ async fn linked_pr(root: &Path, branch: &str) -> Result<Option<LinkedPr>, VcsErr
         }
     };
 
-    Ok(Some(LinkedPr { number: raw.number, state, url: raw.url }))
+    Ok(Some(LinkedPr {
+        number: raw.number,
+        state,
+        url: raw.url,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command as StdCommand;
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = StdCommand::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    #[tokio::test]
+    async fn inspect_returns_none_outside_git_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(inspect(dir.path()).await.unwrap().is_none());
+    }
+
+    #[test]
+    fn local_info_reads_branch_and_origin_remote() {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["-c", "init.defaultBranch=main", "init"]);
+        git(
+            dir.path(),
+            &["remote", "add", "origin", "https://example.com/flowmux.git"],
+        );
+
+        let info = local_info(dir.path()).unwrap().unwrap();
+        assert_eq!(info.branch, "main");
+        assert_eq!(
+            info.remote_url.as_deref(),
+            Some("https://example.com/flowmux.git")
+        );
+    }
 }

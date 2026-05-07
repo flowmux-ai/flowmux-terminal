@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Config loaders for flowmux.
 //!
 //! Two distinct sources, intentionally orthogonal:
@@ -13,3 +14,4 @@
 pub mod cmux_json;
 pub mod ghostty;
 pub mod paths;
+pub mod theme;

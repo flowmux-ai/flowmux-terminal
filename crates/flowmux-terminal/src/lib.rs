@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Terminal backend abstraction.
 //!
 //! flowmux renders panes through a [`TerminalBackend`] so we can swap

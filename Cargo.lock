@@ -535,6 +535,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "async-channel",
+ "chrono",
  "flowmux-config",
  "flowmux-cookies",
  "flowmux-core",
@@ -579,6 +580,7 @@ dependencies = [
  "dirs",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 1.0.69",
 ]
 
@@ -591,6 +593,7 @@ dependencies = [
  "dirs",
  "rusqlite",
  "serde",
+ "tempfile",
  "thiserror 1.0.69",
  "tracing",
 ]
@@ -635,6 +638,7 @@ dependencies = [
  "flowmux-core",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -713,6 +717,7 @@ dependencies = [
  "gix",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tracing",

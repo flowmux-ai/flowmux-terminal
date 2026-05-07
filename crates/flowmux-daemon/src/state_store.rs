@@ -21,8 +21,8 @@ use tracing::{error, info};
 /// the dark sidebar tint. Picked deterministically from the
 /// workspace's UUID so the color stays the same across restarts.
 const DEFAULT_PALETTE: &[&str] = &[
-    "#7ab7e6", "#e69977", "#9ad57a", "#d188e0", "#e6d077",
-    "#7adfd0", "#e07a9a", "#a797e0", "#79e0a3", "#e07a7a",
+    "#7ab7e6", "#e69977", "#9ad57a", "#d188e0", "#e6d077", "#7adfd0", "#e07a9a", "#a797e0",
+    "#79e0a3", "#e07a7a",
 ];
 
 fn default_color_for(id: WorkspaceId) -> String {
@@ -141,11 +141,7 @@ impl StateStore {
         self.mark_dirty();
     }
 
-    pub async fn replace_listening_ports(
-        &self,
-        workspace: WorkspaceId,
-        ports: Vec<u16>,
-    ) {
+    pub async fn replace_listening_ports(&self, workspace: WorkspaceId, ports: Vec<u16>) {
         let mut s = self.inner.lock().await;
         if let Some(w) = s.workspaces.iter_mut().find(|w| w.id == workspace) {
             w.listening_ports = ports;
@@ -241,7 +237,9 @@ impl StateStore {
     /// there. No-op if the id isn't in the workspace list.
     pub async fn set_active_workspace(&self, id: Option<WorkspaceId>) {
         let mut s = self.inner.lock().await;
-        let valid = id.map(|i| s.workspaces.iter().any(|w| w.id == i)).unwrap_or(true);
+        let valid = id
+            .map(|i| s.workspaces.iter().any(|w| w.id == i))
+            .unwrap_or(true);
         if valid {
             s.active_workspace = id;
         }
@@ -323,7 +321,8 @@ impl StateStore {
     /// Active workspace, falling back to the first one available.
     pub async fn active_or_first(&self) -> Option<WorkspaceId> {
         let s = self.inner.lock().await;
-        s.active_workspace.or_else(|| s.workspaces.first().map(|w| w.id))
+        s.active_workspace
+            .or_else(|| s.workspaces.first().map(|w| w.id))
     }
 
     /// Add a fresh terminal surface to a workspace. Used by the
@@ -363,7 +362,9 @@ impl StateStore {
         let pane_id = PaneId::new();
         w.surfaces.push(Surface {
             id: surface_id,
-            kind: SurfaceKind::Browser { initial_url: Some(url.clone()) },
+            kind: SurfaceKind::Browser {
+                initial_url: Some(url.clone()),
+            },
             title: "Browser".into(),
             root_pane: Pane::Leaf {
                 id: pane_id,
@@ -390,5 +391,112 @@ impl StateStore {
                 Err(e) => error!(error = %e, "state save failed"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn first_pane(ws: &Workspace) -> PaneId {
+        ws.surfaces[0].root_pane.first_leaf_id().unwrap()
+    }
+
+    #[tokio::test]
+    async fn create_workspace_sets_order_active_surface_and_color() {
+        let store = StateStore::new_lazy(State::default());
+        let root = std::path::PathBuf::from("/tmp/demo");
+        let id = store.create_workspace(None, root.clone()).await;
+
+        let state = store.snapshot().await;
+        assert_eq!(state.workspace_order, vec![id]);
+        assert_eq!(state.active_workspace, Some(id));
+        assert_eq!(state.workspaces.len(), 1);
+        let ws = &state.workspaces[0];
+        assert_eq!(ws.name, "demo");
+        assert!(ws.color.as_deref().is_some_and(|c| c.starts_with('#')));
+        assert_eq!(ws.surfaces.len(), 1);
+        assert!(matches!(
+            &ws.surfaces[0].kind,
+            SurfaceKind::Terminal { cwd: Some(cwd), .. } if cwd == &root
+        ));
+    }
+
+    #[tokio::test]
+    async fn split_and_close_pane_updates_tree_and_removes_empty_workspace() {
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("demo".into()), std::path::PathBuf::from("/tmp/demo"))
+            .await;
+        let original = first_pane(&store.get_workspace(ws_id).await.unwrap());
+
+        let (split_ws, new_pane) = store
+            .split_pane(original, SplitDirection::Vertical)
+            .await
+            .unwrap();
+        assert_eq!(split_ws, ws_id);
+        assert_eq!(store.workspace_for_pane(new_pane).await, Some(ws_id));
+
+        let outcome = store.close_pane(new_pane).await.unwrap();
+        assert!(matches!(outcome, CloseOutcome::PaneRemoved { workspace } if workspace == ws_id));
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        assert_eq!(ws.surfaces[0].root_pane.first_leaf_id(), Some(original));
+
+        let outcome = store.close_pane(original).await.unwrap();
+        assert!(matches!(
+            outcome,
+            CloseOutcome::WorkspaceRemoved { workspace } if workspace == ws_id
+        ));
+        let state = store.snapshot().await;
+        assert!(state.workspaces.is_empty());
+        assert!(state.workspace_order.is_empty());
+        assert_eq!(state.active_workspace, None);
+    }
+
+    #[tokio::test]
+    async fn workspace_mutators_only_mark_successful_changes() {
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("old".into()), std::path::PathBuf::from("/tmp/demo"))
+            .await;
+        let missing = WorkspaceId::new();
+
+        assert!(store.rename_workspace(ws_id, "new".into()).await);
+        assert!(store.set_workspace_color(ws_id, "#112233".into()).await);
+        assert!(!store.rename_workspace(missing, "missing".into()).await);
+        assert!(!store.set_workspace_color(missing, "#445566".into()).await);
+        store.set_active_workspace(Some(missing)).await;
+
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        assert_eq!(ws.name, "new");
+        assert_eq!(ws.color.as_deref(), Some("#112233"));
+        assert_eq!(store.snapshot().await.active_workspace, Some(ws_id));
+    }
+
+    #[tokio::test]
+    async fn add_surfaces_and_remove_workspace_keep_order_consistent() {
+        let store = StateStore::new_lazy(State::default());
+        let first = store
+            .create_workspace(Some("one".into()), std::path::PathBuf::from("/tmp/one"))
+            .await;
+        let second = store
+            .create_workspace(Some("two".into()), std::path::PathBuf::from("/tmp/two"))
+            .await;
+
+        let terminal = store
+            .add_terminal_surface(first, Some("/tmp/one".into()))
+            .await;
+        let browser = store
+            .add_browser_surface(first, "https://example.com".into())
+            .await;
+        assert!(terminal.is_some());
+        assert!(browser.is_some());
+        assert_eq!(store.get_workspace(first).await.unwrap().surfaces.len(), 3);
+
+        assert!(store.remove_workspace(first).await);
+        let state = store.snapshot().await;
+        assert_eq!(state.workspace_order, vec![second]);
+        assert_eq!(state.active_workspace, Some(second));
+        assert!(!store.remove_workspace(first).await);
     }
 }

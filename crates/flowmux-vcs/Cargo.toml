@@ -1,8 +1,10 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 [package]
 name = "flowmux-vcs"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 description = "Git branch / remote / linked-PR detection for the flowmux sidebar."
 
 [dependencies]
@@ -14,3 +16,6 @@ tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 gix = { version = "0.66", default-features = false, features = ["max-performance-safe", "blocking-network-client"] }
+
+[dev-dependencies]
+tempfile = "3"

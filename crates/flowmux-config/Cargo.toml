@@ -1,8 +1,10 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 [package]
 name = "flowmux-config"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 description = "Config loaders for flowmux: cmux.json + ghostty config compatibility."
 
 [dependencies]
@@ -11,3 +13,6 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 dirs = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

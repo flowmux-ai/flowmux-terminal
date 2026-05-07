@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 use flowmux_core::{NotificationLevel, PaneId, SplitDirection, SurfaceId, WorkspaceId};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -25,10 +26,7 @@ pub enum Request {
     Ping,
 
     /// `flowmux workspace new --root .`
-    WorkspaceCreate {
-        name: Option<String>,
-        root: PathBuf,
-    },
+    WorkspaceCreate { name: Option<String>, root: PathBuf },
 
     /// `flowmux workspace ls`
     WorkspaceList,
@@ -46,10 +44,7 @@ pub enum Request {
     },
 
     /// `flowmux pane send-keys <pane> "<keys>"`
-    PaneSendKeys {
-        pane: PaneId,
-        keys: String,
-    },
+    PaneSendKeys { pane: PaneId, keys: String },
 
     /// `flowmux notify --pane <id> --title ... --body ...`
     Notify {
@@ -60,9 +55,7 @@ pub enum Request {
     },
 
     /// `flowmux ssh user@host` — open a remote workspace.
-    SshConnect {
-        target: String,
-    },
+    SshConnect { target: String },
 
     /// `flowmux browser open <url>` — open URL in the in-app browser pane.
     BrowserOpen {
@@ -81,15 +74,10 @@ pub enum Request {
 
     /// `flowmux browser snapshot --pane <id>` — return a JSON snapshot
     /// of the page DOM/a11y tree (for agent automation).
-    BrowserSnapshot {
-        pane: PaneId,
-    },
+    BrowserSnapshot { pane: PaneId },
 
     /// `flowmux browser eval --pane <id> <js>` — evaluate JS, return result.
-    BrowserEval {
-        pane: PaneId,
-        source: String,
-    },
+    BrowserEval { pane: PaneId, source: String },
 
     /// `flowmux import-cookies --from firefox [--domain example.com]`
     /// Imports cookies from a host browser into the in-app browser's
@@ -129,6 +117,51 @@ pub enum RpcError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
-    NotificationRaised { workspace: WorkspaceId, body: String, level: NotificationLevel },
-    PortListening { workspace: WorkspaceId, port: u16 },
+    NotificationRaised {
+        workspace: WorkspaceId,
+        body: String,
+        level: NotificationLevel,
+    },
+    PortListening {
+        workspace: WorkspaceId,
+        port: u16,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_envelope_uses_tagged_newline_json_shape() {
+        let pane = PaneId::new();
+        let env = Envelope {
+            id: 42,
+            payload: Payload::Request(Request::PaneSplit {
+                pane,
+                direction: SplitDirection::Vertical,
+            }),
+        };
+
+        let value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&env).unwrap()).unwrap();
+        assert_eq!(value["id"], 42);
+        assert_eq!(value["kind"], "request");
+        assert_eq!(value["verb"], "pane_split");
+        assert_eq!(value["pane"], pane.to_string());
+        assert_eq!(value["direction"], "vertical");
+    }
+
+    #[test]
+    fn rpc_errors_roundtrip_with_code_and_message() {
+        let err = Response::Error(RpcError::InvalidArgument("bad pane".into()));
+        let json = serde_json::to_string(&err).unwrap();
+        assert!(json.contains(r#""code":"invalid_argument""#));
+
+        let back: Response = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            Response::Error(RpcError::InvalidArgument(message)) if message == "bad pane"
+        ));
+    }
 }

@@ -23,8 +23,7 @@ pub enum ProcError {
 /// `/proc/<pid>/status` PPid edges. O(n_procs); cheap enough to call
 /// per-second on the GTK main loop.
 pub fn descendants(root: u32) -> Result<HashSet<u32>, ProcError> {
-    let mut by_parent: std::collections::HashMap<u32, Vec<u32>> =
-        std::collections::HashMap::new();
+    let mut by_parent: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
     for entry in fs::read_dir("/proc")? {
         let entry = entry?;
         let name = entry.file_name();
@@ -105,9 +104,9 @@ pub fn listening_ports(pids: &HashSet<u32>) -> Result<Vec<u16>, ProcError> {
                 Ok(p) => p,
                 Err(_) => continue,
             };
-            // Walk fields to inode (8th index after st).
-            // sl local rem st tx_q rx_q tr tm_when retransmit uid timeout inode
-            let inode = it.nth(7);
+            // Walk fields to inode.
+            // sl local rem st tx_queue:rx_queue tr:tm_when retrnsmt uid timeout inode
+            let inode = it.nth(5);
             let inode: u64 = match inode.and_then(|s| s.parse().ok()) {
                 Some(i) => i,
                 None => continue,
@@ -159,5 +158,15 @@ mod tests {
         let pid = std::process::id();
         let ds = descendants(pid).unwrap();
         assert!(ds.contains(&pid));
+    }
+
+    #[test]
+    fn listening_ports_reports_current_process_tcp_listener() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let pids = HashSet::from([std::process::id()]);
+
+        let ports = listening_ports(&pids).unwrap();
+        assert!(ports.contains(&port), "expected {port} in {ports:?}");
     }
 }

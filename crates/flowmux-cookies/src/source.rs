@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 use crate::Cookie;
 use std::path::PathBuf;
 
@@ -34,7 +35,9 @@ pub enum Error {
     NoHome,
     #[error("profile not found: {0}")]
     ProfileNotFound(PathBuf),
-    #[error("Chromium-family encrypted values are not supported until libsecret integration lands")]
+    #[error(
+        "Chromium-family encrypted values are not supported until libsecret integration lands"
+    )]
     EncryptedValuesUnsupported,
 }
 
@@ -56,4 +59,35 @@ pub fn discover_sources() -> Vec<Box<dyn Source>> {
         out.push(Box::new(crate::chromium::Chromium::new(id)));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn browser_ids_have_stable_cli_slugs() {
+        assert_eq!(BrowserId::Firefox.slug(), "firefox");
+        assert_eq!(BrowserId::Chrome.slug(), "chrome");
+        assert_eq!(BrowserId::Chromium.slug(), "chromium");
+        assert_eq!(BrowserId::Brave.slug(), "brave");
+        assert_eq!(BrowserId::Edge.slug(), "edge");
+        assert_eq!(BrowserId::Arc.slug(), "arc");
+    }
+
+    #[test]
+    fn discovery_order_matches_cli_listing() {
+        let ids: Vec<_> = discover_sources().into_iter().map(|s| s.id()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                BrowserId::Firefox,
+                BrowserId::Chrome,
+                BrowserId::Chromium,
+                BrowserId::Brave,
+                BrowserId::Edge,
+                BrowserId::Arc,
+            ]
+        );
+    }
 }

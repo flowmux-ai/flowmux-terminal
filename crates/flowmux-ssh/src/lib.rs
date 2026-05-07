@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! SSH workspaces for flowmux.
 //!
 //! Mirrors cmux's documented behavior:
@@ -41,7 +42,8 @@ impl SshTarget {
         let (host, port) = match hostport.rsplit_once(':') {
             Some((h, p)) => (
                 h.to_string(),
-                p.parse::<u16>().map_err(|_| SshError::ParseTarget(spec.into()))?,
+                p.parse::<u16>()
+                    .map_err(|_| SshError::ParseTarget(spec.into()))?,
             ),
             None => (hostport.to_string(), 22),
         };
@@ -97,13 +99,10 @@ impl SshClient {
             inactivity_timeout: Some(Duration::from_secs(60)),
             ..Default::default()
         });
-        let session = russh::client::connect(
-            cfg,
-            (target.host.as_str(), target.port),
-            ClientHandler,
-        )
-        .await
-        .map_err(|e| SshError::Handshake(e.to_string()))?;
+        let session =
+            russh::client::connect(cfg, (target.host.as_str(), target.port), ClientHandler)
+                .await
+                .map_err(|e| SshError::Handshake(e.to_string()))?;
 
         // Authentication path lands once we have a host-key store + agent
         // integration. Holding the open session here is intentional so
@@ -133,5 +132,10 @@ mod tests {
     #[test]
     fn rejects_empty_host() {
         assert!(SshTarget::parse("user@").is_err());
+    }
+
+    #[test]
+    fn rejects_non_numeric_port() {
+        assert!(SshTarget::parse("user@host:ssh").is_err());
     }
 }
