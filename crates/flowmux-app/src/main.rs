@@ -31,6 +31,17 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    // WebKitGTK 6.0의 기본 sandbox는 bwrap + xdg-dbus-proxy를 띄우는데
+    // Ubuntu 24.04의 unprivileged user-namespace AppArmor 제한 환경에서는
+    // bwrap이 'setting up uid map: Permission denied'로 실패해 dbus-proxy
+    // 가 종료 코드 1로 죽고, 곧이어 첫 탭브라우저 생성 시 앱이 강제 종료된다.
+    // 사용자가 별도 AppArmor 프로파일을 설치하지 않아도 동작하도록, 첫
+    // WebView가 만들어지기 전에 sandbox 비활성화 플래그를 세팅한다.
+    // 이미 사용자가 명시적으로 값을 지정한 경우(0/1 무관)는 존중한다.
+    if std::env::var_os("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS", "1");
+    }
+
     let socket = paths::runtime_socket();
     info!(?socket, "flowmux-app starting");
 
