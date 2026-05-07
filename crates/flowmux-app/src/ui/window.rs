@@ -33,6 +33,11 @@ pub struct WindowController {
     bridge: Bridge,
     theme: Arc<ResolvedTheme>,
     notification_log: NotificationLog,
+    /// Tokio runtime handle. The FDO Notifications client (zbus +
+    /// tokio feature) and any other future-needs-tokio work has to
+    /// run on a tokio executor — we can't drive `Connection::session`
+    /// from the glib main loop alone.
+    tokio_handle: tokio::runtime::Handle,
 }
 
 impl WindowController {
@@ -41,6 +46,7 @@ impl WindowController {
         store: StateStore,
         theme: Arc<ResolvedTheme>,
         bridge: Bridge,
+        tokio_handle: tokio::runtime::Handle,
     ) -> Self {
         let focused_pane: FocusedPane = Rc::new(Cell::new(None));
         let notification_log = crate::notifications::new_log();
@@ -124,6 +130,7 @@ impl WindowController {
             bridge,
             theme,
             notification_log,
+            tokio_handle,
         }
     }
 
@@ -157,6 +164,7 @@ impl WindowController {
     pub fn rerender_workspace(&self, ws: &Workspace) {
         self.sidebar.upsert(ws);
         let name = ws.id.to_string();
+        self.pane_registry.borrow_mut().clear_workspace(ws.id);
         let new_widget = self.build_workspace_widget(ws);
         let mut surfaces = self.surfaces.borrow_mut();
         if let Some(old) = surfaces.remove(&ws.id) {
@@ -180,6 +188,7 @@ impl WindowController {
     /// surface is closed).
     pub fn drop_workspace(&self, id: WorkspaceId) {
         self.sidebar.remove(id);
+        self.pane_registry.borrow_mut().clear_workspace(id);
         let mut surfaces = self.surfaces.borrow_mut();
         if let Some(old) = surfaces.remove(&id) {
             self.stack.remove(&old);
@@ -198,7 +207,7 @@ impl WindowController {
         let registry = self.pane_registry.clone();
         glib::idle_add_local_once(move || {
             let r = registry.borrow();
-            if let Some(pane) = r.terminals.get(&leaf_id) {
+            if let Some(pane) = r.active_terminal(leaf_id) {
                 pane.widget.grab_focus();
             }
         });
@@ -207,6 +216,7 @@ impl WindowController {
     fn build_workspace_widget(&self, ws: &Workspace) -> gtk::Widget {
         match ws.surfaces.first() {
             Some(s) => build_surface(
+                ws.id,
                 s,
                 &self.callbacks,
                 self.pane_registry.clone(),
@@ -254,7 +264,7 @@ impl WindowController {
                         let registry = self.pane_registry.clone();
                         glib::idle_add_local_once(move || {
                             let r = registry.borrow();
-                            if let Some(pane) = r.terminals.get(&new_pane) {
+                            if let Some(pane) = r.active_terminal(new_pane) {
                                 pane.widget.grab_focus();
                             }
                         });
@@ -284,18 +294,48 @@ impl WindowController {
             GtkCommand::FocusDirection { from, dir } => {
                 self.focus_in_direction(from, dir);
             }
-            GtkCommand::NewSurface => {
-                let Some(ws_id) = self.store.active_or_first().await else {
-                    return;
-                };
-                if self
-                    .store
-                    .add_terminal_surface(ws_id, std::env::current_dir().ok())
-                    .await
-                    .is_some()
+            GtkCommand::NewSurface { pane } => {
+                let cwd = {
+                    let r = self.pane_registry.borrow();
+                    r.active_terminal(pane).and_then(|term| term.current_dir())
+                }
+                .or_else(|| std::env::current_dir().ok());
+                if let Some((ws_id, _surface)) =
+                    self.store.add_terminal_surface_to_pane(pane, cwd).await
                 {
                     if let Some(ws) = self.store.get_workspace(ws_id).await {
                         self.rerender_workspace(&ws);
+                    }
+                }
+            }
+            GtkCommand::ActivateSurface { pane, surface } => {
+                self.store.set_active_surface(pane, surface).await;
+                self.pane_registry
+                    .borrow_mut()
+                    .activate_surface(pane, surface);
+                let registry = self.pane_registry.clone();
+                glib::idle_add_local_once(move || {
+                    let r = registry.borrow();
+                    if let Some(term) = r.active_terminal(pane) {
+                        term.widget.grab_focus();
+                    }
+                });
+            }
+            GtkCommand::CloseSurface { pane, surface, ack } => {
+                match self.store.close_surface(pane, surface).await {
+                    None => {
+                        let _ = ack.send(Err(format!("surface not found: {surface}")));
+                    }
+                    Some(flowmux_daemon::CloseOutcome::WorkspaceRemoved { workspace }) => {
+                        self.drop_workspace(workspace);
+                        let _ = ack.send(Ok(()));
+                    }
+                    Some(flowmux_daemon::CloseOutcome::PaneRemoved { workspace })
+                    | Some(flowmux_daemon::CloseOutcome::SurfaceRemoved { workspace }) => {
+                        if let Some(ws) = self.store.get_workspace(workspace).await {
+                            self.rerender_workspace(&ws);
+                        }
+                        let _ = ack.send(Ok(()));
                     }
                 }
             }
@@ -309,7 +349,7 @@ impl WindowController {
                     .get()
                     .and_then(|id| {
                         let r = self.pane_registry.borrow();
-                        r.terminals.get(&id).cloned()
+                        r.active_terminal(id).cloned()
                     })
                     .and_then(|p| p.current_dir())
                     .unwrap_or(root);
@@ -394,8 +434,11 @@ impl WindowController {
                 if let Some(ws_id) = self.store.workspace_for_pane(pane).await {
                     self.sidebar.mark_attention(ws_id);
                 }
-                // Fire the FDO desktop notification too.
-                glib::MainContext::default().spawn_local(async move {
+                // Fire the FDO desktop notification through the tokio
+                // runtime — DesktopNotifier wraps zbus which needs a
+                // tokio executor; calling .await on it from glib's
+                // main loop alone silently no-ops.
+                self.tokio_handle.spawn(async move {
                     let n = flowmux_core::Notification {
                         id: flowmux_core::NotificationId::new(),
                         title,
@@ -405,8 +448,13 @@ impl WindowController {
                         created_at: chrono::Utc::now(),
                         read: false,
                     };
-                    if let Ok(notifier) = flowmux_notify::DesktopNotifier::connect().await {
-                        let _ = notifier.send(&n).await;
+                    match flowmux_notify::DesktopNotifier::connect().await {
+                        Ok(notifier) => {
+                            if let Err(e) = notifier.send(&n).await {
+                                tracing::warn!(error = %e, "desktop notify send failed");
+                            }
+                        }
+                        Err(e) => tracing::warn!(error = %e, "desktop notifier connect failed"),
                     }
                 });
             }
@@ -419,7 +467,7 @@ impl WindowController {
             }
             GtkCommand::PaneSendKeys { pane, keys, ack } => {
                 let registry = self.pane_registry.borrow();
-                let res = match registry.terminals.get(&pane) {
+                let res = match registry.active_terminal(pane) {
                     Some(p) => {
                         p.feed(keys.as_bytes());
                         Ok(())
@@ -438,7 +486,7 @@ impl WindowController {
             }
             GtkCommand::BrowserEval { pane, source, ack } => {
                 let registry = self.pane_registry.borrow();
-                match registry.browsers.get(&pane) {
+                match registry.active_browser(pane) {
                     None => {
                         let _ = ack.send(Err(format!("browser pane not found: {pane}")));
                     }
@@ -464,8 +512,8 @@ impl WindowController {
         use gtk::graphene::Rect;
 
         let registry = self.pane_registry.borrow();
-        let from_widget = match registry.terminals.get(&from) {
-            Some(p) => p.widget.clone(),
+        let from_widget = match registry.pane_frame(from) {
+            Some(p) => p,
             None => return,
         };
         let stack = &self.stack;
@@ -478,11 +526,14 @@ impl WindowController {
         );
 
         let mut best: Option<(PaneId, f32)> = None;
-        for (id, pane) in registry.terminals.iter() {
-            if *id == from {
+        for id in registry.pane_ids() {
+            if id == from {
                 continue;
             }
-            let Some(bbox) = pane.widget.compute_bounds(stack) else {
+            let Some(pane) = registry.pane_frame(id) else {
+                continue;
+            };
+            let Some(bbox) = pane.compute_bounds(stack) else {
                 continue;
             };
             let center = (
@@ -502,12 +553,12 @@ impl WindowController {
             }
             let dist = dx * dx + dy * dy;
             if best.map(|(_, d)| dist < d).unwrap_or(true) {
-                best = Some((*id, dist));
+                best = Some((id, dist));
             }
         }
         let _ = Rect::new(0.0, 0.0, 0.0, 0.0); // ensure import used in non-tests path
         if let Some((id, _)) = best {
-            if let Some(pane) = registry.terminals.get(&id) {
+            if let Some(pane) = registry.active_terminal(id) {
                 pane.widget.grab_focus();
             }
         } else {
@@ -599,6 +650,44 @@ fn make_callbacks(focused: FocusedPane, bridge: Bridge) -> PaneCallbacks {
                         .send(GtkCommand::SplitFocused {
                             pane,
                             direction: flowmux_core::SplitDirection::Horizontal,
+                            ack: tx,
+                        })
+                        .await;
+                });
+            }))
+        },
+        on_activate_surface: {
+            let bridge = bridge.clone();
+            Rc::new(RefCell::new(move |pane, surface| {
+                let bridge = bridge.clone();
+                glib::MainContext::default().spawn_local(async move {
+                    let _ = bridge
+                        .tx
+                        .send(GtkCommand::ActivateSurface { pane, surface })
+                        .await;
+                });
+            }))
+        },
+        on_new_surface: {
+            let bridge = bridge.clone();
+            Rc::new(RefCell::new(move |pane| {
+                let bridge = bridge.clone();
+                glib::MainContext::default().spawn_local(async move {
+                    let _ = bridge.tx.send(GtkCommand::NewSurface { pane }).await;
+                });
+            }))
+        },
+        on_close_surface: {
+            let bridge = bridge.clone();
+            Rc::new(RefCell::new(move |pane, surface| {
+                let bridge = bridge.clone();
+                glib::MainContext::default().spawn_local(async move {
+                    let (tx, _rx) = oneshot::channel();
+                    let _ = bridge
+                        .tx
+                        .send(GtkCommand::CloseSurface {
+                            pane,
+                            surface,
                             ack: tx,
                         })
                         .await;

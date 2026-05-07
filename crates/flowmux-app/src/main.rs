@@ -70,6 +70,7 @@ fn main() -> anyhow::Result<()> {
     let store_for_activate = store.clone();
     let rx_for_activate = rx.clone();
     let bridge_for_activate = bridge.clone();
+    let handle_for_activate = rt.handle().clone();
     app.connect_activate(move |app| {
         // Resolve the visual theme once per activation so a config edit
         // picks up after the user re-launches.
@@ -99,6 +100,7 @@ fn main() -> anyhow::Result<()> {
             store_for_activate.clone(),
             theme,
             bridge_for_activate.clone(),
+            handle_for_activate.clone(),
         );
         keybindings::install_actions(
             &controller.window,
