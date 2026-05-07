@@ -1,9 +1,10 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Workspace sidebar (cmux's vertical-tabs left panel).
 //!
 //! Each row shows: workspace name, current branch, linked PR badge
 //! (if any), listening ports, and the latest unread notification body.
-//! Selection emits a callback so the main window can swap the visible
-//! surface stack.
+//! Hovering the row reveals a small X button on the right that closes
+//! the workspace.
 
 use flowmux_core::{PrState, Workspace, WorkspaceId};
 use gtk::prelude::*;
@@ -15,10 +16,15 @@ pub struct Sidebar {
     pub root: gtk::ScrolledWindow,
     pub list: gtk::ListBox,
     rows: Rc<RefCell<Vec<(WorkspaceId, gtk::ListBoxRow)>>>,
+    on_close: Rc<dyn Fn(WorkspaceId)>,
 }
 
 impl Sidebar {
-    pub fn new<F: Fn(WorkspaceId) + 'static>(on_select: F) -> Self {
+    pub fn new<S, C>(on_select: S, on_close: C) -> Self
+    where
+        S: Fn(WorkspaceId) + 'static,
+        C: Fn(WorkspaceId) + 'static,
+    {
         let list = gtk::ListBox::new();
         list.set_selection_mode(gtk::SelectionMode::Single);
         list.add_css_class("navigation-sidebar");
@@ -45,17 +51,18 @@ impl Sidebar {
             }
         });
 
-        Self { root: scroll, list, rows }
+        let on_close: Rc<dyn Fn(WorkspaceId)> = Rc::new(on_close);
+        Self { root: scroll, list, rows, on_close }
     }
 
     pub fn upsert(&self, ws: &Workspace) {
         let mut rows = self.rows.borrow_mut();
         if let Some((_, row)) = rows.iter().find(|(id, _)| *id == ws.id).cloned() {
-            row.set_child(Some(&row_widget(ws)));
+            row.set_child(Some(&row_widget(ws, self.on_close.clone())));
             return;
         }
         let row = gtk::ListBoxRow::new();
-        row.set_child(Some(&row_widget(ws)));
+        row.set_child(Some(&row_widget(ws, self.on_close.clone())));
         self.list.append(&row);
         rows.push((ws.id, row));
     }
@@ -69,12 +76,50 @@ impl Sidebar {
     }
 }
 
-fn row_widget(ws: &Workspace) -> gtk::Widget {
+fn row_widget(ws: &Workspace, on_close: Rc<dyn Fn(WorkspaceId)>) -> gtk::Widget {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    row.set_margin_top(6);
+    row.set_margin_bottom(6);
+    row.set_margin_start(10);
+    row.set_margin_end(6);
+
+    let meta = build_meta_column(ws);
+    meta.set_hexpand(true);
+    row.append(&meta);
+
+    let close_btn = gtk::Button::from_icon_name("window-close-symbolic");
+    close_btn.add_css_class("flat");
+    close_btn.add_css_class("circular");
+    close_btn.set_tooltip_text(Some("Close tab"));
+    close_btn.set_valign(gtk::Align::Center);
+    // Hidden by default — opacity 0 keeps the row layout stable when
+    // the button shows/hides on hover. `can-target = false` blocks
+    // accidental clicks while invisible.
+    close_btn.set_opacity(0.0);
+    close_btn.set_can_target(false);
+    let id = ws.id;
+    let on_close_for_click = on_close.clone();
+    close_btn.connect_clicked(move |_| on_close_for_click(id));
+    row.append(&close_btn);
+
+    let motion = gtk::EventControllerMotion::new();
+    let btn_enter = close_btn.clone();
+    motion.connect_enter(move |_, _, _| {
+        btn_enter.set_opacity(1.0);
+        btn_enter.set_can_target(true);
+    });
+    let btn_leave = close_btn.clone();
+    motion.connect_leave(move |_| {
+        btn_leave.set_opacity(0.0);
+        btn_leave.set_can_target(false);
+    });
+    row.add_controller(motion);
+
+    row.upcast()
+}
+
+fn build_meta_column(ws: &Workspace) -> gtk::Box {
     let v = gtk::Box::new(gtk::Orientation::Vertical, 2);
-    v.set_margin_top(8);
-    v.set_margin_bottom(8);
-    v.set_margin_start(10);
-    v.set_margin_end(10);
 
     let title = gtk::Label::new(Some(&ws.name));
     title.set_halign(gtk::Align::Start);
@@ -116,5 +161,5 @@ fn row_widget(ws: &Workspace) -> gtk::Widget {
         v.append(&p);
     }
 
-    v.upcast()
+    v
 }

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! flowmux GUI entrypoint.
 //!
 //! Boots libadwaita, brings up the IPC server and the state store on a
@@ -6,6 +7,8 @@
 
 mod bridge;
 mod ipc_handler;
+mod keybindings;
+mod theme;
 mod ui;
 
 use adw::prelude::*;
@@ -61,10 +64,46 @@ fn main() -> anyhow::Result<()> {
 
     // GTK runs on the main thread.
     let app = adw::Application::builder().application_id(APP_ID).build();
+    keybindings::install_accels(&app);
     let store_for_activate = store.clone();
     let rx_for_activate = rx.clone();
+    let bridge_for_activate = bridge.clone();
     app.connect_activate(move |app| {
-        let controller = WindowController::new(app, store_for_activate.clone());
+        // Resolve the visual theme once per activation so a config edit
+        // picks up after the user re-launches.
+        let theme = std::sync::Arc::new(theme::ResolvedTheme::load());
+
+        // Force libadwaita's color scheme to match our background.
+        let style = adw::StyleManager::default();
+        if theme.is_dark() {
+            style.set_color_scheme(adw::ColorScheme::ForceDark);
+        } else {
+            style.set_color_scheme(adw::ColorScheme::ForceLight);
+        }
+
+        // Install the global CSS for pane frames + sidebar tint.
+        let provider = gtk::CssProvider::new();
+        provider.load_from_string(&theme.css());
+        if let Some(display) = gtk::gdk::Display::default() {
+            gtk::style_context_add_provider_for_display(
+                &display,
+                &provider,
+                gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+            );
+        }
+
+        let controller = WindowController::new(
+            app,
+            store_for_activate.clone(),
+            theme,
+            bridge_for_activate.clone(),
+        );
+        keybindings::install_actions(
+            &controller.window,
+            bridge_for_activate.clone(),
+            controller.focused_pane.clone(),
+            controller.pane_registry(),
+        );
         spawn_dispatch_loop(rx_for_activate.clone(), controller.clone());
         let controller_for_init = controller.clone();
         gtk::glib::MainContext::default().spawn_local(async move {

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! In-memory state with debounced disk persistence.
 //!
 //! Every mutation goes through this store, which writes to
@@ -6,14 +7,24 @@
 //! boot.
 
 use flowmux_core::{
-    Pane, PaneContent, PaneId, SplitDirection, Surface, SurfaceId, SurfaceKind, Workspace,
-    WorkspaceId,
+    Pane, PaneContent, PaneId, RemoveOutcome, SplitDirection, Surface, SurfaceId, SurfaceKind,
+    Workspace, WorkspaceId,
 };
 use flowmux_state::State;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, Notify};
 use tracing::{error, info};
+
+#[derive(Debug, Clone, Copy)]
+pub enum CloseOutcome {
+    /// One leaf removed; the surface still exists.
+    PaneRemoved { workspace: WorkspaceId },
+    /// The leaf was the last in its surface; the surface was removed.
+    SurfaceRemoved { workspace: WorkspaceId },
+    /// That was the last surface; the entire workspace was removed.
+    WorkspaceRemoved { workspace: WorkspaceId },
+}
 
 #[derive(Clone)]
 pub struct StateStore {
@@ -155,6 +166,80 @@ impl StateStore {
         None
     }
 
+    /// Remove the leaf pane and collapse its split. Returns the
+    /// workspace it lived in. If the workspace's last surface becomes
+    /// empty as a result, the surface is dropped; if the workspace's
+    /// last surface is dropped, the workspace itself is removed too.
+    /// Returns `None` if the pane wasn't found.
+    pub async fn close_pane(&self, target: PaneId) -> Option<CloseOutcome> {
+        let mut s = self.inner.lock().await;
+        for ws_idx in 0..s.workspaces.len() {
+            let mut surface_to_drop = None;
+            for surf_idx in 0..s.workspaces[ws_idx].surfaces.len() {
+                let surface = &mut s.workspaces[ws_idx].surfaces[surf_idx];
+                let root = std::mem::replace(
+                    &mut surface.root_pane,
+                    Pane::Leaf {
+                        id: PaneId::new(),
+                        content: PaneContent::Terminal { pid: None },
+                    },
+                );
+                match root.remove_leaf(target) {
+                    RemoveOutcome::EntirelyRemoved => {
+                        surface_to_drop = Some(surf_idx);
+                        break;
+                    }
+                    RemoveOutcome::Replaced(new_root) => {
+                        surface.root_pane = new_root;
+                        let ws_id = s.workspaces[ws_idx].id;
+                        drop(s);
+                        self.mark_dirty();
+                        return Some(CloseOutcome::PaneRemoved { workspace: ws_id });
+                    }
+                    RemoveOutcome::NotFound(unchanged) => {
+                        surface.root_pane = unchanged;
+                    }
+                }
+            }
+            if let Some(idx) = surface_to_drop {
+                s.workspaces[ws_idx].surfaces.remove(idx);
+                let ws_id = s.workspaces[ws_idx].id;
+                if s.workspaces[ws_idx].surfaces.is_empty() {
+                    s.workspaces.remove(ws_idx);
+                    s.workspace_order.retain(|id| *id != ws_id);
+                    if s.active_workspace == Some(ws_id) {
+                        s.active_workspace = s.workspace_order.first().copied();
+                    }
+                    drop(s);
+                    self.mark_dirty();
+                    return Some(CloseOutcome::WorkspaceRemoved { workspace: ws_id });
+                }
+                drop(s);
+                self.mark_dirty();
+                return Some(CloseOutcome::SurfaceRemoved { workspace: ws_id });
+            }
+        }
+        None
+    }
+
+    /// Remove an entire workspace. Used by the sidebar's X close
+    /// button. Returns true if a workspace with that id existed.
+    pub async fn remove_workspace(&self, id: WorkspaceId) -> bool {
+        let mut s = self.inner.lock().await;
+        let before = s.workspaces.len();
+        s.workspaces.retain(|w| w.id != id);
+        s.workspace_order.retain(|x| *x != id);
+        if s.active_workspace == Some(id) {
+            s.active_workspace = s.workspace_order.first().copied();
+        }
+        let removed = s.workspaces.len() < before;
+        drop(s);
+        if removed {
+            self.mark_dirty();
+        }
+        removed
+    }
+
     pub async fn workspace_for_pane(&self, pane: PaneId) -> Option<WorkspaceId> {
         let s = self.inner.lock().await;
         for ws in &s.workspaces {
@@ -182,6 +267,31 @@ impl StateStore {
     pub async fn active_or_first(&self) -> Option<WorkspaceId> {
         let s = self.inner.lock().await;
         s.active_workspace.or_else(|| s.workspaces.first().map(|w| w.id))
+    }
+
+    /// Add a fresh terminal surface to a workspace. Used by the
+    /// "new surface" keyboard shortcut.
+    pub async fn add_terminal_surface(
+        &self,
+        workspace: WorkspaceId,
+        cwd: Option<std::path::PathBuf>,
+    ) -> Option<SurfaceId> {
+        let mut s = self.inner.lock().await;
+        let w = s.workspaces.iter_mut().find(|w| w.id == workspace)?;
+        let surface_id = SurfaceId::new();
+        let pane_id = PaneId::new();
+        w.surfaces.push(Surface {
+            id: surface_id,
+            kind: SurfaceKind::Terminal { shell: None, cwd },
+            title: format!("surface-{}", w.surfaces.len() + 1),
+            root_pane: Pane::Leaf {
+                id: pane_id,
+                content: PaneContent::Terminal { pid: None },
+            },
+        });
+        drop(s);
+        self.mark_dirty();
+        Some(surface_id)
     }
 
     /// Add a browser surface to a workspace and return its id.
