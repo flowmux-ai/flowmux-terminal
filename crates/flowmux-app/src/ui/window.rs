@@ -72,12 +72,20 @@ impl WindowController {
         let pane_registry: Rc<RefCell<PaneRegistry>> = Rc::new(RefCell::new(PaneRegistry::default()));
         let callbacks = make_callbacks(focused_pane.clone());
 
-        let split = adw::OverlaySplitView::builder()
-            .min_sidebar_width(240.0)
-            .max_sidebar_width(360.0)
-            .show_sidebar(true)
-            .sidebar(&sidebar.root)
-            .content(&stack)
+        // gtk::Paned lets the user drag the divider between the
+        // sidebar and the content stack — replaces the fixed-width
+        // adw::OverlaySplitView so people can hide / widen the tab
+        // list to taste.
+        sidebar.root.set_size_request(160, -1);
+        let split = gtk::Paned::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .start_child(&sidebar.root)
+            .end_child(&stack)
+            .resize_start_child(false)
+            .resize_end_child(true)
+            .shrink_start_child(false)
+            .shrink_end_child(false)
+            .position(260)
             .build();
 
         let toolbar = adw::ToolbarView::new();
