@@ -284,7 +284,20 @@ impl WindowController {
                 }
             }
             GtkCommand::NewWorkspace { root } => {
-                let id = self.store.create_workspace(None, root).await;
+                // Prefer the focused pane's cwd so a new tab opens
+                // where the user was working, falling back to the
+                // root the caller suggested (typically the daemon's
+                // own current_dir) and finally to "/".
+                let resolved = self
+                    .focused_pane
+                    .get()
+                    .and_then(|id| {
+                        let r = self.pane_registry.borrow();
+                        r.terminals.get(&id).cloned()
+                    })
+                    .and_then(|p| p.current_dir())
+                    .unwrap_or(root);
+                let id = self.store.create_workspace(None, resolved).await;
                 if let Some(ws) = self.store.get_workspace(id).await {
                     self.render_workspace(&ws);
                 }
