@@ -357,20 +357,32 @@ fn color_bar(color: &str) -> gtk::Widget {
 }
 
 fn build_meta_column(ws: &Workspace) -> gtk::Box {
-    let v = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    // Two-line layout:
+    //   line 1: workspace name (bold heading)
+    //   line 2: last folder name [+ " / branch" if a git repo]  (dim caption)
+    // Optional 3rd line: linked PR badge / listening ports if present.
+    let v = gtk::Box::new(gtk::Orientation::Vertical, 1);
 
     let title = gtk::Label::new(Some(&ws.name));
     title.set_halign(gtk::Align::Start);
+    title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    title.set_xalign(0.0);
     title.add_css_class("heading");
     v.append(&title);
 
+    let subtitle_text = subtitle_for(ws);
+    let subtitle = gtk::Label::new(Some(&subtitle_text));
+    subtitle.set_halign(gtk::Align::Start);
+    subtitle.set_xalign(0.0);
+    subtitle.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+    subtitle.add_css_class("caption");
+    subtitle.add_css_class("dim-label");
+    v.append(&subtitle);
+
+    // Auxiliary line: PR badge + listening ports (kept compact).
+    let aux = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let mut has_aux = false;
     if let Some(git) = &ws.git {
-        let h = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        let branch = gtk::Label::new(Some(&format!("⎇ {}", git.branch)));
-        branch.set_halign(gtk::Align::Start);
-        branch.add_css_class("dim-label");
-        branch.add_css_class("caption");
-        h.append(&branch);
         if let Some(pr) = &git.linked_pr {
             let badge = gtk::Label::new(Some(&format!("#{}", pr.number)));
             badge.add_css_class("caption");
@@ -380,11 +392,10 @@ fn build_meta_column(ws: &Workspace) -> gtk::Box {
                 PrState::Closed => "warning",
                 PrState::Draft => "dim-label",
             });
-            h.append(&badge);
+            aux.append(&badge);
+            has_aux = true;
         }
-        v.append(&h);
     }
-
     if !ws.listening_ports.is_empty() {
         let ports = ws
             .listening_ports
@@ -392,12 +403,28 @@ fn build_meta_column(ws: &Workspace) -> gtk::Box {
             .map(u16::to_string)
             .collect::<Vec<_>>()
             .join(", ");
-        let p = gtk::Label::new(Some(&format!(":: {ports}")));
-        p.set_halign(gtk::Align::Start);
+        let p = gtk::Label::new(Some(&format!(":{ports}")));
         p.add_css_class("caption");
         p.add_css_class("dim-label");
-        v.append(&p);
+        aux.append(&p);
+        has_aux = true;
+    }
+    if has_aux {
+        v.append(&aux);
     }
 
     v
+}
+
+/// Build the second line: "<last-folder>" or "<last-folder> / <branch>".
+fn subtitle_for(ws: &Workspace) -> String {
+    let last_folder = ws
+        .root_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_else(|| ws.root_dir.to_str().unwrap_or(""));
+    match ws.git.as_ref() {
+        Some(g) => format!("{last_folder} / {}", g.branch),
+        None => last_folder.to_string(),
+    }
 }
