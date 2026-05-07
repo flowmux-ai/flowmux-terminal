@@ -3,7 +3,7 @@
 //! stack and exposes a [`WindowController`] that routes [`GtkCommand`]
 //! values from the bridge to widget operations.
 
-use crate::bridge::{Bridge, FocusDir, GtkCommand};
+use crate::bridge::{Bridge, FocusDir, GtkCommand, WsNav};
 use crate::keybindings::FocusedPane;
 use tokio::sync::oneshot;
 use crate::theme::ResolvedTheme;
@@ -296,6 +296,31 @@ impl WindowController {
                 }
                 let _ = ack.send(());
             }
+            GtkCommand::FocusWorkspaceDir { dir } => {
+                let snap = self.store.snapshot().await;
+                if snap.workspace_order.is_empty() {
+                    return;
+                }
+                let active = snap
+                    .active_workspace
+                    .or_else(|| snap.workspace_order.first().copied());
+                let Some(active) = active else { return };
+                let cur = snap.workspace_order.iter().position(|x| *x == active).unwrap_or(0);
+                let len = snap.workspace_order.len();
+                let next = match dir {
+                    WsNav::Next => (cur + 1) % len,
+                    WsNav::Prev => (cur + len - 1) % len,
+                };
+                let target = snap.workspace_order[next];
+                self.activate_workspace(target).await;
+            }
+            GtkCommand::FocusWorkspaceAt { idx } => {
+                let snap = self.store.snapshot().await;
+                let target_idx = (idx as usize).saturating_sub(1);
+                if let Some(id) = snap.workspace_order.get(target_idx).copied() {
+                    self.activate_workspace(id).await;
+                }
+            }
             GtkCommand::PaneSendKeys { pane, keys, ack } => {
                 let registry = self.pane_registry.borrow();
                 let res = match registry.terminals.get(&pane) {
@@ -387,6 +412,19 @@ impl WindowController {
             }
         } else {
             tracing::debug!(?dir, "no pane in that direction");
+        }
+    }
+
+    /// Bring `id`'s workspace to the foreground, persist it as the
+    /// active workspace, and grab focus on its first leaf so keyboard
+    /// shortcuts work immediately.
+    async fn activate_workspace(&self, id: WorkspaceId) {
+        if self.surfaces.borrow().contains_key(&id) {
+            self.stack.set_visible_child_name(&id.to_string());
+        }
+        self.store.set_active_workspace(Some(id)).await;
+        if let Some(ws) = self.store.get_workspace(id).await {
+            self.focus_first_leaf_of(&ws);
         }
     }
 

@@ -237,6 +237,18 @@ impl StateStore {
         None
     }
 
+    /// Mark `id` as the focused workspace so the next launch starts
+    /// there. No-op if the id isn't in the workspace list.
+    pub async fn set_active_workspace(&self, id: Option<WorkspaceId>) {
+        let mut s = self.inner.lock().await;
+        let valid = id.map(|i| s.workspaces.iter().any(|w| w.id == i)).unwrap_or(true);
+        if valid {
+            s.active_workspace = id;
+        }
+        drop(s);
+        self.mark_dirty();
+    }
+
     /// Set a workspace's sidebar color. Returns true on success.
     pub async fn set_workspace_color(&self, id: WorkspaceId, color: String) -> bool {
         let mut s = self.inner.lock().await;

@@ -15,6 +15,10 @@ use tokio::sync::oneshot;
 #[derive(Debug, Clone, Copy)]
 pub enum FocusDir { Left, Right, Up, Down }
 
+/// Direction for tab-list cyclic navigation.
+#[derive(Debug, Clone, Copy)]
+pub enum WsNav { Next, Prev }
+
 /// One-way commands from tokio → GTK main loop. Each variant carries a
 /// `oneshot::Sender` for replies if the caller needs the result.
 #[derive(Debug)]
@@ -85,6 +89,15 @@ pub enum GtkCommand {
         id: WorkspaceId,
         color: String,
         ack: oneshot::Sender<()>,
+    },
+    /// Cycle to the previous / next workspace in sidebar order.
+    FocusWorkspaceDir {
+        dir: WsNav,
+    },
+    /// Jump straight to the N-th workspace (1-indexed; clamped to
+    /// what currently exists).
+    FocusWorkspaceAt {
+        idx: u8,
     },
     /// A notification was raised on a pane (from VTE OSC signal). Update
     /// the pane border / sidebar badge.
