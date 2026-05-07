@@ -1,12 +1,26 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Workspace sidebar (cmux's vertical-tabs left panel).
+//! Workspace sidebar (flowmux's vertical-tabs left panel).
 //!
-//! Each row shows: workspace name, current branch, linked PR badge
-//! (if any), listening ports, and the latest unread notification body.
-//! Hovering the row reveals a small X button on the right that closes
-//! the workspace.
+//! Layout:
+//!
+//! ```text
+//! +----------------+
+//! | [+] [bell]     |  toolbar
+//! +----------------+
+//! | • workspace 1  |
+//! | • workspace 2  |  scrollable workspace list
+//! | • workspace 3  |
+//! +----------------+
+//! ```
+//!
+//! The toolbar's `+` adds a workspace (Ctrl+Shift+T equivalent) and
+//! the bell shows an in-process notification transcript. The list
+//! rows expose hover-X close, color bar, right-click menu (rename /
+//! recolor / close).
 
-use flowmux_core::{PrState, Workspace, WorkspaceId};
+use crate::bridge::{Bridge, GtkCommand};
+use crate::notifications::{NotificationEntry, NotificationLog};
+use flowmux_core::{NotificationLevel, PrState, Workspace, WorkspaceId};
 use gtk::glib::variant::ToVariant;
 use gtk::prelude::*;
 use std::cell::RefCell;
@@ -14,14 +28,22 @@ use std::rc::Rc;
 
 #[derive(Clone)]
 pub struct Sidebar {
-    pub root: gtk::ScrolledWindow,
+    pub root: gtk::Box,
     pub list: gtk::ListBox,
     rows: Rc<RefCell<Vec<(WorkspaceId, gtk::ListBoxRow)>>>,
     on_close: Rc<dyn Fn(WorkspaceId)>,
+    bell_button: gtk::MenuButton,
+    bell_popover: gtk::Popover,
+    notification_log: NotificationLog,
 }
 
 impl Sidebar {
-    pub fn new<S, C>(on_select: S, on_close: C) -> Self
+    pub fn new<S, C>(
+        on_select: S,
+        on_close: C,
+        bridge: Bridge,
+        notification_log: NotificationLog,
+    ) -> Self
     where
         S: Fn(WorkspaceId) + 'static,
         C: Fn(WorkspaceId) + 'static,
@@ -53,7 +75,66 @@ impl Sidebar {
         });
 
         let on_close: Rc<dyn Fn(WorkspaceId)> = Rc::new(on_close);
-        Self { root: scroll, list, rows, on_close }
+
+        // ---- Top toolbar ----
+        let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        toolbar.set_margin_top(6);
+        toolbar.set_margin_bottom(6);
+        toolbar.set_margin_start(8);
+        toolbar.set_margin_end(8);
+
+        let new_btn = gtk::Button::from_icon_name("list-add-symbolic");
+        new_btn.add_css_class("flat");
+        new_btn.set_tooltip_text(Some("New tab (Ctrl+Shift+T)"));
+        let bridge_for_new = bridge.clone();
+        new_btn.connect_clicked(move |_| {
+            let bridge = bridge_for_new.clone();
+            gtk::glib::MainContext::default().spawn_local(async move {
+                let root = std::env::current_dir()
+                    .unwrap_or_else(|_| std::path::PathBuf::from("/"));
+                let _ = bridge.tx.send(GtkCommand::NewWorkspace { root }).await;
+            });
+        });
+        toolbar.append(&new_btn);
+
+        let bell_button = gtk::MenuButton::new();
+        bell_button.set_icon_name("notifications-symbolic");
+        bell_button.add_css_class("flat");
+        bell_button.set_tooltip_text(Some("Notifications"));
+        bell_button.set_hexpand(true);
+        bell_button.set_halign(gtk::Align::End);
+        let bell_popover = gtk::Popover::new();
+        bell_popover.set_size_request(320, -1);
+        bell_button.set_popover(Some(&bell_popover));
+
+        let log_for_show = notification_log.clone();
+        let popover_for_show = bell_popover.clone();
+        let bell_for_show = bell_button.clone();
+        bell_popover.connect_show(move |_| {
+            // Render fresh contents on every open and mark all entries
+            // seen so subsequent opens dim the existing ones.
+            popover_for_show.set_child(Some(&render_notification_list(&log_for_show)));
+            for entry in log_for_show.borrow_mut().iter_mut() {
+                entry.seen = true;
+            }
+            bell_for_show.remove_css_class("accent");
+        });
+        toolbar.append(&bell_button);
+
+        // ---- Outer vbox: toolbar + list ----
+        let root_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        root_box.append(&toolbar);
+        root_box.append(&scroll);
+
+        Self {
+            root: root_box,
+            list,
+            rows,
+            on_close,
+            bell_button,
+            bell_popover,
+            notification_log,
+        }
     }
 
     pub fn upsert(&self, ws: &Workspace) {
@@ -75,6 +156,86 @@ impl Sidebar {
             rows.swap_remove(idx);
         }
     }
+
+    /// Indicate a fresh notification by tinting the bell button.
+    /// Cleared next time the popover opens (which marks all seen).
+    pub fn bump_notification_badge(&self) {
+        if !self.bell_button.has_css_class("accent") {
+            self.bell_button.add_css_class("accent");
+        }
+        // Refresh the popover content if it happens to be visible so
+        // the new entry shows immediately.
+        if self.bell_popover.is_visible() {
+            self.bell_popover
+                .set_child(Some(&render_notification_list(&self.notification_log)));
+        }
+    }
+}
+
+fn render_notification_list(log: &NotificationLog) -> gtk::Widget {
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_hscrollbar_policy(gtk::PolicyType::Never);
+    scroll.set_min_content_height(160);
+    scroll.set_max_content_height(420);
+    scroll.set_propagate_natural_height(true);
+
+    let list = gtk::ListBox::new();
+    list.set_selection_mode(gtk::SelectionMode::None);
+    list.add_css_class("boxed-list");
+
+    let entries = log.borrow();
+    if entries.is_empty() {
+        let empty = gtk::Label::new(Some("No notifications yet."));
+        empty.set_margin_top(20);
+        empty.set_margin_bottom(20);
+        empty.add_css_class("dim-label");
+        scroll.set_child(Some(&empty));
+        return scroll.upcast();
+    }
+
+    // Newest at top.
+    for entry in entries.iter().rev() {
+        list.append(&notification_row(entry));
+    }
+    scroll.set_child(Some(&list));
+    scroll.upcast()
+}
+
+fn notification_row(entry: &NotificationEntry) -> gtk::Widget {
+    let v = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    v.set_margin_top(8);
+    v.set_margin_bottom(8);
+    v.set_margin_start(10);
+    v.set_margin_end(10);
+
+    let title = gtk::Label::new(Some(&entry.title));
+    title.set_halign(gtk::Align::Start);
+    title.add_css_class("heading");
+    let body = gtk::Label::new(Some(&entry.body));
+    body.set_halign(gtk::Align::Start);
+    body.set_wrap(true);
+    body.set_max_width_chars(40);
+    let when = gtk::Label::new(Some(&format_time(&entry.created_at)));
+    when.set_halign(gtk::Align::Start);
+    when.add_css_class("caption");
+    when.add_css_class("dim-label");
+
+    if entry.seen {
+        v.set_opacity(0.55);
+    }
+    if matches!(entry.level, NotificationLevel::AttentionNeeded | NotificationLevel::Error) {
+        title.add_css_class("accent");
+    }
+
+    v.append(&title);
+    v.append(&body);
+    v.append(&when);
+    v.upcast()
+}
+
+fn format_time(ts: &chrono::DateTime<chrono::Utc>) -> String {
+    let local: chrono::DateTime<chrono::Local> = (*ts).into();
+    local.format("%H:%M:%S").to_string()
 }
 
 fn row_widget(ws: &Workspace, on_close: Rc<dyn Fn(WorkspaceId)>) -> gtk::Widget {
@@ -84,8 +245,6 @@ fn row_widget(ws: &Workspace, on_close: Rc<dyn Fn(WorkspaceId)>) -> gtk::Widget 
     row.set_margin_start(4);
     row.set_margin_end(6);
 
-    // Left-edge color bar — distinct hue per workspace so multiple
-    // tabs stay visually separable at a glance.
     if let Some(color) = ws.color.as_deref() {
         row.append(&color_bar(color));
     }
@@ -100,9 +259,6 @@ fn row_widget(ws: &Workspace, on_close: Rc<dyn Fn(WorkspaceId)>) -> gtk::Widget 
     close_btn.add_css_class("circular");
     close_btn.set_tooltip_text(Some("Close tab"));
     close_btn.set_valign(gtk::Align::Center);
-    // Hidden by default — opacity 0 keeps the row layout stable when
-    // the button shows/hides on hover. `can-target = false` blocks
-    // accidental clicks while invisible.
     close_btn.set_opacity(0.0);
     close_btn.set_can_target(false);
     let id = ws.id;
@@ -123,7 +279,6 @@ fn row_widget(ws: &Workspace, on_close: Rc<dyn Fn(WorkspaceId)>) -> gtk::Widget 
     });
     row.add_controller(motion);
 
-    // Right-click → context menu (Change tab name, Close tab).
     let click = gtk::GestureClick::new();
     click.set_button(gtk::gdk::BUTTON_SECONDARY);
     let row_for_click = row.clone();
@@ -169,8 +324,6 @@ fn row_widget(ws: &Workspace, on_close: Rc<dyn Fn(WorkspaceId)>) -> gtk::Widget 
     row.upcast()
 }
 
-/// 4-pixel rounded vertical color strip drawn with Cairo so the
-/// color is fully data-driven (no per-row CSS provider).
 fn color_bar(color: &str) -> gtk::Widget {
     let bar = gtk::DrawingArea::new();
     bar.set_size_request(4, -1);
@@ -186,7 +339,6 @@ fn color_bar(color: &str) -> gtk::Widget {
             rgba.blue() as f64,
             rgba.alpha() as f64,
         );
-        // Rounded corners at top/bottom.
         let r = 2.0;
         let w = w as f64;
         let h = h as f64;

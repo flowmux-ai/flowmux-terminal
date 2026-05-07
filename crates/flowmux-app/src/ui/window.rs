@@ -5,6 +5,7 @@
 
 use crate::bridge::{Bridge, FocusDir, GtkCommand, WsNav};
 use crate::keybindings::FocusedPane;
+use crate::notifications::{NotificationEntry, NotificationLog};
 use tokio::sync::oneshot;
 use crate::theme::ResolvedTheme;
 use crate::ui::sidebar::Sidebar;
@@ -30,6 +31,7 @@ pub struct WindowController {
     callbacks: PaneCallbacks,
     store: StateStore,
     theme: Arc<ResolvedTheme>,
+    notification_log: NotificationLog,
 }
 
 impl WindowController {
@@ -40,6 +42,7 @@ impl WindowController {
         bridge: Bridge,
     ) -> Self {
         let focused_pane: FocusedPane = Rc::new(Cell::new(None));
+        let notification_log = crate::notifications::new_log();
         let stack = gtk::Stack::new();
         stack.set_transition_type(gtk::StackTransitionType::Crossfade);
         stack.set_hexpand(true);
@@ -67,7 +70,7 @@ impl WindowController {
                 let _ = rx.await;
             });
         };
-        let sidebar = Sidebar::new(on_select, on_close);
+        let sidebar = Sidebar::new(on_select, on_close, bridge.clone(), notification_log.clone());
 
         let pane_registry: Rc<RefCell<PaneRegistry>> = Rc::new(RefCell::new(PaneRegistry::default()));
         let callbacks = make_callbacks(focused_pane.clone());
@@ -112,6 +115,7 @@ impl WindowController {
             callbacks,
             store,
             theme,
+            notification_log,
         }
     }
 
@@ -321,6 +325,16 @@ impl WindowController {
                 };
                 let target = snap.workspace_order[next];
                 self.activate_workspace(target).await;
+            }
+            GtkCommand::AddNotification { title, body, level } => {
+                self.notification_log.borrow_mut().push(NotificationEntry {
+                    title,
+                    body,
+                    level,
+                    created_at: chrono::Utc::now(),
+                    seen: false,
+                });
+                self.sidebar.bump_notification_badge();
             }
             GtkCommand::FocusWorkspaceAt { idx } => {
                 let snap = self.store.snapshot().await;

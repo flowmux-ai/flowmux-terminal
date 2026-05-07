@@ -1,8 +1,10 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 [package]
 name = "flowmux-app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 description = "GTK4 + libadwaita main application for flowmux."
 
 # Inline cargo-deb metadata so `cargo deb -p flowmux-app` produces a
@@ -19,6 +21,7 @@ assets = [
     ["../../resources/desktop/com.flowmux.App.desktop", "usr/share/applications/", "644"],
     ["../../LICENSE", "usr/share/doc/flowmux/LICENSE", "644"],
     ["../../NOTICE",  "usr/share/doc/flowmux/NOTICE",  "644"],
+    ["../../THIRD_PARTY_LICENSES.md", "usr/share/doc/flowmux/THIRD_PARTY_LICENSES.md", "644"],
 ]
 
 [[bin]]
@@ -42,6 +45,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 async-channel = "2"
+chrono = { workspace = true }
 
 gtk = { package = "gtk4", version = "0.9", features = ["v4_12"] }
 adw = { package = "libadwaita", version = "0.7", features = ["v1_5"] }

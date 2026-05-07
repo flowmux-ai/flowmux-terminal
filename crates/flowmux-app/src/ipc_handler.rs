@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! GUI-aware IPC handler.
 //!
 //! Wraps `flowmux_daemon::DaemonHandler` and intercepts the verbs that
@@ -241,8 +242,31 @@ impl Handler for GuiHandler {
                     }
                 }
 
+                Request::Notify { pane, ref title, ref body, level } => {
+                    // Tee to the GUI's in-process notification log so
+                    // the sidebar bell popover sees it. The desktop
+                    // toast still goes out through DaemonHandler.
+                    let _ = self
+                        .bridge
+                        .tx
+                        .send(GtkCommand::AddNotification {
+                            title: title.clone(),
+                            body: body.clone(),
+                            level,
+                        })
+                        .await;
+                    self.inner
+                        .handle(Request::Notify {
+                            pane,
+                            title: title.clone(),
+                            body: body.clone(),
+                            level,
+                        })
+                        .await
+                }
+
                 // Everything else is fully GUI-independent: ping, list,
-                // notify, ssh — delegate.
+                // notify (delegated above), ssh — delegate.
                 _ => self.inner.handle(req).await,
             }
         })

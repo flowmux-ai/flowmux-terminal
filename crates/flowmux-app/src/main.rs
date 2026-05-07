@@ -8,6 +8,7 @@
 mod bridge;
 mod ipc_handler;
 mod keybindings;
+mod notifications;
 mod theme;
 mod ui;
 

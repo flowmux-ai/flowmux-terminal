@@ -8,7 +8,7 @@
 //! them via `glib::MainContext::spawn_local` and dispatches into the
 //! window controller.
 
-use flowmux_core::{PaneId, SplitDirection, WorkspaceId};
+use flowmux_core::{NotificationLevel, PaneId, SplitDirection, WorkspaceId};
 use std::path::PathBuf;
 use tokio::sync::oneshot;
 
@@ -89,6 +89,14 @@ pub enum GtkCommand {
         id: WorkspaceId,
         color: String,
         ack: oneshot::Sender<()>,
+    },
+    /// Append a notification to the in-process log shown in the
+    /// sidebar's bell popover. flowmux-notify still delivers the real
+    /// desktop notification through D-Bus; this is the GUI tee.
+    AddNotification {
+        title: String,
+        body: String,
+        level: NotificationLevel,
     },
     /// Cycle to the previous / next workspace in sidebar order.
     FocusWorkspaceDir {
