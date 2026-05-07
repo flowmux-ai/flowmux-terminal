@@ -361,8 +361,10 @@ const DND_MIME: &str = "application/x-flowmux-workspace-id";
 fn attach_dnd_handlers(row: &gtk::ListBoxRow, id: WorkspaceId, bridge: Bridge, rows: RowsCell) {
     let drag_source = gtk::DragSource::new();
     drag_source.set_actions(gtk::gdk::DragAction::MOVE);
+    let id_for_prepare = id;
     drag_source.connect_prepare(move |_, _, _| {
-        let payload = id.to_string();
+        tracing::debug!(workspace = %id_for_prepare, "sidebar drag prepare");
+        let payload = id_for_prepare.to_string();
         let bytes = gtk::glib::Bytes::from_owned(payload.into_bytes());
         Some(gtk::gdk::ContentProvider::for_bytes(DND_MIME, &bytes))
     });
@@ -400,15 +402,19 @@ fn attach_dnd_handlers(row: &gtk::ListBoxRow, id: WorkspaceId, bridge: Bridge, r
     drop_target.connect_drop(move |_, value, _x, y| {
         row_for_drop.remove_css_class("flowmux-drop-hover");
         let Ok(bytes) = value.get::<gtk::glib::Bytes>() else {
+            tracing::warn!("sidebar drop: payload was not Bytes — DropTarget type mismatch");
             return false;
         };
         let Ok(payload) = std::str::from_utf8(&bytes) else {
+            tracing::warn!("sidebar drop: payload not UTF-8");
             return false;
         };
         let Ok(source_id) = payload.parse::<WorkspaceId>() else {
+            tracing::warn!(payload = %payload, "sidebar drop: payload not a WorkspaceId");
             return false;
         };
         if source_id == target_id {
+            tracing::debug!(workspace = %source_id, "sidebar drop: target == source, ignoring");
             return false;
         }
 
@@ -442,17 +448,34 @@ fn attach_dnd_handlers(row: &gtk::ListBoxRow, id: WorkspaceId, bridge: Bridge, r
         };
 
         if new_index == source_idx {
+            tracing::debug!(
+                workspace = %source_id,
+                new_index,
+                "sidebar drop: index unchanged after computation"
+            );
             return false;
         }
 
+        tracing::info!(
+            source = %source_id,
+            target = %target_id,
+            source_idx,
+            target_idx,
+            new_index,
+            above,
+            "sidebar reorder: sending ReorderWorkspace"
+        );
         let tx = bridge.tx.clone();
         gtk::glib::MainContext::default().spawn_local(async move {
-            let _ = tx
+            if let Err(e) = tx
                 .send(GtkCommand::ReorderWorkspace {
                     id: source_id,
                     target_index: new_index,
                 })
-                .await;
+                .await
+            {
+                tracing::warn!(error = %e, "sidebar reorder: bridge send failed");
+            }
         });
         true
     });

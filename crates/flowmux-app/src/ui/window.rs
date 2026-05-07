@@ -569,19 +569,27 @@ impl WindowController {
                 target_index,
                 ack,
             } => {
+                tracing::info!(%pane, %surface, target_index, "ReorderSurface dispatch start");
                 // store 측 reorder가 변화 없음(None)을 반환하면 GTK 위젯도
                 // 그대로 둔다. 위젯 reorder는 메인 스레드의 PaneRegistry가
                 // 갖고 있는 탭바 gtk::Box와 surface_tabs 인덱스를 모두
                 // 동시에 업데이트해야 일관성이 깨지지 않는다.
-                if self
+                let store_result = self
                     .store
                     .reorder_surface_in_pane(pane, surface, target_index)
-                    .await
-                    .is_some()
-                {
+                    .await;
+                if store_result.is_some() {
                     self.pane_registry
                         .borrow_mut()
                         .reorder_surface_widget(pane, surface, target_index);
+                    tracing::info!(%pane, %surface, target_index, "ReorderSurface applied");
+                } else {
+                    tracing::warn!(
+                        %pane,
+                        %surface,
+                        target_index,
+                        "ReorderSurface store update returned None (no-op or unknown surface)"
+                    );
                 }
                 let _ = ack.send(Ok(()));
             }
@@ -683,8 +691,17 @@ impl WindowController {
                 let _ = ack.send(());
             }
             GtkCommand::ReorderWorkspace { id, target_index } => {
-                if self.store.reorder_workspace(id, target_index).await {
+                tracing::info!(workspace = %id, target_index, "ReorderWorkspace dispatch start");
+                let store_result = self.store.reorder_workspace(id, target_index).await;
+                if store_result {
                     self.sidebar.reorder(id, target_index);
+                    tracing::info!(workspace = %id, target_index, "ReorderWorkspace applied");
+                } else {
+                    tracing::warn!(
+                        workspace = %id,
+                        target_index,
+                        "ReorderWorkspace store update returned false (no-op or unknown id)"
+                    );
                 }
             }
             GtkCommand::ShowRenameDialog { id } => {

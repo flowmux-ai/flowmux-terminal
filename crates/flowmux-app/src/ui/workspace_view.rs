@@ -538,25 +538,32 @@ fn attach_tab_dnd_handlers(
     drop_target.connect_drop(move |_, value, x, _y| {
         tab_for_drop.remove_css_class("flowmux-pane-tab-drop-hover");
         let Ok(bytes) = value.get::<gtk::glib::Bytes>() else {
+            tracing::warn!("tab drop: payload was not Bytes — DropTarget type mismatch");
             return false;
         };
         let Ok(payload) = std::str::from_utf8(&bytes) else {
+            tracing::warn!("tab drop: payload not UTF-8");
             return false;
         };
         let Some((src_pane_str, src_surface_str)) = payload.split_once('|') else {
+            tracing::warn!(payload = %payload, "tab drop: payload missing '|' separator");
             return false;
         };
         let Ok(src_pane) = src_pane_str.parse::<PaneId>() else {
+            tracing::warn!(s = %src_pane_str, "tab drop: payload pane id invalid");
             return false;
         };
         let Ok(src_surface) = src_surface_str.parse::<SurfaceId>() else {
+            tracing::warn!(s = %src_surface_str, "tab drop: payload surface id invalid");
             return false;
         };
         // pane 간 이동은 지원하지 않는다 — 같은 pane의 다른 탭 위에서만 reorder.
         if src_pane != target_pane {
+            tracing::debug!(%src_pane, %target_pane, "tab drop: cross-pane drop ignored");
             return false;
         }
         if src_surface == target_surface {
+            tracing::debug!(%src_surface, "tab drop: dropped onto self, ignoring");
             return false;
         }
 
@@ -597,6 +604,15 @@ fn attach_tab_dnd_handlers(
             target_index
         };
 
+        tracing::info!(
+            %target_pane,
+            %src_surface,
+            %target_surface,
+            target_index,
+            final_index,
+            after,
+            "tab drop: dispatching reorder callback"
+        );
         (reorder_cb.borrow_mut())(target_pane, src_surface, final_index);
         true
     });
