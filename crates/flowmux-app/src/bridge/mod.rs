@@ -13,11 +13,19 @@ use std::path::PathBuf;
 use tokio::sync::oneshot;
 
 #[derive(Debug, Clone, Copy)]
-pub enum FocusDir { Left, Right, Up, Down }
+pub enum FocusDir {
+    Left,
+    Right,
+    Up,
+    Down,
+}
 
 /// Direction for tab-list cyclic navigation.
 #[derive(Debug, Clone, Copy)]
-pub enum WsNav { Next, Prev }
+pub enum WsNav {
+    Next,
+    Prev,
+}
 
 /// One-way commands from tokio → GTK main loop. Each variant carries a
 /// `oneshot::Sender` for replies if the caller needs the result.
@@ -57,10 +65,7 @@ pub enum GtkCommand {
         ack: oneshot::Sender<Result<(), String>>,
     },
     /// Move keyboard focus to the nearest pane in `dir`.
-    FocusDirection {
-        from: PaneId,
-        dir: FocusDir,
-    },
+    FocusDirection { from: PaneId, dir: FocusDir },
     /// Open a brand-new terminal surface in the active workspace.
     /// (Reserved for the planned horizontal surface-tab bar; currently
     /// unused since the sidebar shows workspaces, not surfaces.)
@@ -69,9 +74,7 @@ pub enum GtkCommand {
     /// Create a brand-new workspace and add it to the sidebar. This is
     /// what Ctrl+Shift+T binds to in our model — matching how ghostty's
     /// `cmd+t = new_tab` adds a visible top-level navigation entry.
-    NewWorkspace {
-        root: std::path::PathBuf,
-    },
+    NewWorkspace { root: std::path::PathBuf },
     /// Remove a workspace entirely (sidebar row + stack page + state).
     /// Triggered by the hover X button on a sidebar row.
     RemoveWorkspace {
@@ -90,6 +93,12 @@ pub enum GtkCommand {
         color: String,
         ack: oneshot::Sender<()>,
     },
+    /// Open the 'Change tab name' dialog for `id`. Bridge-driven so
+    /// the dialog runs in the window dispatch loop where the parent
+    /// window reference is in scope.
+    ShowRenameDialog { id: WorkspaceId },
+    /// Open the color picker dialog for `id`.
+    ShowColorDialog { id: WorkspaceId },
     /// Append a notification to the in-process log shown in the
     /// sidebar's bell popover. flowmux-notify still delivers the real
     /// desktop notification through D-Bus; this is the GUI tee.
@@ -100,19 +109,12 @@ pub enum GtkCommand {
     },
     /// An AI agent (claude / codex / opencode) just exited inside
     /// `pane`. agent_watch::install fires this once per disappearance.
-    AgentCompleted {
-        pane: PaneId,
-        name: String,
-    },
+    AgentCompleted { pane: PaneId, name: String },
     /// Cycle to the previous / next workspace in sidebar order.
-    FocusWorkspaceDir {
-        dir: WsNav,
-    },
+    FocusWorkspaceDir { dir: WsNav },
     /// Jump straight to the N-th workspace (1-indexed; clamped to
     /// what currently exists).
-    FocusWorkspaceAt {
-        idx: u8,
-    },
+    FocusWorkspaceAt { idx: u8 },
     /// A notification was raised on a pane (from VTE OSC signal). Update
     /// the pane border / sidebar badge.
     #[allow(dead_code)]

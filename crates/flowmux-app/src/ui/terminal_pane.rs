@@ -105,8 +105,12 @@ pub struct PaneCallbacks {
     pub on_bell: Rc<RefCell<dyn FnMut(PaneId)>>,
     pub on_child_exited: Rc<RefCell<dyn FnMut(PaneId, i32)>>,
     pub on_focus: Rc<RefCell<dyn FnMut(PaneId)>>,
-    /// Triggered by the per-pane close button on the Overlay.
+    /// Per-pane close button on the Overlay + 'Close Pane' menu item.
     pub on_close_pane: Rc<RefCell<dyn FnMut(PaneId)>>,
+    /// Right-click menu 'Split Right'.
+    pub on_split_right: Rc<RefCell<dyn FnMut(PaneId)>>,
+    /// Right-click menu 'Split Down'.
+    pub on_split_down: Rc<RefCell<dyn FnMut(PaneId)>>,
 }
 
 impl TerminalPane {
@@ -161,31 +165,74 @@ impl TerminalPane {
         }
 
         // Right-click — show a context menu with Split / Close.
+        // We deliberately avoid PopoverMenu+win.* actions because the
+        // action lookup chain can drop through PopoverMenu's internal
+        // implementation in some GTK versions; instead we use a plain
+        // Popover with Buttons whose connect_clicked closures fire
+        // the per-pane callbacks directly through the bridge.
         {
             let on_focus = callbacks.on_focus.clone();
+            let on_split_right = callbacks.on_split_right.clone();
+            let on_split_down = callbacks.on_split_down.clone();
+            let on_close_pane = callbacks.on_close_pane.clone();
             let id = id;
             let term_widget = term.clone();
             let click = gtk::GestureClick::new();
             click.set_button(gtk::gdk::BUTTON_SECONDARY);
             click.connect_pressed(move |gesture, _n_press, x, y| {
-                // Right-click also focuses the pane so the action handler
-                // sees the right pane id.
                 (on_focus.borrow_mut())(id);
 
-                let menu = gtk::gio::Menu::new();
-                menu.append(Some("Split Right"), Some("win.split-right"));
-                menu.append(Some("Split Down"),  Some("win.split-down"));
-                let close = gtk::gio::Menu::new();
-                close.append(Some("Close Pane"), Some("win.close-surface"));
-                menu.append_section(None, &close);
+                let popover = gtk::Popover::new();
+                let v = gtk::Box::new(gtk::Orientation::Vertical, 0);
+                v.set_margin_top(4);
+                v.set_margin_bottom(4);
 
-                let popover = gtk::PopoverMenu::from_model(Some(&menu));
+                let mk = |label: &str| -> gtk::Button {
+                    let b = gtk::Button::with_label(label);
+                    b.add_css_class("flat");
+                    b.set_halign(gtk::Align::Fill);
+                    b.set_hexpand(true);
+                    if let Some(label) = b.child().and_downcast::<gtk::Label>() {
+                        label.set_xalign(0.0);
+                    }
+                    b
+                };
+
+                let split_r = mk("Split Right");
+                let pop = popover.clone();
+                let cb = on_split_right.clone();
+                split_r.connect_clicked(move |_| {
+                    pop.popdown();
+                    (cb.borrow_mut())(id);
+                });
+                v.append(&split_r);
+
+                let split_d = mk("Split Down");
+                let pop = popover.clone();
+                let cb = on_split_down.clone();
+                split_d.connect_clicked(move |_| {
+                    pop.popdown();
+                    (cb.borrow_mut())(id);
+                });
+                v.append(&split_d);
+
+                v.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+
+                let close_p = mk("Close Pane");
+                let pop = popover.clone();
+                let cb = on_close_pane.clone();
+                close_p.connect_clicked(move |_| {
+                    pop.popdown();
+                    (cb.borrow_mut())(id);
+                });
+                v.append(&close_p);
+
+                popover.set_child(Some(&v));
                 popover.set_parent(&term_widget);
                 popover.set_has_arrow(false);
                 let rect = gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1);
                 popover.set_pointing_to(Some(&rect));
                 popover.set_position(gtk::PositionType::Bottom);
-                // Unparent on close so we don't leak per-click PopoverMenus.
                 popover.connect_closed(|p| p.unparent());
                 popover.popup();
                 gesture.set_state(gtk::EventSequenceState::Claimed);

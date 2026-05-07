@@ -37,6 +37,7 @@ pub struct Sidebar {
     bell_popover: gtk::Popover,
     notification_log: NotificationLog,
     attentions: Rc<RefCell<HashSet<WorkspaceId>>>,
+    bridge: Bridge,
 }
 
 impl Sidebar {
@@ -67,11 +68,8 @@ impl Sidebar {
         let attentions_for_cb = attentions.clone();
         list.connect_row_selected(move |_, selected| {
             if let Some(row) = selected {
-                if let Some((id, list_row)) = rows_for_cb
-                    .borrow()
-                    .iter()
-                    .find(|(_, r)| r == row)
-                    .cloned()
+                if let Some((id, list_row)) =
+                    rows_for_cb.borrow().iter().find(|(_, r)| r == row).cloned()
                 {
                     // Selecting a row clears any attention indicator
                     // it had been carrying.
@@ -99,8 +97,8 @@ impl Sidebar {
         new_btn.connect_clicked(move |_| {
             let bridge = bridge_for_new.clone();
             gtk::glib::MainContext::default().spawn_local(async move {
-                let root = std::env::current_dir()
-                    .unwrap_or_else(|_| std::path::PathBuf::from("/"));
+                let root =
+                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
                 let _ = bridge.tx.send(GtkCommand::NewWorkspace { root }).await;
             });
         });
@@ -144,17 +142,26 @@ impl Sidebar {
             bell_popover,
             notification_log,
             attentions,
+            bridge,
         }
     }
 
     pub fn upsert(&self, ws: &Workspace) {
         let mut rows = self.rows.borrow_mut();
         if let Some((_, row)) = rows.iter().find(|(id, _)| *id == ws.id).cloned() {
-            row.set_child(Some(&row_widget(ws, self.on_close.clone())));
+            row.set_child(Some(&row_widget(
+                ws,
+                self.on_close.clone(),
+                self.bridge.clone(),
+            )));
             return;
         }
         let row = gtk::ListBoxRow::new();
-        row.set_child(Some(&row_widget(ws, self.on_close.clone())));
+        row.set_child(Some(&row_widget(
+            ws,
+            self.on_close.clone(),
+            self.bridge.clone(),
+        )));
         self.list.append(&row);
         rows.push((ws.id, row));
     }
@@ -171,7 +178,13 @@ impl Sidebar {
     /// Cleared automatically when the user selects the row.
     pub fn mark_attention(&self, id: WorkspaceId) {
         if self.attentions.borrow_mut().insert(id) {
-            if let Some((_, row)) = self.rows.borrow().iter().find(|(wid, _)| *wid == id).cloned() {
+            if let Some((_, row)) = self
+                .rows
+                .borrow()
+                .iter()
+                .find(|(wid, _)| *wid == id)
+                .cloned()
+            {
                 row.add_css_class("flowmux-attention");
             }
         }
@@ -243,7 +256,10 @@ fn notification_row(entry: &NotificationEntry) -> gtk::Widget {
     if entry.seen {
         v.set_opacity(0.55);
     }
-    if matches!(entry.level, NotificationLevel::AttentionNeeded | NotificationLevel::Error) {
+    if matches!(
+        entry.level,
+        NotificationLevel::AttentionNeeded | NotificationLevel::Error
+    ) {
         title.add_css_class("accent");
     }
 
@@ -258,7 +274,7 @@ fn format_time(ts: &chrono::DateTime<chrono::Utc>) -> String {
     local.format("%H:%M:%S").to_string()
 }
 
-fn row_widget(ws: &Workspace, on_close: Rc<dyn Fn(WorkspaceId)>) -> gtk::Widget {
+fn row_widget(ws: &Workspace, on_close: Rc<dyn Fn(WorkspaceId)>, bridge: Bridge) -> gtk::Widget {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     row.set_margin_top(6);
     row.set_margin_bottom(6);
@@ -299,37 +315,68 @@ fn row_widget(ws: &Workspace, on_close: Rc<dyn Fn(WorkspaceId)>) -> gtk::Widget 
     });
     row.add_controller(motion);
 
+    // Right-click context menu — plain Popover + Button rows whose
+    // click closures send the right GtkCommand directly through the
+    // bridge. We deliberately avoid PopoverMenu+win.* actions because
+    // the action lookup chain has been observed to drop through some
+    // GTK versions, leaving the menu items inert.
     let click = gtk::GestureClick::new();
     click.set_button(gtk::gdk::BUTTON_SECONDARY);
     let row_for_click = row.clone();
+    let on_close_for_menu = on_close.clone();
     click.connect_pressed(move |gesture, _n_press, x, y| {
-        let menu = gtk::gio::Menu::new();
-        let id_variant = id.to_string().to_variant();
+        let popover = gtk::Popover::new();
+        let v = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        v.set_margin_top(4);
+        v.set_margin_bottom(4);
 
-        let rename_item = gtk::gio::MenuItem::new(Some("Change tab name"), None);
-        rename_item.set_action_and_target_value(
-            Some("win.rename-workspace"),
-            Some(&id_variant),
-        );
-        menu.append_item(&rename_item);
+        let mk = |label: &str| -> gtk::Button {
+            let b = gtk::Button::with_label(label);
+            b.add_css_class("flat");
+            b.set_halign(gtk::Align::Fill);
+            b.set_hexpand(true);
+            if let Some(label) = b.child().and_downcast::<gtk::Label>() {
+                label.set_xalign(0.0);
+            }
+            b
+        };
 
-        let color_item = gtk::gio::MenuItem::new(Some("Change color…"), None);
-        color_item.set_action_and_target_value(
-            Some("win.recolor-workspace"),
-            Some(&id_variant),
-        );
-        menu.append_item(&color_item);
+        let rename_btn = mk("Change tab name");
+        let bridge_for_rename = bridge.clone();
+        let pop = popover.clone();
+        rename_btn.connect_clicked(move |_| {
+            pop.popdown();
+            let bridge = bridge_for_rename.clone();
+            gtk::glib::MainContext::default().spawn_local(async move {
+                let _ = bridge.tx.send(GtkCommand::ShowRenameDialog { id }).await;
+            });
+        });
+        v.append(&rename_btn);
 
-        let close_section = gtk::gio::Menu::new();
-        let close_item = gtk::gio::MenuItem::new(Some("Close tab"), None);
-        close_item.set_action_and_target_value(
-            Some("win.close-tab"),
-            Some(&id_variant),
-        );
-        close_section.append_item(&close_item);
-        menu.append_section(None, &close_section);
+        let color_btn = mk("Change color…");
+        let bridge_for_color = bridge.clone();
+        let pop = popover.clone();
+        color_btn.connect_clicked(move |_| {
+            pop.popdown();
+            let bridge = bridge_for_color.clone();
+            gtk::glib::MainContext::default().spawn_local(async move {
+                let _ = bridge.tx.send(GtkCommand::ShowColorDialog { id }).await;
+            });
+        });
+        v.append(&color_btn);
 
-        let popover = gtk::PopoverMenu::from_model(Some(&menu));
+        v.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+
+        let close_btn = mk("Close tab");
+        let on_close_clone = on_close_for_menu.clone();
+        let pop = popover.clone();
+        close_btn.connect_clicked(move |_| {
+            pop.popdown();
+            on_close_clone(id);
+        });
+        v.append(&close_btn);
+
+        popover.set_child(Some(&v));
         popover.set_parent(&row_for_click);
         popover.set_has_arrow(false);
         let rect = gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1);
@@ -369,7 +416,13 @@ fn color_bar(color: &str) -> gtk::Widget {
         cr.line_to(w, h - r);
         cr.arc(w - r, h - r, r, 0.0, 0.5 * std::f64::consts::PI);
         cr.line_to(r, h);
-        cr.arc(r, h - r, r, 0.5 * std::f64::consts::PI, std::f64::consts::PI);
+        cr.arc(
+            r,
+            h - r,
+            r,
+            0.5 * std::f64::consts::PI,
+            std::f64::consts::PI,
+        );
         cr.close_path();
         let _ = cr.fill();
     });

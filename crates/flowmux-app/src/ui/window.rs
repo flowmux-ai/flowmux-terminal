@@ -6,7 +6,6 @@
 use crate::bridge::{Bridge, FocusDir, GtkCommand, WsNav};
 use crate::keybindings::FocusedPane;
 use crate::notifications::{NotificationEntry, NotificationLog};
-use tokio::sync::oneshot;
 use crate::theme::ResolvedTheme;
 use crate::ui::sidebar::Sidebar;
 use crate::ui::terminal_pane::PaneCallbacks;
@@ -19,6 +18,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
+use tokio::sync::oneshot;
 
 #[derive(Clone)]
 pub struct WindowController {
@@ -30,6 +30,7 @@ pub struct WindowController {
     pane_registry: Rc<RefCell<PaneRegistry>>,
     callbacks: PaneCallbacks,
     store: StateStore,
+    bridge: Bridge,
     theme: Arc<ResolvedTheme>,
     notification_log: NotificationLog,
 }
@@ -70,9 +71,15 @@ impl WindowController {
                 let _ = rx.await;
             });
         };
-        let sidebar = Sidebar::new(on_select, on_close, bridge.clone(), notification_log.clone());
+        let sidebar = Sidebar::new(
+            on_select,
+            on_close,
+            bridge.clone(),
+            notification_log.clone(),
+        );
 
-        let pane_registry: Rc<RefCell<PaneRegistry>> = Rc::new(RefCell::new(PaneRegistry::default()));
+        let pane_registry: Rc<RefCell<PaneRegistry>> =
+            Rc::new(RefCell::new(PaneRegistry::default()));
         let callbacks = make_callbacks(focused_pane.clone(), bridge.clone());
 
         // gtk::Paned lets the user drag the divider between the
@@ -114,6 +121,7 @@ impl WindowController {
             pane_registry,
             callbacks,
             store,
+            bridge,
             theme,
             notification_log,
         }
@@ -124,9 +132,7 @@ impl WindowController {
             let status = adw::StatusPage::builder()
                 .icon_name("utilities-terminal-symbolic")
                 .title("flowmux")
-                .description(
-                    "No workspaces yet — open one with: flowmux workspace new --root .",
-                )
+                .description("No workspaces yet — open one with: flowmux workspace new --root .")
                 .build();
             self.stack.add_named(&status, Some("__empty"));
             self.stack.set_visible_child_name("__empty");
@@ -184,7 +190,10 @@ impl WindowController {
     /// grab keyboard focus on it. Deferred to the next idle so the
     /// widget tree is realized first.
     fn focus_first_leaf_of(&self, ws: &Workspace) {
-        let leaf = ws.surfaces.first().and_then(|s| s.root_pane.first_leaf_id());
+        let leaf = ws
+            .surfaces
+            .first()
+            .and_then(|s| s.root_pane.first_leaf_id());
         let Some(leaf_id) = leaf else { return };
         let registry = self.pane_registry.clone();
         glib::idle_add_local_once(move || {
@@ -209,7 +218,12 @@ impl WindowController {
 
     pub async fn dispatch(&self, cmd: GtkCommand) {
         match cmd {
-            GtkCommand::WorkspaceCreated { id, name: _, root: _, ack } => {
+            GtkCommand::WorkspaceCreated {
+                id,
+                name: _,
+                root: _,
+                ack,
+            } => {
                 // Pull the authoritative workspace (with the store's
                 // pane ids) instead of fabricating new ones — otherwise
                 // `focused_pane` gets a UUID that doesn't exist in the
@@ -225,7 +239,11 @@ impl WindowController {
                 }
                 let _ = ack.send(());
             }
-            GtkCommand::SplitFocused { pane, direction, ack } => {
+            GtkCommand::SplitFocused {
+                pane,
+                direction,
+                ack,
+            } => {
                 match self.store.split_pane(pane, direction).await {
                     Some((ws_id, new_pane)) => {
                         if let Some(ws) = self.store.get_workspace(ws_id).await {
@@ -247,24 +265,22 @@ impl WindowController {
                     }
                 }
             }
-            GtkCommand::CloseFocused { pane, ack } => {
-                match self.store.close_pane(pane).await {
-                    None => {
-                        let _ = ack.send(Err(format!("pane not found: {pane}")));
-                    }
-                    Some(flowmux_daemon::CloseOutcome::PaneRemoved { workspace })
-                    | Some(flowmux_daemon::CloseOutcome::SurfaceRemoved { workspace }) => {
-                        if let Some(ws) = self.store.get_workspace(workspace).await {
-                            self.rerender_workspace(&ws);
-                        }
-                        let _ = ack.send(Ok(()));
-                    }
-                    Some(flowmux_daemon::CloseOutcome::WorkspaceRemoved { workspace }) => {
-                        self.drop_workspace(workspace);
-                        let _ = ack.send(Ok(()));
-                    }
+            GtkCommand::CloseFocused { pane, ack } => match self.store.close_pane(pane).await {
+                None => {
+                    let _ = ack.send(Err(format!("pane not found: {pane}")));
                 }
-            }
+                Some(flowmux_daemon::CloseOutcome::PaneRemoved { workspace })
+                | Some(flowmux_daemon::CloseOutcome::SurfaceRemoved { workspace }) => {
+                    if let Some(ws) = self.store.get_workspace(workspace).await {
+                        self.rerender_workspace(&ws);
+                    }
+                    let _ = ack.send(Ok(()));
+                }
+                Some(flowmux_daemon::CloseOutcome::WorkspaceRemoved { workspace }) => {
+                    self.drop_workspace(workspace);
+                    let _ = ack.send(Ok(()));
+                }
+            },
             GtkCommand::FocusDirection { from, dir } => {
                 self.focus_in_direction(from, dir);
             }
@@ -321,6 +337,15 @@ impl WindowController {
                 }
                 let _ = ack.send(());
             }
+            GtkCommand::ShowRenameDialog { id } => {
+                if let Some(ws) = self.store.get_workspace(id).await {
+                    show_rename_dialog(&self.window, id, &ws.name, self.bridge.clone());
+                }
+            }
+            GtkCommand::ShowColorDialog { id } => {
+                let current = self.store.get_workspace(id).await.and_then(|w| w.color);
+                show_color_dialog(&self.window, id, current.as_deref(), self.bridge.clone());
+            }
             GtkCommand::FocusWorkspaceDir { dir } => {
                 let snap = self.store.snapshot().await;
                 if snap.workspace_order.is_empty() {
@@ -330,7 +355,11 @@ impl WindowController {
                     .active_workspace
                     .or_else(|| snap.workspace_order.first().copied());
                 let Some(active) = active else { return };
-                let cur = snap.workspace_order.iter().position(|x| *x == active).unwrap_or(0);
+                let cur = snap
+                    .workspace_order
+                    .iter()
+                    .position(|x| *x == active)
+                    .unwrap_or(0);
                 let len = snap.workspace_order.len();
                 let next = match dir {
                     WsNav::Next => (cur + 1) % len,
@@ -440,7 +469,9 @@ impl WindowController {
             None => return,
         };
         let stack = &self.stack;
-        let Some(from_bbox) = from_widget.compute_bounds(stack) else { return };
+        let Some(from_bbox) = from_widget.compute_bounds(stack) else {
+            return;
+        };
         let from_center = (
             from_bbox.x() + from_bbox.width() / 2.0,
             from_bbox.y() + from_bbox.height() / 2.0,
@@ -451,7 +482,9 @@ impl WindowController {
             if *id == from {
                 continue;
             }
-            let Some(bbox) = pane.widget.compute_bounds(stack) else { continue };
+            let Some(bbox) = pane.widget.compute_bounds(stack) else {
+                continue;
+            };
             let center = (
                 bbox.x() + bbox.width() / 2.0,
                 bbox.y() + bbox.height() / 2.0,
@@ -525,16 +558,53 @@ fn make_callbacks(focused: FocusedPane, bridge: Bridge) -> PaneCallbacks {
             tracing::debug!(%pane, "pane focused");
             focused.set(Some(pane));
         })),
-        on_close_pane: Rc::new(RefCell::new(move |pane| {
+        on_close_pane: {
             let bridge = bridge.clone();
-            glib::MainContext::default().spawn_local(async move {
-                let (tx, _rx) = oneshot::channel();
-                let _ = bridge
-                    .tx
-                    .send(GtkCommand::CloseFocused { pane, ack: tx })
-                    .await;
-            });
-        })),
+            Rc::new(RefCell::new(move |pane| {
+                let bridge = bridge.clone();
+                glib::MainContext::default().spawn_local(async move {
+                    let (tx, _rx) = oneshot::channel();
+                    let _ = bridge
+                        .tx
+                        .send(GtkCommand::CloseFocused { pane, ack: tx })
+                        .await;
+                });
+            }))
+        },
+        on_split_right: {
+            let bridge = bridge.clone();
+            Rc::new(RefCell::new(move |pane| {
+                let bridge = bridge.clone();
+                glib::MainContext::default().spawn_local(async move {
+                    let (tx, _rx) = oneshot::channel();
+                    let _ = bridge
+                        .tx
+                        .send(GtkCommand::SplitFocused {
+                            pane,
+                            direction: flowmux_core::SplitDirection::Vertical,
+                            ack: tx,
+                        })
+                        .await;
+                });
+            }))
+        },
+        on_split_down: {
+            let bridge = bridge.clone();
+            Rc::new(RefCell::new(move |pane| {
+                let bridge = bridge.clone();
+                glib::MainContext::default().spawn_local(async move {
+                    let (tx, _rx) = oneshot::channel();
+                    let _ = bridge
+                        .tx
+                        .send(GtkCommand::SplitFocused {
+                            pane,
+                            direction: flowmux_core::SplitDirection::Horizontal,
+                            ack: tx,
+                        })
+                        .await;
+                });
+            }))
+        },
     }
 }
 
@@ -549,9 +619,7 @@ fn make_callbacks(focused: FocusedPane, bridge: Bridge) -> PaneCallbacks {
 /// `webkit6 = { version = "0.4", features = ["soup3"] }` and replacing
 /// the body below with `manager.add_cookie(...)` calls is the only
 /// change needed when we ship cookie import to users.
-fn inject_cookies_into_webkit(
-    cookies: &[flowmux_cookies::Cookie],
-) -> Result<usize, String> {
+fn inject_cookies_into_webkit(cookies: &[flowmux_cookies::Cookie]) -> Result<usize, String> {
     let mut count = 0;
     for c in cookies {
         tracing::debug!(host = %c.host, name = %c.name, "would inject cookie");
@@ -569,7 +637,6 @@ fn register_workspace_actions(
     bridge: &Bridge,
 ) {
     use gtk::gio;
-    use gtk::glib::variant::ToVariant;
 
     // win.rename-workspace(<uuid>) — opens an adw::AlertDialog with an
     // Entry for the new name and OK/Cancel responses.
@@ -579,14 +646,22 @@ fn register_workspace_actions(
     let rename = gio::ActionEntry::builder("rename-workspace")
         .parameter_type(Some(gtk::glib::VariantTy::STRING))
         .activate(move |_, _, param| {
-            let Some(id_str) = param.and_then(|p| p.str().map(String::from)) else { return };
-            let Ok(id) = id_str.parse::<WorkspaceId>() else { return };
+            let Some(id_str) = param.and_then(|p| p.str().map(String::from)) else {
+                return;
+            };
+            let Ok(id) = id_str.parse::<WorkspaceId>() else {
+                return;
+            };
             let store = store_for_rename.clone();
             let bridge = bridge_for_rename.clone();
             let window_weak = window_weak.clone();
             glib::MainContext::default().spawn_local(async move {
-                let Some(ws) = store.get_workspace(id).await else { return };
-                let Some(window) = window_weak.upgrade() else { return };
+                let Some(ws) = store.get_workspace(id).await else {
+                    return;
+                };
+                let Some(window) = window_weak.upgrade() else {
+                    return;
+                };
                 show_rename_dialog(&window, id, &ws.name, bridge);
             });
         })
@@ -600,14 +675,20 @@ fn register_workspace_actions(
     let recolor = gio::ActionEntry::builder("recolor-workspace")
         .parameter_type(Some(gtk::glib::VariantTy::STRING))
         .activate(move |_, _, param| {
-            let Some(id_str) = param.and_then(|p| p.str().map(String::from)) else { return };
-            let Ok(id) = id_str.parse::<WorkspaceId>() else { return };
+            let Some(id_str) = param.and_then(|p| p.str().map(String::from)) else {
+                return;
+            };
+            let Ok(id) = id_str.parse::<WorkspaceId>() else {
+                return;
+            };
             let store = store_for_color.clone();
             let bridge = bridge_for_color.clone();
             let window_weak = window_weak2.clone();
             glib::MainContext::default().spawn_local(async move {
                 let current = store.get_workspace(id).await.and_then(|w| w.color);
-                let Some(window) = window_weak.upgrade() else { return };
+                let Some(window) = window_weak.upgrade() else {
+                    return;
+                };
                 show_color_dialog(&window, id, current.as_deref(), bridge);
             });
         })
@@ -620,12 +701,19 @@ fn register_workspace_actions(
     let close_tab = gio::ActionEntry::builder("close-tab")
         .parameter_type(Some(gtk::glib::VariantTy::STRING))
         .activate(move |_, _, param| {
-            let Some(id_str) = param.and_then(|p| p.str().map(String::from)) else { return };
-            let Ok(id) = id_str.parse::<WorkspaceId>() else { return };
+            let Some(id_str) = param.and_then(|p| p.str().map(String::from)) else {
+                return;
+            };
+            let Ok(id) = id_str.parse::<WorkspaceId>() else {
+                return;
+            };
             let bridge = bridge_for_close.clone();
             glib::MainContext::default().spawn_local(async move {
                 let (tx, rx) = oneshot::channel();
-                let _ = bridge.tx.send(GtkCommand::RemoveWorkspace { id, ack: tx }).await;
+                let _ = bridge
+                    .tx
+                    .send(GtkCommand::RemoveWorkspace { id, ack: tx })
+                    .await;
                 let _ = rx.await;
             });
         })
@@ -662,7 +750,11 @@ fn show_rename_dialog(
                     let (tx, _rx) = oneshot::channel();
                     let _ = bridge
                         .tx
-                        .send(GtkCommand::RenameWorkspace { id, name: new_name, ack: tx })
+                        .send(GtkCommand::RenameWorkspace {
+                            id,
+                            name: new_name,
+                            ack: tx,
+                        })
                         .await;
                 });
             }
@@ -703,7 +795,11 @@ fn show_color_dialog(
                 let (tx, _rx) = oneshot::channel();
                 let _ = bridge
                     .tx
-                    .send(GtkCommand::SetWorkspaceColor { id, color: hex, ack: tx })
+                    .send(GtkCommand::SetWorkspaceColor {
+                        id,
+                        color: hex,
+                        ack: tx,
+                    })
                     .await;
             });
         },
@@ -711,10 +807,7 @@ fn show_color_dialog(
 }
 
 /// Spawn the GTK-side dispatch loop. Lives on the main context.
-pub fn spawn_dispatch_loop(
-    rx: async_channel::Receiver<GtkCommand>,
-    controller: WindowController,
-) {
+pub fn spawn_dispatch_loop(rx: async_channel::Receiver<GtkCommand>, controller: WindowController) {
     glib::MainContext::default().spawn_local(async move {
         while let Ok(cmd) = rx.recv().await {
             controller.dispatch(cmd).await;
