@@ -1156,4 +1156,266 @@ mod tests {
             SurfaceKind::Terminal { cwd: Some(cwd), .. } if cwd == &std::path::PathBuf::from("/tmp/one")
         ));
     }
+
+    fn collect_leaves(p: &Pane) -> Vec<PaneId> {
+        let mut v = Vec::new();
+        p.for_each_leaf(|id| v.push(id));
+        v
+    }
+
+    fn pane_split_direction(p: &Pane) -> Option<SplitDirection> {
+        match p {
+            Pane::Split { direction, .. } => Some(*direction),
+            Pane::Leaf { .. } => None,
+        }
+    }
+
+    fn find_browser_pane_url(p: &Pane, target: PaneId) -> Option<String> {
+        match p {
+            Pane::Leaf { id, content } if *id == target => match content {
+                PaneContent::Tabs { surfaces, .. } => surfaces.iter().find_map(|s| match &s.kind {
+                    SurfaceKind::Browser { initial_url } => initial_url.clone(),
+                    _ => None,
+                }),
+                PaneContent::Browser { url } => Some(url.clone()),
+                PaneContent::Terminal { .. } => None,
+            },
+            Pane::Leaf { .. } => None,
+            Pane::Split { first, second, .. } => find_browser_pane_url(first, target)
+                .or_else(|| find_browser_pane_url(second, target)),
+        }
+    }
+
+    #[tokio::test]
+    async fn split_pane_with_browser_creates_browser_sibling() {
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("demo".into()), std::path::PathBuf::from("/tmp/demo"))
+            .await;
+        let original = first_pane(&store.get_workspace(ws_id).await.unwrap());
+
+        let (split_ws, new_pane) = store
+            .split_pane_with_browser(
+                original,
+                SplitDirection::Vertical,
+                "https://example.com".into(),
+            )
+            .await
+            .expect("split should succeed for valid target");
+        assert_eq!(split_ws, ws_id);
+        assert_ne!(new_pane, original);
+
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        let leaves = collect_leaves(&ws.surfaces[0].root_pane);
+        assert_eq!(leaves.len(), 2);
+        assert!(leaves.contains(&original));
+        assert!(leaves.contains(&new_pane));
+
+        let url = find_browser_pane_url(&ws.surfaces[0].root_pane, new_pane);
+        assert_eq!(url.as_deref(), Some("https://example.com"));
+    }
+
+    #[tokio::test]
+    async fn split_pane_with_browser_returns_none_for_unknown_target() {
+        let store = StateStore::new_lazy(State::default());
+        let _ws_id = store
+            .create_workspace(Some("demo".into()), std::path::PathBuf::from("/tmp/demo"))
+            .await;
+        let bogus = PaneId::new();
+
+        let result = store
+            .split_pane_with_browser(bogus, SplitDirection::Vertical, "https://x.test".into())
+            .await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn split_pane_with_browser_returns_none_when_no_workspaces() {
+        let store = StateStore::new_lazy(State::default());
+        let bogus = PaneId::new();
+        let result = store
+            .split_pane_with_browser(bogus, SplitDirection::Horizontal, "https://x.test".into())
+            .await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn split_pane_with_browser_honors_vertical_direction() {
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("demo".into()), std::path::PathBuf::from("/tmp/demo"))
+            .await;
+        let original = first_pane(&store.get_workspace(ws_id).await.unwrap());
+
+        store
+            .split_pane_with_browser(
+                original,
+                SplitDirection::Vertical,
+                "https://example.com".into(),
+            )
+            .await
+            .unwrap();
+
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        assert_eq!(
+            pane_split_direction(&ws.surfaces[0].root_pane),
+            Some(SplitDirection::Vertical)
+        );
+    }
+
+    #[tokio::test]
+    async fn split_pane_with_browser_honors_horizontal_direction() {
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("demo".into()), std::path::PathBuf::from("/tmp/demo"))
+            .await;
+        let original = first_pane(&store.get_workspace(ws_id).await.unwrap());
+
+        store
+            .split_pane_with_browser(
+                original,
+                SplitDirection::Horizontal,
+                "https://example.com".into(),
+            )
+            .await
+            .unwrap();
+
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        assert_eq!(
+            pane_split_direction(&ws.surfaces[0].root_pane),
+            Some(SplitDirection::Horizontal)
+        );
+    }
+
+    #[tokio::test]
+    async fn split_pane_with_browser_finds_correct_workspace_among_many() {
+        let store = StateStore::new_lazy(State::default());
+        let _first = store
+            .create_workspace(Some("one".into()), std::path::PathBuf::from("/tmp/one"))
+            .await;
+        let middle = store
+            .create_workspace(Some("two".into()), std::path::PathBuf::from("/tmp/two"))
+            .await;
+        let _last = store
+            .create_workspace(Some("three".into()), std::path::PathBuf::from("/tmp/three"))
+            .await;
+
+        let target = first_pane(&store.get_workspace(middle).await.unwrap());
+        let (ws_id, new_pane) = store
+            .split_pane_with_browser(
+                target,
+                SplitDirection::Vertical,
+                "https://middle.test".into(),
+            )
+            .await
+            .expect("split should succeed");
+        assert_eq!(ws_id, middle);
+
+        // The other workspaces stayed single-leaf.
+        for id in [_first, _last] {
+            let ws = store.get_workspace(id).await.unwrap();
+            assert_eq!(collect_leaves(&ws.surfaces[0].root_pane).len(), 1);
+        }
+
+        let middle_ws = store.get_workspace(middle).await.unwrap();
+        assert_eq!(collect_leaves(&middle_ws.surfaces[0].root_pane).len(), 2);
+        assert_eq!(
+            find_browser_pane_url(&middle_ws.surfaces[0].root_pane, new_pane).as_deref(),
+            Some("https://middle.test")
+        );
+    }
+
+    #[tokio::test]
+    async fn split_pane_with_browser_preserves_target_leaf_id() {
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("demo".into()), std::path::PathBuf::from("/tmp/demo"))
+            .await;
+        let original = first_pane(&store.get_workspace(ws_id).await.unwrap());
+
+        store
+            .split_pane_with_browser(
+                original,
+                SplitDirection::Vertical,
+                "https://example.com".into(),
+            )
+            .await
+            .unwrap();
+
+        // After splitting, the original PaneId is still resolvable via
+        // workspace_for_pane — it must still be a leaf in the tree.
+        assert_eq!(store.workspace_for_pane(original).await, Some(ws_id));
+    }
+
+    #[tokio::test]
+    async fn split_pane_with_browser_assigns_unique_pane_ids() {
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("demo".into()), std::path::PathBuf::from("/tmp/demo"))
+            .await;
+        let original = first_pane(&store.get_workspace(ws_id).await.unwrap());
+
+        let (_, first_new) = store
+            .split_pane_with_browser(
+                original,
+                SplitDirection::Vertical,
+                "https://a.test".into(),
+            )
+            .await
+            .unwrap();
+        let (_, second_new) = store
+            .split_pane_with_browser(
+                first_new,
+                SplitDirection::Horizontal,
+                "https://b.test".into(),
+            )
+            .await
+            .unwrap();
+
+        assert_ne!(first_new, original);
+        assert_ne!(second_new, original);
+        assert_ne!(first_new, second_new);
+
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        let leaves = collect_leaves(&ws.surfaces[0].root_pane);
+        assert_eq!(leaves.len(), 3);
+        assert!(leaves.contains(&original));
+        assert!(leaves.contains(&first_new));
+        assert!(leaves.contains(&second_new));
+    }
+
+    #[tokio::test]
+    async fn split_pane_with_browser_browser_pane_uses_initial_url() {
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("demo".into()), std::path::PathBuf::from("/tmp/demo"))
+            .await;
+        let original = first_pane(&store.get_workspace(ws_id).await.unwrap());
+
+        let url = "https://docs.example.org/path?q=1#frag";
+        let (_, new_pane) = store
+            .split_pane_with_browser(original, SplitDirection::Vertical, url.into())
+            .await
+            .unwrap();
+
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        let Pane::Split { second, .. } = &ws.surfaces[0].root_pane else {
+            panic!("expected split root after split_pane_with_browser")
+        };
+        let Pane::Leaf { id, content } = second.as_ref() else {
+            panic!("expected new sibling to be a leaf")
+        };
+        assert_eq!(*id, new_pane);
+        let PaneContent::Tabs { surfaces, active } = content else {
+            panic!("browser pane content must be tabbed")
+        };
+        let active_surface = surfaces
+            .iter()
+            .find(|s| s.id == *active)
+            .expect("active surface must exist");
+        assert!(matches!(
+            &active_surface.kind,
+            SurfaceKind::Browser { initial_url: Some(u) } if u == url
+        ));
+    }
 }

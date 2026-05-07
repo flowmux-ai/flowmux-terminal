@@ -119,11 +119,24 @@ enum Cmd {
     /// Click an element by its `data-flowmux-ref` id (from a snapshot).
     BrowserClick { pane: PaneId, target: String },
     /// Fill an input/textarea by ref id with `value`.
-    BrowserFill { pane: PaneId, target: String, value: String },
+    BrowserFill {
+        pane: PaneId,
+        target: String,
+        value: String,
+    },
     /// Select a `<select>` option by value or visible text.
-    BrowserSelect { pane: PaneId, target: String, value: String },
+    BrowserSelect {
+        pane: PaneId,
+        target: String,
+        value: String,
+    },
     /// Scroll an element into view, then offset the viewport by (x, y).
-    BrowserScroll { pane: PaneId, target: String, x: i32, y: i32 },
+    BrowserScroll {
+        pane: PaneId,
+        target: String,
+        x: i32,
+        y: i32,
+    },
     /// Type literal text into the active element of a browser pane.
     BrowserType { pane: PaneId, text: String },
     /// Press a single named key (Enter, Tab, ArrowDown, …).
@@ -133,7 +146,11 @@ enum Cmd {
     /// Read .value of an input/textarea/select.
     BrowserValue { pane: PaneId, target: String },
     /// Read an attribute (`href`, `id`, `class`, …) of an element.
-    BrowserAttr { pane: PaneId, target: String, name: String },
+    BrowserAttr {
+        pane: PaneId,
+        target: String,
+        name: String,
+    },
 
     /// Import cookies from a host browser into the in-app browser jar.
     ImportCookies {
@@ -325,8 +342,24 @@ fn build_request(cmd: Cmd) -> anyhow::Result<Request> {
         Cmd::BrowserUrl { pane } => Request::BrowserUrl { pane },
         Cmd::BrowserTitle { pane } => Request::BrowserTitle { pane },
         Cmd::BrowserClick { pane, target } => Request::BrowserClick { pane, target },
-        Cmd::BrowserFill { pane, target, value } => Request::BrowserFill { pane, target, value },
-        Cmd::BrowserSelect { pane, target, value } => Request::BrowserSelect { pane, target, value },
+        Cmd::BrowserFill {
+            pane,
+            target,
+            value,
+        } => Request::BrowserFill {
+            pane,
+            target,
+            value,
+        },
+        Cmd::BrowserSelect {
+            pane,
+            target,
+            value,
+        } => Request::BrowserSelect {
+            pane,
+            target,
+            value,
+        },
         Cmd::BrowserScroll { pane, target, x, y } => Request::BrowserScroll { pane, target, x, y },
         Cmd::BrowserType { pane, text } => Request::BrowserType { pane, text },
         Cmd::BrowserPress { pane, key } => Request::BrowserPress { pane, key },
@@ -464,6 +497,232 @@ mod tests {
             import,
             Request::ImportCookies { source, domain }
                 if source == "firefox" && domain.as_deref() == Some("example.com")
+        ));
+    }
+
+    #[test]
+    fn browser_open_no_flags_defaults_to_right_split() {
+        let req = build_request(Cmd::Browser {
+            url: "https://example.com".into(),
+            right: false,
+            down: false,
+        })
+        .unwrap();
+        assert!(matches!(
+            req,
+            Request::BrowserOpen {
+                url,
+                target_pane: None,
+                direction: SplitDirection::Vertical,
+            } if url == "https://example.com"
+        ));
+    }
+
+    #[test]
+    fn browser_open_with_right_is_vertical_split() {
+        let req = build_request(Cmd::Browser {
+            url: "https://a.test".into(),
+            right: true,
+            down: false,
+        })
+        .unwrap();
+        assert!(matches!(
+            req,
+            Request::BrowserOpen {
+                target_pane: None,
+                direction: SplitDirection::Vertical,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn browser_open_with_down_is_horizontal_split() {
+        let req = build_request(Cmd::Browser {
+            url: "https://a.test".into(),
+            right: false,
+            down: true,
+        })
+        .unwrap();
+        assert!(matches!(
+            req,
+            Request::BrowserOpen {
+                target_pane: None,
+                direction: SplitDirection::Horizontal,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn browser_navigate_maps_pane_and_url() {
+        let pane = PaneId::new();
+        let req = build_request(Cmd::BrowserNavigate {
+            pane,
+            url: "https://example.com/x?y=1".into(),
+        })
+        .unwrap();
+        assert!(matches!(
+            req,
+            Request::BrowserNavigate { pane: got, url }
+                if got == pane && url == "https://example.com/x?y=1"
+        ));
+    }
+
+    #[test]
+    fn browser_history_verbs_map_pane_only() {
+        let pane = PaneId::new();
+        assert!(matches!(
+            build_request(Cmd::BrowserBack { pane }).unwrap(),
+            Request::BrowserBack { pane: got } if got == pane
+        ));
+        assert!(matches!(
+            build_request(Cmd::BrowserForward { pane }).unwrap(),
+            Request::BrowserForward { pane: got } if got == pane
+        ));
+        assert!(matches!(
+            build_request(Cmd::BrowserReload { pane }).unwrap(),
+            Request::BrowserReload { pane: got } if got == pane
+        ));
+    }
+
+    #[test]
+    fn browser_url_and_title_verbs_map_pane_only() {
+        let pane = PaneId::new();
+        assert!(matches!(
+            build_request(Cmd::BrowserUrl { pane }).unwrap(),
+            Request::BrowserUrl { pane: got } if got == pane
+        ));
+        assert!(matches!(
+            build_request(Cmd::BrowserTitle { pane }).unwrap(),
+            Request::BrowserTitle { pane: got } if got == pane
+        ));
+    }
+
+    #[test]
+    fn browser_click_maps_pane_and_target() {
+        let pane = PaneId::new();
+        let req = build_request(Cmd::BrowserClick {
+            pane,
+            target: "e7".into(),
+        })
+        .unwrap();
+        assert!(matches!(
+            req,
+            Request::BrowserClick { pane: got, target } if got == pane && target == "e7"
+        ));
+    }
+
+    #[test]
+    fn browser_fill_maps_pane_target_and_value() {
+        let pane = PaneId::new();
+        let req = build_request(Cmd::BrowserFill {
+            pane,
+            target: "e3".into(),
+            value: "hello world".into(),
+        })
+        .unwrap();
+        assert!(matches!(
+            req,
+            Request::BrowserFill { pane: got, target, value }
+                if got == pane && target == "e3" && value == "hello world"
+        ));
+    }
+
+    #[test]
+    fn browser_select_maps_pane_target_and_value() {
+        let pane = PaneId::new();
+        let req = build_request(Cmd::BrowserSelect {
+            pane,
+            target: "e9".into(),
+            value: "OptionA".into(),
+        })
+        .unwrap();
+        assert!(matches!(
+            req,
+            Request::BrowserSelect { pane: got, target, value }
+                if got == pane && target == "e9" && value == "OptionA"
+        ));
+    }
+
+    #[test]
+    fn browser_scroll_preserves_negative_offsets() {
+        let pane = PaneId::new();
+        let req = build_request(Cmd::BrowserScroll {
+            pane,
+            target: "root".into(),
+            x: -10,
+            y: 250,
+        })
+        .unwrap();
+        assert!(matches!(
+            req,
+            Request::BrowserScroll { pane: got, target, x: -10, y: 250 }
+                if got == pane && target == "root"
+        ));
+    }
+
+    #[test]
+    fn browser_type_preserves_unicode_text() {
+        let pane = PaneId::new();
+        let req = build_request(Cmd::BrowserType {
+            pane,
+            text: "안녕하세요 🚀".into(),
+        })
+        .unwrap();
+        assert!(matches!(
+            req,
+            Request::BrowserType { pane: got, text }
+                if got == pane && text == "안녕하세요 🚀"
+        ));
+    }
+
+    #[test]
+    fn browser_press_maps_named_keys() {
+        let pane = PaneId::new();
+        for key in ["Enter", "Tab", "ArrowDown", "Escape", "F1"] {
+            let req = build_request(Cmd::BrowserPress {
+                pane,
+                key: key.into(),
+            })
+            .unwrap();
+            assert!(matches!(
+                req,
+                Request::BrowserPress { pane: got, key: got_key }
+                    if got == pane && got_key == key
+            ));
+        }
+    }
+
+    #[test]
+    fn browser_text_value_attr_each_carry_their_fields() {
+        let pane = PaneId::new();
+        assert!(matches!(
+            build_request(Cmd::BrowserText {
+                pane,
+                target: "e1".into()
+            })
+            .unwrap(),
+            Request::BrowserText { pane: got, target } if got == pane && target == "e1"
+        ));
+        assert!(matches!(
+            build_request(Cmd::BrowserValue {
+                pane,
+                target: "e2".into()
+            })
+            .unwrap(),
+            Request::BrowserValue { pane: got, target } if got == pane && target == "e2"
+        ));
+        let req = build_request(Cmd::BrowserAttr {
+            pane,
+            target: "link".into(),
+            name: "href".into(),
+        })
+        .unwrap();
+        assert!(matches!(
+            req,
+            Request::BrowserAttr { pane: got, target, name }
+                if got == pane && target == "link" && name == "href"
         ));
     }
 }
