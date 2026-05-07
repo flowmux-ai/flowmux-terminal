@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Atomic on-disk state for flowmux.
 //!
 //! Single source of truth lives at `$XDG_STATE_HOME/flowmux/state.json`.
@@ -117,6 +118,7 @@ mod tests {
             git: None,
             listening_ports: vec![],
             surfaces: vec![],
+            color: None,
         }
     }
 

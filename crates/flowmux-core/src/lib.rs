@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Domain types shared across flowmux crates.
 //!
 //! Types here are deliberately backend-agnostic: they describe the shape
@@ -63,6 +64,11 @@ pub struct Workspace {
     #[serde(default)]
     pub listening_ports: Vec<u16>,
     pub surfaces: Vec<Surface>,
+    /// Hex color (`#RRGGBB`) used to tint the workspace's sidebar
+    /// indicator. Optional so old `state.json` files load cleanly;
+    /// the daemon assigns a default on creation.
+    #[serde(default)]
+    pub color: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -180,6 +186,63 @@ impl Pane {
         }
         rec(self, &mut f);
     }
+
+    pub fn first_leaf_id(&self) -> Option<PaneId> {
+        match self {
+            Pane::Leaf { id, .. } => Some(*id),
+            Pane::Split { first, .. } => first.first_leaf_id(),
+        }
+    }
+
+    /// Remove the leaf with `target`. If found inside a split, the
+    /// split collapses to the remaining sibling. Returns `RemoveOutcome`
+    /// describing what happened so the caller can update its state.
+    pub fn remove_leaf(self, target: PaneId) -> RemoveOutcome {
+        match self {
+            Pane::Leaf { id, .. } if id == target => RemoveOutcome::EntirelyRemoved,
+            leaf @ Pane::Leaf { .. } => RemoveOutcome::NotFound(leaf),
+            Pane::Split { id, direction, ratio, first, second } => {
+                match first.remove_leaf(target) {
+                    RemoveOutcome::Replaced(new_first) => RemoveOutcome::Replaced(Pane::Split {
+                        id,
+                        direction,
+                        ratio,
+                        first: Box::new(new_first),
+                        second,
+                    }),
+                    RemoveOutcome::EntirelyRemoved => RemoveOutcome::Replaced(*second),
+                    RemoveOutcome::NotFound(orig_first) => match second.remove_leaf(target) {
+                        RemoveOutcome::Replaced(new_second) => RemoveOutcome::Replaced(Pane::Split {
+                            id,
+                            direction,
+                            ratio,
+                            first: Box::new(orig_first),
+                            second: Box::new(new_second),
+                        }),
+                        RemoveOutcome::EntirelyRemoved => RemoveOutcome::Replaced(orig_first),
+                        RemoveOutcome::NotFound(orig_second) => RemoveOutcome::NotFound(Pane::Split {
+                            id,
+                            direction,
+                            ratio,
+                            first: Box::new(orig_first),
+                            second: Box::new(orig_second),
+                        }),
+                    },
+                }
+            }
+        }
+    }
+}
+
+/// Outcome of [`Pane::remove_leaf`].
+pub enum RemoveOutcome {
+    /// Returned only at the root: the entire tree was a single leaf
+    /// matching the target, so the surface is now empty.
+    EntirelyRemoved,
+    /// The tree mutated; this is the new root.
+    Replaced(Pane),
+    /// The target wasn't anywhere in this subtree; original returned.
+    NotFound(Pane),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -276,6 +339,38 @@ mod tests {
     }
 
     #[test]
+    fn remove_leaf_collapses_split() {
+        let l1 = PaneId::new();
+        let l2 = PaneId::new();
+        let p = Pane::Split {
+            id: PaneId::new(),
+            direction: SplitDirection::Vertical,
+            ratio: 0.5,
+            first: Box::new(Pane::Leaf { id: l1, content: PaneContent::Terminal { pid: None } }),
+            second: Box::new(Pane::Leaf { id: l2, content: PaneContent::Terminal { pid: None } }),
+        };
+        match p.remove_leaf(l1) {
+            RemoveOutcome::Replaced(Pane::Leaf { id, .. }) => assert_eq!(id, l2),
+            _ => panic!("expected leaf l2 to remain after l1 removal"),
+        }
+    }
+
+    #[test]
+    fn remove_leaf_returns_entirely_removed_on_root_match() {
+        let id = PaneId::new();
+        let p = Pane::Leaf { id, content: PaneContent::Terminal { pid: None } };
+        assert!(matches!(p.remove_leaf(id), RemoveOutcome::EntirelyRemoved));
+    }
+
+    #[test]
+    fn remove_leaf_returns_not_found_when_id_missing() {
+        let id = PaneId::new();
+        let other = PaneId::new();
+        let p = Pane::Leaf { id, content: PaneContent::Terminal { pid: None } };
+        assert!(matches!(p.remove_leaf(other), RemoveOutcome::NotFound(_)));
+    }
+
+    #[test]
     fn workspace_roundtrips_through_json() {
         let ws = Workspace {
             id: WorkspaceId::new(),
@@ -292,6 +387,7 @@ mod tests {
                     content: PaneContent::Terminal { pid: None },
                 },
             }],
+            color: None,
         };
         let s = serde_json::to_string(&ws).unwrap();
         let back: Workspace = serde_json::from_str(&s).unwrap();

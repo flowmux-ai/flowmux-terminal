@@ -16,6 +16,20 @@ use std::time::Duration;
 use tokio::sync::{Mutex, Notify};
 use tracing::{error, info};
 
+/// flowmux-authored default sidebar palette. Vivid hues spaced around
+/// the wheel so adjacent workspaces stay visually distinct against
+/// the dark sidebar tint. Picked deterministically from the
+/// workspace's UUID so the color stays the same across restarts.
+const DEFAULT_PALETTE: &[&str] = &[
+    "#7ab7e6", "#e69977", "#9ad57a", "#d188e0", "#e6d077",
+    "#7adfd0", "#e07a9a", "#a797e0", "#79e0a3", "#e07a7a",
+];
+
+fn default_color_for(id: WorkspaceId) -> String {
+    let idx = (id.0.as_u128() as usize) % DEFAULT_PALETTE.len();
+    DEFAULT_PALETTE[idx].to_string()
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum CloseOutcome {
     /// One leaf removed; the surface still exists.
@@ -101,6 +115,7 @@ impl StateStore {
                     content: PaneContent::Terminal { pid: None },
                 },
             }],
+            color: Some(default_color_for(id)),
         };
         let mut s = self.inner.lock().await;
         s.workspaces.push(ws);

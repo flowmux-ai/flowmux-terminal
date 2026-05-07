@@ -80,11 +80,18 @@ fn row_widget(ws: &Workspace, on_close: Rc<dyn Fn(WorkspaceId)>) -> gtk::Widget 
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     row.set_margin_top(6);
     row.set_margin_bottom(6);
-    row.set_margin_start(10);
+    row.set_margin_start(4);
     row.set_margin_end(6);
+
+    // Left-edge color bar — distinct hue per workspace so multiple
+    // tabs stay visually separable at a glance.
+    if let Some(color) = ws.color.as_deref() {
+        row.append(&color_bar(color));
+    }
 
     let meta = build_meta_column(ws);
     meta.set_hexpand(true);
+    meta.set_margin_start(6);
     row.append(&meta);
 
     let close_btn = gtk::Button::from_icon_name("window-close-symbolic");
@@ -116,6 +123,41 @@ fn row_widget(ws: &Workspace, on_close: Rc<dyn Fn(WorkspaceId)>) -> gtk::Widget 
     row.add_controller(motion);
 
     row.upcast()
+}
+
+/// 4-pixel rounded vertical color strip drawn with Cairo so the
+/// color is fully data-driven (no per-row CSS provider).
+fn color_bar(color: &str) -> gtk::Widget {
+    let bar = gtk::DrawingArea::new();
+    bar.set_size_request(4, -1);
+    bar.set_vexpand(true);
+    bar.set_valign(gtk::Align::Fill);
+    let color_owned = color.to_string();
+    bar.set_draw_func(move |_, cr, w, h| {
+        let rgba = gtk::gdk::RGBA::parse(&color_owned)
+            .unwrap_or_else(|_| gtk::gdk::RGBA::new(0.5, 0.5, 0.5, 1.0));
+        cr.set_source_rgba(
+            rgba.red() as f64,
+            rgba.green() as f64,
+            rgba.blue() as f64,
+            rgba.alpha() as f64,
+        );
+        // Rounded corners at top/bottom.
+        let r = 2.0;
+        let w = w as f64;
+        let h = h as f64;
+        cr.new_path();
+        cr.arc(r, r, r, std::f64::consts::PI, 1.5 * std::f64::consts::PI);
+        cr.line_to(w - r, 0.0);
+        cr.arc(w - r, r, r, 1.5 * std::f64::consts::PI, 0.0);
+        cr.line_to(w, h - r);
+        cr.arc(w - r, h - r, r, 0.0, 0.5 * std::f64::consts::PI);
+        cr.line_to(r, h);
+        cr.arc(r, h - r, r, 0.5 * std::f64::consts::PI, std::f64::consts::PI);
+        cr.close_path();
+        let _ = cr.fill();
+    });
+    bar.upcast()
 }
 
 fn build_meta_column(ws: &Workspace) -> gtk::Box {
