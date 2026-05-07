@@ -159,6 +159,15 @@ pub enum GtkCommand {
         surface: SurfaceId,
         title: String,
     },
+    /// VTE가 OSC 0/2 (window title)로 받은 타이틀 변화를 알린다.
+    /// vi/claude/codex/tmux 같은 프로그램이 셸 안에서 실행되면
+    /// 보내며, 사용자가 직접 rename한 surface는 daemon 쪽에서
+    /// 무시한다. 빈 문자열은 무시 (셸이 종료되면서 OSC를 비울 때).
+    TerminalTitleChanged {
+        pane: PaneId,
+        surface: SurfaceId,
+        title: String,
+    },
     /// 윈도우 타이틀을 "flowmux - {focused tab name}"으로 다시 계산.
     /// 포커스 변경 / 탭 활성화 / 탭 라벨 변경 직후에 보낸다.
     RefreshWindowTitle,

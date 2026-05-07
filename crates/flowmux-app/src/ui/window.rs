@@ -611,6 +611,34 @@ impl WindowController {
                     self.refresh_window_title().await;
                 }
             }
+            GtkCommand::TerminalTitleChanged {
+                pane,
+                surface,
+                title,
+            } => {
+                // VTE가 OSC 0/2로 받은 윈도우 타이틀이다. 셸 자체가
+                // 보내는 prompt 형태(예: "user@host:~/path")는 이미
+                // cwd-driven 라벨과 중복되니 trim 후 빈/공백만 남는
+                // 경우 무시. 그 외엔 BrowserTitleChanged와 동일
+                // 처리(title_locked 존중) — store가 적용되면 탭
+                // 라벨과 윈도우 제목을 갱신.
+                if title.trim().is_empty() {
+                    return;
+                }
+                if self
+                    .store
+                    .update_surface_auto_title(pane, surface, title)
+                    .await
+                    .is_some()
+                {
+                    if let Some(latest) = self.store.surface_title(pane, surface).await {
+                        self.pane_registry
+                            .borrow()
+                            .set_surface_title(surface, &latest);
+                    }
+                    self.refresh_window_title().await;
+                }
+            }
             GtkCommand::RefreshWindowTitle => {
                 self.refresh_window_title().await;
             }
@@ -1152,6 +1180,22 @@ fn make_callbacks(
                     let _ = bridge
                         .tx
                         .send(GtkCommand::BrowserTitleChanged {
+                            pane,
+                            surface,
+                            title,
+                        })
+                        .await;
+                });
+            }))
+        },
+        on_terminal_title_changed: {
+            let bridge = bridge.clone();
+            Rc::new(RefCell::new(move |pane, surface, title: String| {
+                let bridge = bridge.clone();
+                glib::MainContext::default().spawn_local(async move {
+                    let _ = bridge
+                        .tx
+                        .send(GtkCommand::TerminalTitleChanged {
                             pane,
                             surface,
                             title,
@@ -1751,6 +1795,104 @@ mod tests {
         assert_eq!(
             store.surface_title(pane, browser_b).await.as_deref(),
             Some("Pinned")
+        );
+    }
+
+    /// `TerminalTitleChanged` 디스패치가 OSC 0/2 제목으로 탭 라벨을
+    /// 갱신한다. 빈 문자열은 무시되고, title_locked=true인 surface는
+    /// 보호된다 (사용자 rename 우선).
+    #[gtk::test]
+    async fn terminal_title_changed_dispatch_updates_tab_and_skips_locked() {
+        adw::init().expect("libadwaita should initialize in GTK test");
+        let root = std::env::temp_dir().join("flowmux-ui-terminal-title");
+        std::fs::create_dir_all(&root).unwrap();
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("ui".into()), root.clone())
+            .await;
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        let pane = ws.surfaces[0].root_pane.first_leaf_id().unwrap();
+        // 첫 channel 생성 시 자동으로 만들어진 terminal surface 그대로 사용.
+        let surface_a = match &ws.surfaces[0].root_pane {
+            flowmux_core::Pane::Leaf {
+                content: flowmux_core::PaneContent::Tabs { surfaces, .. },
+                ..
+            } => surfaces[0].id,
+            _ => unreachable!("default workspace pane is a tabbed leaf"),
+        };
+        let (_, surface_locked) = store
+            .add_terminal_surface_to_pane(pane, Some(root.clone()))
+            .await
+            .unwrap();
+        store
+            .rename_surface(pane, surface_locked, "Pinned-shell".into())
+            .await
+            .unwrap();
+
+        let (bridge, _rx) = Bridge::new();
+        let app = adw::Application::builder()
+            .application_id("com.flowmux.App.UiTest.TerminalTitle")
+            .build();
+        app.register(None::<&gtk::gio::Cancellable>).unwrap();
+        let controller = WindowController::new(
+            &app,
+            store.clone(),
+            Arc::new(ResolvedTheme::load()),
+            bridge,
+            gtk::CssProvider::new(),
+        );
+
+        // 1. 정상적인 OSC 2 → 탭 라벨 갱신.
+        controller
+            .dispatch(GtkCommand::TerminalTitleChanged {
+                pane,
+                surface: surface_a,
+                title: "vi src/main.rs".into(),
+            })
+            .await;
+        assert_eq!(
+            store.surface_title(pane, surface_a).await.as_deref(),
+            Some("vi src/main.rs")
+        );
+
+        // 2. 빈 문자열 → 무시 (셸 종료 / OSC reset 시).
+        controller
+            .dispatch(GtkCommand::TerminalTitleChanged {
+                pane,
+                surface: surface_a,
+                title: "".into(),
+            })
+            .await;
+        assert_eq!(
+            store.surface_title(pane, surface_a).await.as_deref(),
+            Some("vi src/main.rs"),
+            "empty OSC title should not erase the active label"
+        );
+
+        // 3. 공백만 있는 타이틀 → 무시.
+        controller
+            .dispatch(GtkCommand::TerminalTitleChanged {
+                pane,
+                surface: surface_a,
+                title: "   \t".into(),
+            })
+            .await;
+        assert_eq!(
+            store.surface_title(pane, surface_a).await.as_deref(),
+            Some("vi src/main.rs")
+        );
+
+        // 4. title_locked=true → 무시.
+        controller
+            .dispatch(GtkCommand::TerminalTitleChanged {
+                pane,
+                surface: surface_locked,
+                title: "Should not stick".into(),
+            })
+            .await;
+        assert_eq!(
+            store.surface_title(pane, surface_locked).await.as_deref(),
+            Some("Pinned-shell")
         );
     }
 

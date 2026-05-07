@@ -746,6 +746,23 @@ fn build_panel(
                 });
             }
 
+            // OSC 0/2로 들어온 윈도우 타이틀(vi/claude/codex/tmux 등이
+            // 발행)을 탭 라벨 + 윈도우 타이틀에 반영. VTE가 빈 문자열
+            // 로 reset 보낼 수도 있으므로 dispatch 측에서 trim한 결과
+            // 가 비면 무시한다.
+            {
+                let cb = callbacks.on_terminal_title_changed.clone();
+                let surface_id = surface.id;
+                let widget_for_title = pane.widget.clone();
+                widget_for_title.clone().connect_window_title_notify(move |_| {
+                    let title = widget_for_title
+                        .window_title()
+                        .map(|t| t.to_string())
+                        .unwrap_or_default();
+                    (cb.borrow_mut())(pane_id, surface_id, title);
+                });
+            }
+
             // 포커스 enter/leave에 맞춰 frame에 .focused class를
             // 토글한다. 포커스된 pane은 옵션의 focus_border_color로
             // 1px 테두리를 그리도록 theme.rs CSS가 처리한다.

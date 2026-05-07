@@ -128,6 +128,10 @@ pub struct PaneCallbacks {
     pub on_browser_uri_changed: Rc<RefCell<dyn FnMut(PaneId, SurfaceId, String)>>,
     /// WebKit reported that a browser pane's page title changed.
     pub on_browser_title_changed: Rc<RefCell<dyn FnMut(PaneId, SurfaceId, String)>>,
+    /// VTE가 OSC 0/2 window-title을 알렸다 (vi/claude/codex/tmux
+    /// 같은 프로그램이 셸 안에서 보낼 때). 빈 문자열은 호출 측에서
+    /// 무시한다.
+    pub on_terminal_title_changed: Rc<RefCell<dyn FnMut(PaneId, SurfaceId, String)>>,
     /// 현재 시점의 사용자 옵션을 가져온다 (새 BrowserPane 생성 시
     /// 엔진 선택 + 위젯 생성 직후 줌 적용에 사용). WindowController가
     /// 보유한 `Rc<RefCell<Options>>`에서 clone해 돌려주는 가벼운
