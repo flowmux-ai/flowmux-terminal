@@ -139,7 +139,6 @@ impl ResolvedTheme {
     pub fn css(&self) -> String {
         let bg_css = rgba_css(&self.bg);
         let pane_border_css = rgba_css(&blend_with_alpha(&self.fg, 0.10));
-        let pane_focus_css = rgba_css(&blend_with_alpha(&self.fg, 0.45));
         let tabbar_bg_css = rgba_css(&shift_lightness(
             &self.bg,
             if self.is_dark() { 0.025 } else { -0.025 },
@@ -159,11 +158,6 @@ impl ResolvedTheme {
     border-radius: 4px;
     margin: 1px;
     padding: 0;
-    transition: border-color 80ms ease;
-}}
-.flowmux-pane.focused {{
-    border-color: {focus};
-    box-shadow: inset 0 0 0 1px {focus};
 }}
 .flowmux-pane vte-terminal {{
     padding: 7px;
@@ -241,7 +235,6 @@ paned > separator {{
             bg = bg_css,
             fg = rgba_css(&self.fg),
             border = pane_border_css,
-            focus = pane_focus_css,
             tabbar = tabbar_bg_css,
             tab_active = tab_active_bg_css,
             control_hover = control_hover_css,

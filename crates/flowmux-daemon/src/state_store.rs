@@ -1356,11 +1356,7 @@ mod tests {
         let original = first_pane(&store.get_workspace(ws_id).await.unwrap());
 
         let (_, first_new) = store
-            .split_pane_with_browser(
-                original,
-                SplitDirection::Vertical,
-                "https://a.test".into(),
-            )
+            .split_pane_with_browser(original, SplitDirection::Vertical, "https://a.test".into())
             .await
             .unwrap();
         let (_, second_new) = store
@@ -1417,5 +1413,126 @@ mod tests {
             &active_surface.kind,
             SurfaceKind::Browser { initial_url: Some(u) } if u == url
         ));
+    }
+
+    #[tokio::test]
+    async fn add_browser_surface_to_pane_appends_browser_tab_and_activates() {
+        // 채널을 만들면 첫 pane에는 탭(terminal) 한 개가 있고, 거기에
+        // 탭브라우저 추가 버튼을 누르면 같은 pane 안에 새 탭브라우저가
+        // 추가되며 그게 활성 탭이 되어야 한다.
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("demo".into()), std::path::PathBuf::from("/tmp/demo"))
+            .await;
+        let pane = first_pane(&store.get_workspace(ws_id).await.unwrap());
+        assert_eq!(
+            first_pane_tab_count(&store.get_workspace(ws_id).await.unwrap()),
+            1
+        );
+
+        let (returned_ws, browser_surface) = store
+            .add_browser_surface_to_pane(pane, "about:blank".into())
+            .await
+            .expect("browser tab should be added to existing pane");
+        assert_eq!(returned_ws, ws_id);
+
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        assert_eq!(first_pane_tab_count(&ws), 2);
+        assert_eq!(first_pane_active_surface(&ws), browser_surface);
+
+        let Pane::Leaf {
+            content: PaneContent::Tabs { surfaces, .. },
+            ..
+        } = &ws.surfaces[0].root_pane
+        else {
+            panic!("expected tabbed leaf after add_browser_surface_to_pane")
+        };
+        let added = surfaces
+            .iter()
+            .find(|s| s.id == browser_surface)
+            .expect("new browser surface must be present");
+        assert!(matches!(
+            &added.kind,
+            SurfaceKind::Browser { initial_url: Some(u) } if u == "about:blank"
+        ));
+    }
+
+    #[tokio::test]
+    async fn add_browser_surface_to_pane_returns_none_for_unknown_pane() {
+        let store = StateStore::new_lazy(State::default());
+        let _ = store
+            .create_workspace(Some("demo".into()), std::path::PathBuf::from("/tmp/demo"))
+            .await;
+        let bogus = PaneId::new();
+
+        let result = store
+            .add_browser_surface_to_pane(bogus, "about:blank".into())
+            .await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn add_browser_surface_to_pane_targets_correct_pane_after_split() {
+        // split을 통해 만들어진 새 pane(원래 pane이 아닌 sibling)에도
+        // 탭브라우저를 추가할 수 있어야 하고, 다른 pane의 탭 개수에는
+        // 영향이 없어야 한다.
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("demo".into()), std::path::PathBuf::from("/tmp/demo"))
+            .await;
+        let original = first_pane(&store.get_workspace(ws_id).await.unwrap());
+
+        let (_, sibling) = store
+            .split_pane(original, SplitDirection::Vertical)
+            .await
+            .unwrap();
+
+        let (_, browser_surface) = store
+            .add_browser_surface_to_pane(sibling, "https://example.com".into())
+            .await
+            .expect("browser tab should be added to sibling pane");
+
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        let url = find_browser_pane_url(&ws.surfaces[0].root_pane, sibling);
+        assert!(
+            matches!(url.as_deref(), Some("https://example.com")),
+            "sibling should contain the added browser tab"
+        );
+
+        let Pane::Split { first, second, .. } = &ws.surfaces[0].root_pane else {
+            panic!("expected split after split_pane")
+        };
+        let leaf_for = |pane_id: PaneId| -> &Pane {
+            for candidate in [first.as_ref(), second.as_ref()] {
+                if let Pane::Leaf { id, .. } = candidate {
+                    if *id == pane_id {
+                        return candidate;
+                    }
+                }
+            }
+            panic!("pane {pane_id} not found in split tree")
+        };
+        let Pane::Leaf {
+            content: PaneContent::Tabs { surfaces, active },
+            ..
+        } = leaf_for(sibling)
+        else {
+            panic!("sibling pane should be tabbed leaf")
+        };
+        assert_eq!(*active, browser_surface);
+        assert_eq!(surfaces.len(), 2);
+
+        let Pane::Leaf {
+            content:
+                PaneContent::Tabs {
+                    surfaces: orig_surfaces,
+                    ..
+                },
+            ..
+        } = leaf_for(original)
+        else {
+            panic!("original pane should be tabbed leaf")
+        };
+        assert_eq!(orig_surfaces.len(), 1, "original pane untouched");
     }
 }

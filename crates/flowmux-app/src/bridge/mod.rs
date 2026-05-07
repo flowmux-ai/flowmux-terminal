@@ -107,6 +107,8 @@ pub enum GtkCommand {
     /// (Reserved for the planned horizontal surface-tab bar; currently
     /// unused since the sidebar shows workspaces, not surfaces.)
     NewSurface { pane: PaneId },
+    /// 같은 pane에 빈(about:blank) 탭브라우저를 새 탭으로 추가한다.
+    NewBrowserSurface { pane: PaneId },
     /// Switch the active pane-local surface tab.
     ActivateSurface { pane: PaneId, surface: SurfaceId },
     /// Close a pane-local surface tab.

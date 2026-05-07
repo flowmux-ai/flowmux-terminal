@@ -363,13 +363,21 @@ fn build_leaf_pane(
     }
     tools.append(&split_down);
 
-    let add = pane_tool_button("tab-new-symbolic", "New terminal tab");
+    let add = pane_tool_button("tab-new-symbolic", "탭 추가");
     {
         let cb = callbacks.on_new_surface.clone();
         let pane_id = pane_id;
         add.connect_clicked(move |_| (cb.borrow_mut())(pane_id));
     }
     tools.append(&add);
+
+    let add_browser = pane_tool_button("web-browser-symbolic", "탭브라우저 추가");
+    {
+        let cb = callbacks.on_new_browser_surface.clone();
+        let pane_id = pane_id;
+        add_browser.connect_clicked(move |_| (cb.borrow_mut())(pane_id));
+    }
+    tools.append(&add_browser);
 
     stack.set_visible_child_name(&active.to_string());
     tabbar.append(&tabs);
@@ -421,6 +429,7 @@ fn surface_tab(surface: &PaneSurface, active: bool) -> (gtk::Box, gtk::Label) {
     button.add_css_class("flat");
     button.add_css_class("flowmux-pane-tab-main");
     button.set_tooltip_text(Some(&surface.title));
+    button.set_focus_on_click(false);
 
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     let icon_name = match surface.kind {
@@ -440,6 +449,7 @@ fn surface_tab(surface: &PaneSurface, active: bool) -> (gtk::Box, gtk::Label) {
     close.add_css_class("flat");
     close.add_css_class("flowmux-pane-tab-close");
     close.set_tooltip_text(Some("Close tab"));
+    close.set_focus_on_click(false);
     tab.append(&close);
 
     (tab, label)
@@ -450,6 +460,7 @@ fn pane_tool_button(icon_name: &str, tooltip: &str) -> gtk::Button {
     button.add_css_class("flat");
     button.add_css_class("flowmux-pane-tool");
     button.set_tooltip_text(Some(tooltip));
+    button.set_focus_on_click(false);
     button
 }
 
@@ -461,7 +472,7 @@ fn build_panel(
     callbacks: &PaneCallbacks,
     registry: Rc<RefCell<PaneRegistry>>,
     theme: Arc<ResolvedTheme>,
-    frame: gtk::Frame,
+    _frame: gtk::Frame,
 ) -> gtk::Widget {
     match &surface.kind {
         SurfaceKind::Terminal { cwd, shell } => {
@@ -479,19 +490,6 @@ fn build_panel(
                     }
                 });
             }
-
-            let frame_in = frame.clone();
-            let frame_out = frame.clone();
-            let focus = gtk::EventControllerFocus::new();
-            focus.connect_enter(move |_| {
-                if !frame_in.has_css_class("focused") {
-                    frame_in.add_css_class("focused");
-                }
-            });
-            focus.connect_leave(move |_| {
-                frame_out.remove_css_class("focused");
-            });
-            pane.widget.add_controller(focus);
 
             let widget = pane.root.clone();
             let mut r = registry.borrow_mut();

@@ -113,6 +113,8 @@ pub struct PaneCallbacks {
     pub on_activate_surface: Rc<RefCell<dyn FnMut(PaneId, SurfaceId)>>,
     /// Pane-local new terminal tab.
     pub on_new_surface: Rc<RefCell<dyn FnMut(PaneId)>>,
+    /// Pane-local new browser tab (탭브라우저 추가).
+    pub on_new_browser_surface: Rc<RefCell<dyn FnMut(PaneId)>>,
     /// Pane-local close tab.
     pub on_close_surface: Rc<RefCell<dyn FnMut(PaneId, SurfaceId)>>,
     /// Pane-local rename tab.

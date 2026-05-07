@@ -366,18 +366,22 @@ impl WindowController {
                     }
                 }
             }
+            GtkCommand::NewBrowserSurface { pane } => {
+                if let Some((ws_id, _surface)) = self
+                    .store
+                    .add_browser_surface_to_pane(pane, "about:blank".into())
+                    .await
+                {
+                    if let Some(ws) = self.store.get_workspace(ws_id).await {
+                        self.rerender_workspace(&ws);
+                    }
+                }
+            }
             GtkCommand::ActivateSurface { pane, surface } => {
                 self.store.set_active_surface(pane, surface).await;
                 self.pane_registry
                     .borrow_mut()
                     .activate_surface(pane, surface);
-                let registry = self.pane_registry.clone();
-                glib::idle_add_local_once(move || {
-                    let r = registry.borrow();
-                    if let Some(term) = r.active_terminal(pane) {
-                        term.widget.grab_focus();
-                    }
-                });
             }
             GtkCommand::CloseSurface { pane, surface, ack } => {
                 match self.store.close_surface(pane, surface).await {
@@ -863,6 +867,15 @@ fn make_callbacks(focused: FocusedPane, bridge: Bridge) -> PaneCallbacks {
                 let bridge = bridge.clone();
                 glib::MainContext::default().spawn_local(async move {
                     let _ = bridge.tx.send(GtkCommand::NewSurface { pane }).await;
+                });
+            }))
+        },
+        on_new_browser_surface: {
+            let bridge = bridge.clone();
+            Rc::new(RefCell::new(move |pane| {
+                let bridge = bridge.clone();
+                glib::MainContext::default().spawn_local(async move {
+                    let _ = bridge.tx.send(GtkCommand::NewBrowserSurface { pane }).await;
                 });
             }))
         },
