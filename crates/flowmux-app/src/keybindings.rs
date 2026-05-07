@@ -54,7 +54,8 @@ pub const BINDINGS: &[(&str, &[&str])] = &[
     // Common terminal conventions
     ("win.copy", &["<Ctrl><Shift>c"]),
     ("win.paste", &["<Ctrl><Shift>v"]),
-    ("win.new-workspace", &["<Ctrl><Shift>t", "<Ctrl><Shift>n"]),
+    ("win.new-surface", &["<Ctrl><Shift>t"]),
+    ("win.new-workspace", &["<Ctrl><Shift>n"]),
 ];
 
 /// Install accelerators on the application.
@@ -105,8 +106,12 @@ pub fn install_actions(
         focused.clone(),
         move_focus(bridge.clone(), FocusDir::Down),
     );
-    let close_surface =
-        make_pane_action("close-surface", focused.clone(), move_close(bridge.clone()));
+    let close_surface = make_close_surface_action(
+        "close-surface",
+        focused.clone(),
+        bridge.clone(),
+        registry.clone(),
+    );
 
     let new_workspace = {
         let bridge = bridge.clone();
@@ -122,6 +127,19 @@ pub fn install_actions(
             })
             .build()
     };
+    let new_surface = make_pane_action(
+        "new-surface",
+        focused.clone(),
+        Box::new({
+            let bridge = bridge.clone();
+            move |pane| {
+                let bridge = bridge.clone();
+                glib::MainContext::default().spawn_local(async move {
+                    let _ = bridge.tx.send(GtkCommand::NewSurface { pane }).await;
+                });
+            }
+        }),
+    );
 
     let next_workspace = make_ws_nav_action("next-workspace", WsNav::Next, bridge.clone());
     let prev_workspace = make_ws_nav_action("prev-workspace", WsNav::Prev, bridge.clone());
@@ -168,6 +186,7 @@ pub fn install_actions(
         focus_up,
         focus_down,
         close_surface,
+        new_surface,
         new_workspace,
         next_workspace,
         prev_workspace,
@@ -251,24 +270,49 @@ fn move_focus(bridge: Bridge, dir: FocusDir) -> PaneAction {
     })
 }
 
-fn move_close(bridge: Bridge) -> PaneAction {
-    Box::new(move |pane| {
-        let bridge = bridge.clone();
-        glib::MainContext::default().spawn_local(async move {
-            let (tx, rx) = oneshot::channel();
-            let _ = bridge
-                .tx
-                .send(GtkCommand::CloseFocused { pane, ack: tx })
-                .await;
-            let _ = rx.await;
-        });
-    })
-}
-
 #[derive(Clone, Copy)]
 enum ClipboardOp {
     Copy,
     Paste,
+}
+
+fn make_close_surface_action(
+    name: &'static str,
+    focused: FocusedPane,
+    bridge: Bridge,
+    registry: TerminalRegistry,
+) -> gtk::gio::ActionEntry<adw::ApplicationWindow> {
+    gtk::gio::ActionEntry::builder(name)
+        .activate(move |_, _, _| {
+            let pane = match focused.get() {
+                Some(p) => p,
+                None => {
+                    tracing::info!(action = name, "no pane focused — ignoring");
+                    return;
+                }
+            };
+            let surface = match registry.borrow().active_surface(pane) {
+                Some(surface) => surface,
+                None => {
+                    tracing::info!(action = name, %pane, "no active surface — ignoring");
+                    return;
+                }
+            };
+            let bridge = bridge.clone();
+            glib::MainContext::default().spawn_local(async move {
+                let (tx, rx) = oneshot::channel();
+                let _ = bridge
+                    .tx
+                    .send(GtkCommand::CloseSurface {
+                        pane,
+                        surface,
+                        ack: tx,
+                    })
+                    .await;
+                let _ = rx.await;
+            });
+        })
+        .build()
 }
 
 fn make_clipboard_action(
@@ -284,7 +328,7 @@ fn make_clipboard_action(
                 None => return,
             };
             let r = registry.borrow();
-            let Some(term) = r.terminals.get(&pane) else {
+            let Some(term) = r.active_terminal(pane) else {
                 return;
             };
             match op {

@@ -118,6 +118,16 @@ pub enum SurfaceKind {
     },
 }
 
+/// A tab inside a leaf pane. cmux calls these surfaces: each pane can
+/// host multiple terminal/browser surfaces, with exactly one active at
+/// a time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaneSurface {
+    pub id: SurfaceId,
+    pub title: String,
+    pub kind: SurfaceKind,
+}
+
 /// A pane is either a leaf (rendered content) or a binary split. This
 /// matches the recursive split model used by tmux, Ghostty, and cmux.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -166,7 +176,7 @@ impl Pane {
                         ratio,
                         first: Box::new(Pane::Leaf {
                             id: target,
-                            content: PaneContent::Terminal { pid: None },
+                            content: PaneContent::tabbed_terminal("Terminal", None),
                         }),
                         second: Box::new(Pane::Leaf {
                             id: PaneId::new(),
@@ -214,6 +224,123 @@ impl Pane {
             }
         }
         rec(self, &mut f);
+    }
+
+    /// Normalize legacy leaf content into pane-local surface tabs.
+    pub fn normalize_leaf_tabs(&mut self, fallback_cwd: Option<PathBuf>) {
+        match self {
+            Pane::Leaf { content, .. } => content.normalize_to_tabs(fallback_cwd),
+            Pane::Split { first, second, .. } => {
+                first.normalize_leaf_tabs(fallback_cwd.clone());
+                second.normalize_leaf_tabs(fallback_cwd);
+            }
+        }
+    }
+
+    pub fn add_surface_to_leaf(
+        &mut self,
+        target: PaneId,
+        surface: PaneSurface,
+    ) -> Option<SurfaceId> {
+        match self {
+            Pane::Leaf { id, content } if *id == target => {
+                content.normalize_to_tabs(None);
+                match content {
+                    PaneContent::Tabs { active, surfaces } => {
+                        let id = surface.id;
+                        *active = id;
+                        surfaces.push(surface);
+                        Some(id)
+                    }
+                    PaneContent::Terminal { .. } | PaneContent::Browser { .. } => None,
+                }
+            }
+            Pane::Leaf { .. } => None,
+            Pane::Split { first, second, .. } => first
+                .add_surface_to_leaf(target, surface.clone())
+                .or_else(|| second.add_surface_to_leaf(target, surface)),
+        }
+    }
+
+    pub fn set_active_surface(&mut self, target: PaneId, surface_id: SurfaceId) -> bool {
+        match self {
+            Pane::Leaf { id, content } if *id == target => match content {
+                PaneContent::Tabs { active, surfaces } => {
+                    if surfaces.iter().any(|surface| surface.id == surface_id) {
+                        *active = surface_id;
+                        true
+                    } else {
+                        false
+                    }
+                }
+                PaneContent::Terminal { .. } | PaneContent::Browser { .. } => false,
+            },
+            Pane::Leaf { .. } => false,
+            Pane::Split { first, second, .. } => {
+                first.set_active_surface(target, surface_id)
+                    || second.set_active_surface(target, surface_id)
+            }
+        }
+    }
+
+    pub fn close_surface_in_leaf(
+        &mut self,
+        target: PaneId,
+        surface_id: SurfaceId,
+    ) -> CloseSurfaceOutcome {
+        match self {
+            Pane::Leaf { id, content } if *id == target => match content {
+                PaneContent::Tabs { active, surfaces } => {
+                    let Some(idx) = surfaces.iter().position(|surface| surface.id == surface_id)
+                    else {
+                        return CloseSurfaceOutcome::NotFound;
+                    };
+                    surfaces.remove(idx);
+                    if surfaces.is_empty() {
+                        CloseSurfaceOutcome::LastSurfaceRemoved
+                    } else {
+                        if *active == surface_id
+                            || !surfaces.iter().any(|surface| surface.id == *active)
+                        {
+                            *active = surfaces[idx.saturating_sub(1).min(surfaces.len() - 1)].id;
+                        }
+                        CloseSurfaceOutcome::SurfaceRemoved
+                    }
+                }
+                PaneContent::Terminal { .. } | PaneContent::Browser { .. } => {
+                    CloseSurfaceOutcome::NotFound
+                }
+            },
+            Pane::Leaf { .. } => CloseSurfaceOutcome::NotFound,
+            Pane::Split { first, second, .. } => {
+                let first_outcome = first.close_surface_in_leaf(target, surface_id);
+                if matches!(first_outcome, CloseSurfaceOutcome::NotFound) {
+                    second.close_surface_in_leaf(target, surface_id)
+                } else {
+                    first_outcome
+                }
+            }
+        }
+    }
+
+    pub fn active_surface_id(&self, target: PaneId) -> Option<SurfaceId> {
+        match self {
+            Pane::Leaf { id, content } if *id == target => content.active_surface().map(|s| s.id),
+            Pane::Leaf { .. } => None,
+            Pane::Split { first, second, .. } => first
+                .active_surface_id(target)
+                .or_else(|| second.active_surface_id(target)),
+        }
+    }
+
+    pub fn surface_count(&self, target: PaneId) -> Option<usize> {
+        match self {
+            Pane::Leaf { id, content } if *id == target => Some(content.surface_count()),
+            Pane::Leaf { .. } => None,
+            Pane::Split { first, second, .. } => first
+                .surface_count(target)
+                .or_else(|| second.surface_count(target)),
+        }
     }
 
     pub fn first_leaf_id(&self) -> Option<PaneId> {
@@ -267,6 +394,13 @@ impl Pane {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseSurfaceOutcome {
+    SurfaceRemoved,
+    LastSurfaceRemoved,
+    NotFound,
+}
+
 /// Outcome of [`Pane::remove_leaf`].
 pub enum RemoveOutcome {
     /// Returned only at the root: the entire tree was a single leaf
@@ -281,8 +415,109 @@ pub enum RemoveOutcome {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PaneContent {
+    /// New cmux-compatible shape: pane-local tabs.
+    Tabs {
+        active: SurfaceId,
+        surfaces: Vec<PaneSurface>,
+    },
+    /// Legacy state shape. New code normalizes these into
+    /// [`PaneContent::Tabs`] on load/create.
     Terminal { pid: Option<u32> },
+    /// Legacy state shape. New code normalizes these into
+    /// [`PaneContent::Tabs`] on load/create.
     Browser { url: String },
+}
+
+impl PaneSurface {
+    pub fn terminal(title: impl Into<String>, cwd: Option<PathBuf>) -> Self {
+        Self {
+            id: SurfaceId::new(),
+            title: title.into(),
+            kind: SurfaceKind::Terminal { shell: None, cwd },
+        }
+    }
+
+    pub fn browser(title: impl Into<String>, url: String) -> Self {
+        Self {
+            id: SurfaceId::new(),
+            title: title.into(),
+            kind: SurfaceKind::Browser {
+                initial_url: Some(url),
+            },
+        }
+    }
+}
+
+impl PaneContent {
+    pub fn tabbed_terminal(title: impl Into<String>, cwd: Option<PathBuf>) -> Self {
+        let surface = PaneSurface::terminal(title, cwd);
+        Self::Tabs {
+            active: surface.id,
+            surfaces: vec![surface],
+        }
+    }
+
+    pub fn tabbed_browser(title: impl Into<String>, url: String) -> Self {
+        let surface = PaneSurface::browser(title, url);
+        Self::Tabs {
+            active: surface.id,
+            surfaces: vec![surface],
+        }
+    }
+
+    pub fn active_surface(&self) -> Option<&PaneSurface> {
+        match self {
+            PaneContent::Tabs { active, surfaces } => surfaces
+                .iter()
+                .find(|surface| surface.id == *active)
+                .or_else(|| surfaces.first()),
+            PaneContent::Terminal { .. } | PaneContent::Browser { .. } => None,
+        }
+    }
+
+    pub fn active_surface_mut(&mut self) -> Option<&mut PaneSurface> {
+        match self {
+            PaneContent::Tabs { active, surfaces } => {
+                let idx = surfaces
+                    .iter()
+                    .position(|surface| surface.id == *active)
+                    .unwrap_or(0);
+                surfaces.get_mut(idx)
+            }
+            PaneContent::Terminal { .. } | PaneContent::Browser { .. } => None,
+        }
+    }
+
+    pub fn surface_count(&self) -> usize {
+        match self {
+            PaneContent::Tabs { surfaces, .. } => surfaces.len(),
+            PaneContent::Terminal { .. } | PaneContent::Browser { .. } => 1,
+        }
+    }
+
+    pub fn normalize_to_tabs(&mut self, fallback_cwd: Option<PathBuf>) {
+        let replacement = match self {
+            PaneContent::Terminal { .. } => {
+                Some(PaneContent::tabbed_terminal("Terminal", fallback_cwd))
+            }
+            PaneContent::Browser { url } => {
+                Some(PaneContent::tabbed_browser("Browser", url.clone()))
+            }
+            PaneContent::Tabs { active, surfaces } => {
+                if surfaces.is_empty() {
+                    let surface = PaneSurface::terminal("Terminal", fallback_cwd);
+                    *active = surface.id;
+                    surfaces.push(surface);
+                } else if !surfaces.iter().any(|surface| surface.id == *active) {
+                    *active = surfaces[0].id;
+                }
+                None
+            }
+        };
+        if let Some(replacement) = replacement {
+            *self = replacement;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -427,6 +662,58 @@ mod tests {
             content: PaneContent::Terminal { pid: None },
         };
         assert!(matches!(p.remove_leaf(other), RemoveOutcome::NotFound(_)));
+    }
+
+    #[test]
+    fn pane_content_normalizes_legacy_terminal_to_surface_tab() {
+        let cwd = PathBuf::from("/tmp/flowmux-core-test");
+        let mut content = PaneContent::Terminal { pid: Some(123) };
+
+        content.normalize_to_tabs(Some(cwd.clone()));
+
+        let PaneContent::Tabs { active, surfaces } = content else {
+            panic!("expected tabbed content")
+        };
+        assert_eq!(surfaces.len(), 1);
+        assert_eq!(surfaces[0].id, active);
+        assert!(matches!(
+            &surfaces[0].kind,
+            SurfaceKind::Terminal { cwd: Some(got), .. } if got == &cwd
+        ));
+    }
+
+    #[test]
+    fn pane_surface_tabs_can_activate_and_close() {
+        let pane_id = PaneId::new();
+        let mut pane = Pane::Leaf {
+            id: pane_id,
+            content: PaneContent::tabbed_terminal("one", None),
+        };
+        let second = PaneSurface::terminal("two", None);
+        let second_id = second.id;
+
+        assert_eq!(pane.add_surface_to_leaf(pane_id, second), Some(second_id));
+        assert_eq!(pane.active_surface_id(pane_id), Some(second_id));
+
+        let first_id = match &pane {
+            Pane::Leaf {
+                content: PaneContent::Tabs { surfaces, .. },
+                ..
+            } => surfaces[0].id,
+            _ => panic!("expected tabbed leaf"),
+        };
+        assert!(pane.set_active_surface(pane_id, first_id));
+        assert_eq!(pane.active_surface_id(pane_id), Some(first_id));
+
+        assert_eq!(
+            pane.close_surface_in_leaf(pane_id, first_id),
+            CloseSurfaceOutcome::SurfaceRemoved
+        );
+        assert_eq!(pane.active_surface_id(pane_id), Some(second_id));
+        assert_eq!(
+            pane.close_surface_in_leaf(pane_id, second_id),
+            CloseSurfaceOutcome::LastSurfaceRemoved
+        );
     }
 
     #[test]

@@ -158,6 +158,28 @@ impl ResolvedTheme {
     padding: 8px;
     border-radius: 7px;
 }}
+.flowmux-pane-tabbar {{
+    background-color: rgba(255,255,255,0.025);
+    border-bottom: 1px solid {border};
+    padding: 2px;
+}}
+.flowmux-pane-tab-wrap {{
+    border-radius: 6px;
+}}
+.flowmux-pane-tab {{
+    min-height: 24px;
+    padding: 2px 8px;
+    border-radius: 6px 0 0 6px;
+}}
+.flowmux-pane-tab.active {{
+    background-color: rgba(255,255,255,0.10);
+}}
+.flowmux-pane-tab-close {{
+    min-height: 24px;
+    min-width: 24px;
+    padding: 2px;
+    border-radius: 0 6px 6px 0;
+}}
 .navigation-sidebar {{
     background-color: {sidebar};
 }}

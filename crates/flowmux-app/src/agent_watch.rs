@@ -16,7 +16,7 @@
 
 use crate::bridge::{Bridge, GtkCommand};
 use crate::ui::workspace_view::PaneRegistry;
-use flowmux_core::PaneId;
+use flowmux_core::{PaneId, SurfaceId};
 use gtk::glib;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -65,22 +65,23 @@ fn agent_name_for(pid: u32) -> Option<String> {
 
 #[derive(Default)]
 struct AgentWatcher {
-    /// Per-pane set of agent comm strings observed last tick.
-    state: HashMap<PaneId, HashSet<String>>,
+    /// Per-terminal-surface agent names observed last tick, carrying
+    /// the pane id so notifications can still target the pane frame.
+    state: HashMap<SurfaceId, (PaneId, HashSet<String>)>,
 }
 
 impl AgentWatcher {
     fn poll(&mut self, registry: &PaneRegistry) -> Vec<(PaneId, String)> {
         let mut events = Vec::new();
-        let mut now: HashMap<PaneId, HashSet<String>> = HashMap::new();
-        for (pane_id, term) in registry.terminals.iter() {
+        let mut now: HashMap<SurfaceId, (PaneId, HashSet<String>)> = HashMap::new();
+        for (surface_id, term) in registry.terminals.iter() {
             let agents = collect_agents(term);
-            if let Some(prev) = self.state.get(pane_id) {
+            if let Some((pane_id, prev)) = self.state.get(surface_id) {
                 for gone in prev.difference(&agents) {
                     events.push((*pane_id, gone.clone()));
                 }
             }
-            now.insert(*pane_id, agents);
+            now.insert(*surface_id, (term.id, agents));
         }
         // Forget panes that no longer exist (closed tabs etc).
         self.state = now;

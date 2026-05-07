@@ -7,8 +7,8 @@
 //! boot.
 
 use flowmux_core::{
-    Pane, PaneContent, PaneId, RemoveOutcome, SplitDirection, Surface, SurfaceId, SurfaceKind,
-    Workspace, WorkspaceId,
+    CloseSurfaceOutcome, Pane, PaneContent, PaneId, PaneSurface, RemoveOutcome, SplitDirection,
+    Surface, SurfaceId, SurfaceKind, Workspace, WorkspaceId,
 };
 use flowmux_state::State;
 use std::sync::Arc;
@@ -50,6 +50,8 @@ impl StateStore {
     /// Construct from inside a tokio runtime context. Spawns the
     /// persistence loop on the current runtime.
     pub fn new(initial: State) -> Self {
+        let mut initial = initial;
+        normalize_state(&mut initial);
         let store = Self {
             inner: Arc::new(Mutex::new(initial)),
             dirty: Arc::new(Notify::new()),
@@ -63,6 +65,8 @@ impl StateStore {
     /// [`StateStore::persist_loop`] on the runtime themselves. Useful
     /// from the GTK main thread before the runtime is fully wired.
     pub fn new_lazy(initial: State) -> Self {
+        let mut initial = initial;
+        normalize_state(&mut initial);
         Self {
             inner: Arc::new(Mutex::new(initial)),
             dirty: Arc::new(Notify::new()),
@@ -107,12 +111,12 @@ impl StateStore {
                 id: surface_id,
                 kind: SurfaceKind::Terminal {
                     shell: None,
-                    cwd: Some(root),
+                    cwd: Some(root.clone()),
                 },
                 title: "main".into(),
                 root_pane: Pane::Leaf {
                     id: pane_id,
-                    content: PaneContent::Terminal { pid: None },
+                    content: PaneContent::tabbed_terminal("Terminal", Some(root)),
                 },
             }],
             color: Some(default_color_for(id)),
@@ -165,7 +169,7 @@ impl StateStore {
                     target,
                     direction,
                     0.5,
-                    PaneContent::Terminal { pid: None },
+                    PaneContent::tabbed_terminal("Terminal", None),
                 ) {
                     let ws_id = ws.id;
                     drop(s);
@@ -192,7 +196,7 @@ impl StateStore {
                     &mut surface.root_pane,
                     Pane::Leaf {
                         id: PaneId::new(),
-                        content: PaneContent::Terminal { pid: None },
+                        content: PaneContent::tabbed_terminal("Terminal", None),
                     },
                 );
                 match root.remove_leaf(target) {
@@ -334,20 +338,38 @@ impl StateStore {
     ) -> Option<SurfaceId> {
         let mut s = self.inner.lock().await;
         let w = s.workspaces.iter_mut().find(|w| w.id == workspace)?;
-        let surface_id = SurfaceId::new();
-        let pane_id = PaneId::new();
-        w.surfaces.push(Surface {
-            id: surface_id,
-            kind: SurfaceKind::Terminal { shell: None, cwd },
-            title: format!("surface-{}", w.surfaces.len() + 1),
-            root_pane: Pane::Leaf {
-                id: pane_id,
-                content: PaneContent::Terminal { pid: None },
-            },
-        });
+        let pane = w.surfaces.first()?.root_pane.first_leaf_id()?;
+        let tab_count = w
+            .surfaces
+            .first()
+            .and_then(|surface| surface.root_pane.surface_count(pane))
+            .unwrap_or(0);
+        let surface = PaneSurface::terminal(format!("Terminal {}", tab_count + 1), cwd);
+        let surface_id = w.surfaces[0].root_pane.add_surface_to_leaf(pane, surface)?;
         drop(s);
         self.mark_dirty();
         Some(surface_id)
+    }
+
+    pub async fn add_terminal_surface_to_pane(
+        &self,
+        pane: PaneId,
+        cwd: Option<std::path::PathBuf>,
+    ) -> Option<(WorkspaceId, SurfaceId)> {
+        let mut s = self.inner.lock().await;
+        for ws in s.workspaces.iter_mut() {
+            for surface in ws.surfaces.iter_mut() {
+                let tab_count = surface.root_pane.surface_count(pane).unwrap_or(0);
+                let tab = PaneSurface::terminal(format!("Terminal {}", tab_count + 1), cwd.clone());
+                if let Some(surface_id) = surface.root_pane.add_surface_to_leaf(pane, tab) {
+                    let ws_id = ws.id;
+                    drop(s);
+                    self.mark_dirty();
+                    return Some((ws_id, surface_id));
+                }
+            }
+        }
+        None
     }
 
     /// Add a browser surface to a workspace and return its id.
@@ -358,22 +380,76 @@ impl StateStore {
     ) -> Option<SurfaceId> {
         let mut s = self.inner.lock().await;
         let w = s.workspaces.iter_mut().find(|w| w.id == workspace)?;
-        let surface_id = SurfaceId::new();
-        let pane_id = PaneId::new();
-        w.surfaces.push(Surface {
-            id: surface_id,
-            kind: SurfaceKind::Browser {
-                initial_url: Some(url.clone()),
-            },
-            title: "Browser".into(),
-            root_pane: Pane::Leaf {
-                id: pane_id,
-                content: PaneContent::Browser { url },
-            },
-        });
+        let pane = w.surfaces.first()?.root_pane.first_leaf_id()?;
+        let tab = PaneSurface::browser("Browser", url);
+        let surface_id = w.surfaces[0].root_pane.add_surface_to_leaf(pane, tab)?;
         drop(s);
         self.mark_dirty();
         Some(surface_id)
+    }
+
+    pub async fn add_browser_surface_to_pane(
+        &self,
+        pane: PaneId,
+        url: String,
+    ) -> Option<(WorkspaceId, SurfaceId)> {
+        let mut s = self.inner.lock().await;
+        for ws in s.workspaces.iter_mut() {
+            for surface in ws.surfaces.iter_mut() {
+                let tab = PaneSurface::browser("Browser", url.clone());
+                if let Some(surface_id) = surface.root_pane.add_surface_to_leaf(pane, tab) {
+                    let ws_id = ws.id;
+                    drop(s);
+                    self.mark_dirty();
+                    return Some((ws_id, surface_id));
+                }
+            }
+        }
+        None
+    }
+
+    pub async fn set_active_surface(
+        &self,
+        pane: PaneId,
+        surface_id: SurfaceId,
+    ) -> Option<WorkspaceId> {
+        let mut s = self.inner.lock().await;
+        for ws in s.workspaces.iter_mut() {
+            for surface in ws.surfaces.iter_mut() {
+                if surface.root_pane.set_active_surface(pane, surface_id) {
+                    let ws_id = ws.id;
+                    drop(s);
+                    self.mark_dirty();
+                    return Some(ws_id);
+                }
+            }
+        }
+        None
+    }
+
+    pub async fn close_surface(&self, pane: PaneId, surface_id: SurfaceId) -> Option<CloseOutcome> {
+        let mut s = self.inner.lock().await;
+        for ws_idx in 0..s.workspaces.len() {
+            for surf_idx in 0..s.workspaces[ws_idx].surfaces.len() {
+                let outcome = s.workspaces[ws_idx].surfaces[surf_idx]
+                    .root_pane
+                    .close_surface_in_leaf(pane, surface_id);
+                match outcome {
+                    CloseSurfaceOutcome::SurfaceRemoved => {
+                        let ws_id = s.workspaces[ws_idx].id;
+                        drop(s);
+                        self.mark_dirty();
+                        return Some(CloseOutcome::SurfaceRemoved { workspace: ws_id });
+                    }
+                    CloseSurfaceOutcome::LastSurfaceRemoved => {
+                        drop(s);
+                        return self.close_pane(pane).await;
+                    }
+                    CloseSurfaceOutcome::NotFound => {}
+                }
+            }
+        }
+        None
     }
 
     pub fn mark_dirty(&self) {
@@ -394,12 +470,73 @@ impl StateStore {
     }
 }
 
+fn normalize_state(state: &mut State) {
+    for ws in &mut state.workspaces {
+        for surface in &mut ws.surfaces {
+            let fallback_cwd = match &surface.kind {
+                SurfaceKind::Terminal { cwd, .. } => cwd.clone(),
+                SurfaceKind::Browser { .. } => None,
+            };
+            surface.root_pane.normalize_leaf_tabs(fallback_cwd);
+        }
+        if ws.surfaces.len() > 1 {
+            migrate_top_level_surfaces_to_first_pane(ws);
+        }
+    }
+}
+
+fn migrate_top_level_surfaces_to_first_pane(ws: &mut Workspace) {
+    let Some(target_pane) = ws.surfaces[0].root_pane.first_leaf_id() else {
+        return;
+    };
+    let extra_surfaces = ws.surfaces.split_off(1);
+    for surface in extra_surfaces {
+        let Some(mut tab) = first_active_pane_surface(&surface.root_pane) else {
+            continue;
+        };
+        tab.id = surface.id;
+        if !surface.title.is_empty() {
+            tab.title = surface.title;
+        }
+        ws.surfaces[0]
+            .root_pane
+            .add_surface_to_leaf(target_pane, tab);
+    }
+}
+
+fn first_active_pane_surface(pane: &Pane) -> Option<PaneSurface> {
+    match pane {
+        Pane::Leaf { content, .. } => content.active_surface().cloned(),
+        Pane::Split { first, second, .. } => {
+            first_active_pane_surface(first).or_else(|| first_active_pane_surface(second))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn first_pane(ws: &Workspace) -> PaneId {
         ws.surfaces[0].root_pane.first_leaf_id().unwrap()
+    }
+
+    fn first_pane_tab_count(ws: &Workspace) -> usize {
+        let Pane::Leaf { content, .. } = &ws.surfaces[0].root_pane else {
+            panic!("expected single leaf")
+        };
+        match content {
+            PaneContent::Tabs { surfaces, .. } => surfaces.len(),
+            PaneContent::Terminal { .. } | PaneContent::Browser { .. } => 1,
+        }
+    }
+
+    fn first_pane_active_surface(ws: &Workspace) -> SurfaceId {
+        let pane = first_pane(ws);
+        ws.surfaces[0]
+            .root_pane
+            .active_surface_id(pane)
+            .expect("expected active surface")
     }
 
     #[tokio::test]
@@ -474,6 +611,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn normalizes_legacy_top_level_surfaces_into_first_pane_tabs() {
+        let ws_id = WorkspaceId::new();
+        let first_surface = SurfaceId::new();
+        let second_surface = SurfaceId::new();
+        let mut state = State::default();
+        state.workspaces.push(Workspace {
+            id: ws_id,
+            name: "legacy".into(),
+            root_dir: "/tmp/legacy".into(),
+            git: None,
+            listening_ports: vec![],
+            surfaces: vec![
+                Surface {
+                    id: first_surface,
+                    kind: SurfaceKind::Terminal {
+                        shell: None,
+                        cwd: Some("/tmp/legacy".into()),
+                    },
+                    title: "main".into(),
+                    root_pane: Pane::Leaf {
+                        id: PaneId::new(),
+                        content: PaneContent::Terminal { pid: None },
+                    },
+                },
+                Surface {
+                    id: second_surface,
+                    kind: SurfaceKind::Browser {
+                        initial_url: Some("https://example.com".into()),
+                    },
+                    title: "Browser".into(),
+                    root_pane: Pane::Leaf {
+                        id: PaneId::new(),
+                        content: PaneContent::Browser {
+                            url: "https://example.com".into(),
+                        },
+                    },
+                },
+            ],
+            color: None,
+        });
+
+        let store = StateStore::new_lazy(state);
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        assert_eq!(ws.surfaces.len(), 1);
+        assert_eq!(first_pane_tab_count(&ws), 2);
+
+        let Pane::Leaf {
+            content: PaneContent::Tabs { surfaces, active },
+            ..
+        } = &ws.surfaces[0].root_pane
+        else {
+            panic!("expected migrated tabbed root")
+        };
+        assert_eq!(*active, second_surface);
+        assert!(surfaces.iter().any(|surface| surface.id == second_surface
+            && matches!(&surface.kind, SurfaceKind::Browser { .. })));
+    }
+
+    #[tokio::test]
     async fn add_surfaces_and_remove_workspace_keep_order_consistent() {
         let store = StateStore::new_lazy(State::default());
         let first = store
@@ -491,12 +687,50 @@ mod tests {
             .await;
         assert!(terminal.is_some());
         assert!(browser.is_some());
-        assert_eq!(store.get_workspace(first).await.unwrap().surfaces.len(), 3);
+        assert_eq!(store.get_workspace(first).await.unwrap().surfaces.len(), 1);
+        assert_eq!(
+            first_pane_tab_count(&store.get_workspace(first).await.unwrap()),
+            3
+        );
 
         assert!(store.remove_workspace(first).await);
         let state = store.snapshot().await;
         assert_eq!(state.workspace_order, vec![second]);
         assert_eq!(state.active_workspace, Some(second));
         assert!(!store.remove_workspace(first).await);
+    }
+
+    #[tokio::test]
+    async fn close_surface_removes_tab_then_last_pane() {
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("one".into()), std::path::PathBuf::from("/tmp/one"))
+            .await;
+        let pane = first_pane(&store.get_workspace(ws_id).await.unwrap());
+
+        let (tab_ws, second_surface) = store
+            .add_terminal_surface_to_pane(pane, Some("/tmp/one".into()))
+            .await
+            .unwrap();
+        assert_eq!(tab_ws, ws_id);
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        assert_eq!(first_pane_tab_count(&ws), 2);
+        assert_eq!(first_pane_active_surface(&ws), second_surface);
+
+        let outcome = store.close_surface(pane, second_surface).await.unwrap();
+        assert!(matches!(
+            outcome,
+            CloseOutcome::SurfaceRemoved { workspace } if workspace == ws_id
+        ));
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        assert_eq!(first_pane_tab_count(&ws), 1);
+
+        let last_surface = first_pane_active_surface(&ws);
+        let outcome = store.close_surface(pane, last_surface).await.unwrap();
+        assert!(matches!(
+            outcome,
+            CloseOutcome::WorkspaceRemoved { workspace } if workspace == ws_id
+        ));
+        assert!(store.snapshot().await.workspaces.is_empty());
     }
 }

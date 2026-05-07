@@ -8,7 +8,7 @@
 //! them via `glib::MainContext::spawn_local` and dispatches into the
 //! window controller.
 
-use flowmux_core::{NotificationLevel, PaneId, SplitDirection, WorkspaceId};
+use flowmux_core::{NotificationLevel, PaneId, SplitDirection, SurfaceId, WorkspaceId};
 use std::path::PathBuf;
 use tokio::sync::oneshot;
 
@@ -69,8 +69,15 @@ pub enum GtkCommand {
     /// Open a brand-new terminal surface in the active workspace.
     /// (Reserved for the planned horizontal surface-tab bar; currently
     /// unused since the sidebar shows workspaces, not surfaces.)
-    #[allow(dead_code)]
-    NewSurface,
+    NewSurface { pane: PaneId },
+    /// Switch the active pane-local surface tab.
+    ActivateSurface { pane: PaneId, surface: SurfaceId },
+    /// Close a pane-local surface tab.
+    CloseSurface {
+        pane: PaneId,
+        surface: SurfaceId,
+        ack: oneshot::Sender<Result<(), String>>,
+    },
     /// Create a brand-new workspace and add it to the sidebar. This is
     /// what Ctrl+Shift+T binds to in our model — matching how ghostty's
     /// `cmd+t = new_tab` adds a visible top-level navigation entry.
