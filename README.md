@@ -1,5 +1,7 @@
 # flowmux
 
+<img width="1518" height="837" alt="image" src="https://github.com/user-attachments/assets/ccc5992e-4b6c-44a5-b4b1-ea3cc4c7c42c" />
+
 A Linux/GTK4 terminal with vertical tabs and notifications for AI coding agents.
 
 flowmux is an unofficial GPL-3.0-or-later Linux reimplementation inspired by
