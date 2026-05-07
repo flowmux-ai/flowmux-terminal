@@ -1,8 +1,10 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 [package]
 name = "flowmux-daemon"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 description = "Headless flowmux daemon: IPC server + state without GTK. Useful for CI and for environments where the GUI isn't installed."
 
 [[bin]]

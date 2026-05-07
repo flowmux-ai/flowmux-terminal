@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Byte-stream OSC extractor.
 //!
 //! Some terminal backends (libghostty, raw PTY readers) hand flowmux raw
@@ -30,7 +31,11 @@ pub struct OscExtractor<F: FnMut(&str)> {
 
 impl<F: FnMut(&str)> OscExtractor<F> {
     pub fn new(on_osc: F) -> Self {
-        Self { state: State::Ground, buf: Vec::with_capacity(64), on_osc }
+        Self {
+            state: State::Ground,
+            buf: Vec::with_capacity(64),
+            on_osc,
+        }
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {

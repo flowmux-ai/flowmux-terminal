@@ -2,10 +2,12 @@
 
 A Linux/GTK4 terminal with vertical tabs and notifications for AI coding agents.
 
-flowmux is a clean GPL-3.0 fork of [cmux](https://github.com/manaflow-ai/cmux) (a
-macOS/AppKit app) reimplemented for Linux desktops. The macOS-specific layers
-(AppKit, Sparkle, WebKit, UserNotifications) are replaced with their GTK4
-counterparts (libadwaita, libnotify/D-Bus, WebKitGTK, libghostty).
+flowmux is an unofficial GPL-3.0-or-later Linux reimplementation inspired by
+[cmux](https://github.com/manaflow-ai/cmux), a macOS/AppKit app. It is not
+affiliated with or endorsed by Manaflow. The macOS-specific layers (AppKit,
+Sparkle, WebKit, UserNotifications) are replaced with Linux desktop
+counterparts (GTK4/libadwaita, libnotify/D-Bus, WebKitGTK, vte4 first with
+libghostty planned).
 
 > **Status**: skeleton. The workspace, IPC contract, OSC notification parser,
 > and CLI surface are scaffolded. Terminal rendering, browser pane, SSH
@@ -46,6 +48,7 @@ flowmux/
 ├── packaging/debian/     .deb metadata stub
 ├── resources/desktop/    .desktop file, icons
 ├── LICENSE               GPL-3.0-or-later (verbatim from gnu.org)
+├── THIRD_PARTY_LICENSES.md  Third-party dependency license inventory
 └── NOTICE                Copyright + attribution
 ```
 
@@ -71,3 +74,5 @@ cargo run -p flowmux-app
 ## License
 
 GPL-3.0-or-later. See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).
+Contributions are accepted under the same license; see
+[`CONTRIBUTING.md`](CONTRIBUTING.md).

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Chromium-family browsers (Chrome, Chromium, Brave, Edge, Arc, ...).
 //!
 //! Profile layouts share a SQLite file at:
@@ -20,7 +21,9 @@ pub struct Chromium {
 }
 
 impl Chromium {
-    pub fn new(id: BrowserId) -> Self { Self { id } }
+    pub fn new(id: BrowserId) -> Self {
+        Self { id }
+    }
 
     fn config_dir(&self) -> Option<PathBuf> {
         let home = dirs::home_dir()?;
@@ -37,7 +40,9 @@ impl Chromium {
 }
 
 impl Source for Chromium {
-    fn id(&self) -> BrowserId { self.id }
+    fn id(&self) -> BrowserId {
+        self.id
+    }
 
     fn detect(&self) -> Option<PathBuf> {
         self.config_dir().filter(|p| p.exists())

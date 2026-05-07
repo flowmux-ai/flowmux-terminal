@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! OSC notification sequence parser.
 //!
 //! Inputs are the *payload* between `ESC ]` and the terminator (`BEL` or
@@ -21,8 +22,8 @@ pub struct OscNotification {
 pub fn parse_osc(payload: &str) -> Option<OscNotification> {
     let (code, rest) = payload.split_once(';')?;
     match code.trim() {
-        "9"   => Some(parse_osc_9(rest)),
-        "99"  => Some(parse_osc_99(rest)),
+        "9" => Some(parse_osc_9(rest)),
+        "99" => Some(parse_osc_99(rest)),
         "777" => parse_osc_777(rest),
         _ => None,
     }
@@ -60,7 +61,11 @@ fn parse_osc_777(rest: &str) -> Option<OscNotification> {
     let summary = parts.next()?.trim().to_string();
     let body = parts.next().unwrap_or("").trim().to_string();
     let level = infer_level(if body.is_empty() { &summary } else { &body });
-    Some(OscNotification { title: summary, body, level })
+    Some(OscNotification {
+        title: summary,
+        body,
+        level,
+    })
 }
 
 /// Heuristic level inference. cmux's documented behavior is that any

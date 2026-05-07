@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+name: License audit
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  cargo-deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+
+      - name: Install cargo-about
+        run: cargo install cargo-about --locked --features cli
+
+      - name: Check dependency licenses and sources
+        run: cargo deny --locked check licenses sources
+
+      - name: Check third-party license notice
+        run: |
+          cargo about generate about.hbs --workspace --locked --fail -o THIRD_PARTY_LICENSES.md
+          git diff --exit-code THIRD_PARTY_LICENSES.md

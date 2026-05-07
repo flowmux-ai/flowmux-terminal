@@ -1,21 +1,22 @@
 # Upstream tracking policy
 
-flowmux is a GPL-3.0-or-later fork of cmux. We do not vendor cmux source.
-Instead we pin a known-good upstream commit and reimplement features for
-the Linux/GTK4 stack, recording the mapping per feature.
+flowmux is an unofficial GPL-3.0-or-later Linux reimplementation of cmux. We
+do not vendor cmux source. Instead we pin a known-good upstream commit and
+reimplement features for the Linux/GTK4 stack, recording the mapping per
+feature.
 
 ## Pinned upstream
 
 | Field            | Value                                   |
 |------------------|-----------------------------------------|
 | Repository       | https://github.com/manaflow-ai/cmux     |
-| Pinned commit    | _set on first sync — see `.upstream-cmux/PINNED`_ |
-| Pinned date      | _filled by `scripts/sync-upstream.sh`_  |
+| Pinned commit    | `ca228efb7692b29c695fbe2471b56a7396f14c91` |
+| Pinned date      | 2026-05-07T01:46:45-07:00 |
 | License          | GPL-3.0-or-later (dual; we take the GPL path) |
 
-The pinned commit is recorded in `.upstream-cmux/PINNED` (created by
-`scripts/sync-upstream.sh`, gitignored — the file is local checkout
-metadata, not a vendored copy).
+The public baseline is recorded in this file. `.upstream-cmux/PINNED`
+(created by `scripts/sync-upstream.sh`, gitignored) is local checkout
+metadata, not a vendored copy.
 
 ## Sync workflow
 
@@ -41,7 +42,7 @@ We then:
    `docs/upstream-mapping/<feature>.md`, write the spec in our own
    words from cmux's public docs (README, cmux.com/docs, CHANGELOG),
    then implement.
-3. Bump the pinned commit in `.upstream-cmux/PINNED`.
+3. Bump the pinned commit/date in this file and in `.upstream-cmux/PINNED`.
 
 ## What we do NOT copy
 

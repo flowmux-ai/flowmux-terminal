@@ -8,8 +8,8 @@
 //! Schema is versioned (`schema_version`) so a future flowmux release can
 //! migrate old state files from this format.
 
-use flowmux_core::Workspace;
 use flowmux_config::paths;
+use flowmux_core::Workspace;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -91,10 +91,7 @@ pub fn save_to(path: &Path, state: &State) -> Result<(), StateError> {
     let json = serde_json::to_vec_pretty(&s)?;
 
     // Atomic replace: write to <name>.tmp, fsync, then rename.
-    let tmp = path.with_extension(format!(
-        "tmp.{}",
-        std::process::id()
-    ));
+    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
     {
         let mut f = std::fs::File::create(&tmp)?;
         f.write_all(&json)?;

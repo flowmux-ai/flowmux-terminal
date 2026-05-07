@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! WebKitGTK 6.0 in-app browser pane.
 //!
 //! Replaces the macOS WKWebView path. Each pane owns:
@@ -98,7 +99,12 @@ impl BrowserPane {
             web_view.load_uri("about:blank");
         }
 
-        Self { id, root, web_view, address_bar: address }
+        Self {
+            id,
+            root,
+            web_view,
+            address_bar: address,
+        }
     }
 
     /// Run JS and call `on_done` with the JS result string. The
@@ -130,7 +136,11 @@ fn normalize_uri(raw: &str) -> String {
     if raw.is_empty() {
         return "about:blank".into();
     }
-    if raw.starts_with("http://") || raw.starts_with("https://") || raw.starts_with("about:") || raw.starts_with("file://") {
+    if raw.starts_with("http://")
+        || raw.starts_with("https://")
+        || raw.starts_with("about:")
+        || raw.starts_with("file://")
+    {
         return raw.to_string();
     }
     if raw.starts_with("localhost") || raw.starts_with("127.") || raw.starts_with("[::1]") {

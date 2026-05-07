@@ -1,0 +1,44 @@
+# flowmux theme — example
+#
+# Copy this file to `$XDG_CONFIG_HOME/flowmux/theme` (typically
+# `~/.config/flowmux/theme`) and edit the values. flowmux reads it at
+# startup; no restart-and-re-edit cycle is required if you want to
+# tweak — just relaunch flowmux-app.
+#
+# Format: `key = value` lines, `#` for comments. Hex colors are
+# `#RRGGBB`. The 16-entry palette is `palette = N=#RRGGBB` repeated
+# for N in 0..=15.
+#
+# All keys are optional. Anything you omit falls back to flowmux's
+# built-in dark default.
+
+# Font ------------------------------------------------------------
+font-family = monospace
+font-size   = 12
+
+# Window -----------------------------------------------------------
+background           = #0e1116
+foreground           = #d8dee4
+cursor-color         = #c5cdd9
+selection-background = #264f78
+selection-foreground = #ffffff
+
+# 16-color ANSI palette --------------------------------------------
+# (these placeholder values are intentionally generic — replace with
+# whatever palette you prefer)
+palette = 0=#1a1a1f
+palette = 1=#d35858
+palette = 2=#5fb37c
+palette = 3=#d4ad57
+palette = 4=#5b88c2
+palette = 5=#a570c1
+palette = 6=#5db5be
+palette = 7=#cccccc
+palette = 8=#5c5c66
+palette = 9=#e87b7b
+palette = 10=#86d0a0
+palette = 11=#e8c87a
+palette = 12=#7fa9e1
+palette = 13=#c293da
+palette = 14=#82d0d8
+palette = 15=#f0f0f0

@@ -32,7 +32,14 @@ pub fn build_surface(
     match &surface.kind {
         SurfaceKind::Terminal { cwd, shell } => {
             let argv = shell.clone().map(|s| vec![s]).unwrap_or_default();
-            build_pane(&surface.root_pane, argv, cwd.clone(), callbacks, registry, theme)
+            build_pane(
+                &surface.root_pane,
+                argv,
+                cwd.clone(),
+                callbacks,
+                registry,
+                theme,
+            )
         }
         SurfaceKind::Browser { initial_url } => {
             build_browser_subtree(&surface.root_pane, initial_url.as_deref(), registry)
@@ -52,7 +59,13 @@ fn build_browser_subtree(
             registry.borrow_mut().browsers.insert(*id, pane);
             widget
         }
-        Pane::Split { direction, ratio, first, second, .. } => {
+        Pane::Split {
+            direction,
+            ratio,
+            first,
+            second,
+            ..
+        } => {
             let orient = match direction {
                 SplitDirection::Horizontal => gtk::Orientation::Vertical,
                 SplitDirection::Vertical => gtk::Orientation::Horizontal,
@@ -60,7 +73,11 @@ fn build_browser_subtree(
             let paned = gtk::Paned::new(orient);
             paned.set_hexpand(true);
             paned.set_vexpand(true);
-            paned.set_start_child(Some(&build_browser_subtree(first, initial_url, registry.clone())));
+            paned.set_start_child(Some(&build_browser_subtree(
+                first,
+                initial_url,
+                registry.clone(),
+            )));
             paned.set_end_child(Some(&build_browser_subtree(second, None, registry)));
             let r = *ratio;
             paned.connect_realize(move |p| {
@@ -101,7 +118,13 @@ fn build_pane(
                 widget
             }
         },
-        Pane::Split { direction, ratio, first, second, .. } => {
+        Pane::Split {
+            direction,
+            ratio,
+            first,
+            second,
+            ..
+        } => {
             let orient = match direction {
                 SplitDirection::Horizontal => gtk::Orientation::Vertical,
                 SplitDirection::Vertical => gtk::Orientation::Horizontal,

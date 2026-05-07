@@ -33,29 +33,27 @@ pub type FocusedPane = Rc<Cell<Option<flowmux_core::PaneId>>>;
 /// Ctrl+Shift+N both create a new workspace).
 pub const BINDINGS: &[(&str, &[&str])] = &[
     // Pane tree
-    ("win.split-right",   &["<Ctrl><Shift>Page_Up"]),
-    ("win.split-down",    &["<Ctrl><Shift>Page_Down"]),
-    ("win.focus-left",    &["<Alt>Left"]),
-    ("win.focus-right",   &["<Alt>Right"]),
-    ("win.focus-up",      &["<Alt>Up"]),
-    ("win.focus-down",    &["<Alt>Down"]),
+    ("win.split-right", &["<Ctrl><Shift>Page_Up"]),
+    ("win.split-down", &["<Ctrl><Shift>Page_Down"]),
+    ("win.focus-left", &["<Alt>Left"]),
+    ("win.focus-right", &["<Alt>Right"]),
+    ("win.focus-up", &["<Alt>Up"]),
+    ("win.focus-down", &["<Alt>Down"]),
     ("win.close-surface", &["<Alt>w"]),
-
     // Tab navigation
     ("win.next-workspace", &["<Ctrl>Tab"]),
     ("win.prev-workspace", &["<Ctrl><Shift>Tab"]),
-    ("win.workspace-1",    &["<Alt>1"]),
-    ("win.workspace-2",    &["<Alt>2"]),
-    ("win.workspace-3",    &["<Alt>3"]),
-    ("win.workspace-4",    &["<Alt>4"]),
-    ("win.workspace-5",    &["<Alt>5"]),
-    ("win.workspace-6",    &["<Alt>6"]),
-    ("win.workspace-7",    &["<Alt>7"]),
-    ("win.workspace-8",    &["<Alt>8"]),
-
+    ("win.workspace-1", &["<Alt>1"]),
+    ("win.workspace-2", &["<Alt>2"]),
+    ("win.workspace-3", &["<Alt>3"]),
+    ("win.workspace-4", &["<Alt>4"]),
+    ("win.workspace-5", &["<Alt>5"]),
+    ("win.workspace-6", &["<Alt>6"]),
+    ("win.workspace-7", &["<Alt>7"]),
+    ("win.workspace-8", &["<Alt>8"]),
     // Common terminal conventions
-    ("win.copy",          &["<Ctrl><Shift>c"]),
-    ("win.paste",         &["<Ctrl><Shift>v"]),
+    ("win.copy", &["<Ctrl><Shift>c"]),
+    ("win.paste", &["<Ctrl><Shift>v"]),
     ("win.new-workspace", &["<Ctrl><Shift>t", "<Ctrl><Shift>n"]),
 ];
 
@@ -68,8 +66,7 @@ pub fn install_accels(app: &adw::Application) {
 
 /// Pane registry handle so copy/paste can call into the focused VTE
 /// terminal on the GTK main thread.
-pub type TerminalRegistry =
-    Rc<std::cell::RefCell<crate::ui::workspace_view::PaneRegistry>>;
+pub type TerminalRegistry = Rc<std::cell::RefCell<crate::ui::workspace_view::PaneRegistry>>;
 
 /// Register the action handlers on a window.
 pub fn install_actions(
@@ -108,11 +105,8 @@ pub fn install_actions(
         focused.clone(),
         move_focus(bridge.clone(), FocusDir::Down),
     );
-    let close_surface = make_pane_action(
-        "close-surface",
-        focused.clone(),
-        move_close(bridge.clone()),
-    );
+    let close_surface =
+        make_pane_action("close-surface", focused.clone(), move_close(bridge.clone()));
 
     let new_workspace = {
         let bridge = bridge.clone();
@@ -121,7 +115,8 @@ pub fn install_actions(
                 tracing::debug!(action = "new-workspace", "key action fired");
                 let bridge = bridge.clone();
                 glib::MainContext::default().spawn_local(async move {
-                    let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
+                    let root =
+                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
                     let _ = bridge.tx.send(GtkCommand::NewWorkspace { root }).await;
                 });
             })
@@ -138,42 +133,54 @@ pub fn install_actions(
     let ws_jumps = [1u8, 2, 3, 4, 5, 6, 7, 8].map(|i| {
         let bridge = bridge.clone();
         let name = match i {
-            1 => "workspace-1", 2 => "workspace-2", 3 => "workspace-3", 4 => "workspace-4",
-            5 => "workspace-5", 6 => "workspace-6", 7 => "workspace-7", 8 => "workspace-8",
+            1 => "workspace-1",
+            2 => "workspace-2",
+            3 => "workspace-3",
+            4 => "workspace-4",
+            5 => "workspace-5",
+            6 => "workspace-6",
+            7 => "workspace-7",
+            8 => "workspace-8",
             _ => unreachable!(),
         };
         gtk::gio::ActionEntry::builder(name)
             .activate(move |_, _, _| {
                 let bridge = bridge.clone();
                 glib::MainContext::default().spawn_local(async move {
-                    let _ = bridge.tx.send(GtkCommand::FocusWorkspaceAt { idx: i }).await;
+                    let _ = bridge
+                        .tx
+                        .send(GtkCommand::FocusWorkspaceAt { idx: i })
+                        .await;
                 });
             })
             .build()
     });
 
-    let copy = make_clipboard_action(
-        "copy",
-        focused.clone(),
-        registry.clone(),
-        ClipboardOp::Copy,
-    );
-    let paste = make_clipboard_action(
-        "paste",
-        focused.clone(),
-        registry,
-        ClipboardOp::Paste,
-    );
+    let copy = make_clipboard_action("copy", focused.clone(), registry.clone(), ClipboardOp::Copy);
+    let paste = make_clipboard_action("paste", focused.clone(), registry, ClipboardOp::Paste);
 
     let [w1, w2, w3, w4, w5, w6, w7, w8] = ws_jumps;
     window.add_action_entries([
-        split_right, split_down,
-        focus_left, focus_right, focus_up, focus_down,
+        split_right,
+        split_down,
+        focus_left,
+        focus_right,
+        focus_up,
+        focus_down,
         close_surface,
         new_workspace,
-        next_workspace, prev_workspace,
-        w1, w2, w3, w4, w5, w6, w7, w8,
-        copy, paste,
+        next_workspace,
+        prev_workspace,
+        w1,
+        w2,
+        w3,
+        w4,
+        w5,
+        w6,
+        w7,
+        w8,
+        copy,
+        paste,
     ]);
 }
 
@@ -219,7 +226,14 @@ fn move_split(bridge: Bridge, direction: SplitDirection) -> PaneAction {
         let bridge = bridge.clone();
         glib::MainContext::default().spawn_local(async move {
             let (tx, rx) = oneshot::channel();
-            let _ = bridge.tx.send(GtkCommand::SplitFocused { pane, direction, ack: tx }).await;
+            let _ = bridge
+                .tx
+                .send(GtkCommand::SplitFocused {
+                    pane,
+                    direction,
+                    ack: tx,
+                })
+                .await;
             let _ = rx.await;
         });
     })
@@ -229,7 +243,10 @@ fn move_focus(bridge: Bridge, dir: FocusDir) -> PaneAction {
     Box::new(move |pane| {
         let bridge = bridge.clone();
         glib::MainContext::default().spawn_local(async move {
-            let _ = bridge.tx.send(GtkCommand::FocusDirection { from: pane, dir }).await;
+            let _ = bridge
+                .tx
+                .send(GtkCommand::FocusDirection { from: pane, dir })
+                .await;
         });
     })
 }
@@ -239,14 +256,20 @@ fn move_close(bridge: Bridge) -> PaneAction {
         let bridge = bridge.clone();
         glib::MainContext::default().spawn_local(async move {
             let (tx, rx) = oneshot::channel();
-            let _ = bridge.tx.send(GtkCommand::CloseFocused { pane, ack: tx }).await;
+            let _ = bridge
+                .tx
+                .send(GtkCommand::CloseFocused { pane, ack: tx })
+                .await;
             let _ = rx.await;
         });
     })
 }
 
 #[derive(Clone, Copy)]
-enum ClipboardOp { Copy, Paste }
+enum ClipboardOp {
+    Copy,
+    Paste,
+}
 
 fn make_clipboard_action(
     name: &'static str,
@@ -261,11 +284,12 @@ fn make_clipboard_action(
                 None => return,
             };
             let r = registry.borrow();
-            let Some(term) = r.terminals.get(&pane) else { return };
+            let Some(term) = r.terminals.get(&pane) else {
+                return;
+            };
             match op {
                 ClipboardOp::Copy => {
-                    term.widget
-                        .copy_clipboard_format(vte::Format::Text);
+                    term.widget.copy_clipboard_format(vte::Format::Text);
                 }
                 ClipboardOp::Paste => {
                     term.widget.paste_clipboard();

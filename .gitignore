@@ -22,6 +22,3 @@ Thumbs.db
 
 # Local upstream checkout (created by scripts/sync-upstream.sh)
 /.upstream-cmux/
-
-# Generated
-/THIRD_PARTY_LICENSES.md

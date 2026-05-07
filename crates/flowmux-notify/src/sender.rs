@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Send desktop notifications via `org.freedesktop.Notifications`.
 //!
 //! On Linux this is the standard FDO spec implemented by GNOME Shell,

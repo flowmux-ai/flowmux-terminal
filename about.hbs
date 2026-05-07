@@ -1,0 +1,31 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+
+# Third-Party Licenses
+
+Generated from `Cargo.lock` with `cargo about generate about.hbs --workspace --locked --fail`.
+
+This inventory covers Rust crates pulled into the Cargo workspace. System
+libraries used at runtime, such as GTK, libadwaita, VTE, WebKitGTK, D-Bus, and
+Secret Service implementations, retain their own distribution licenses.
+
+## License Overview
+
+{{#each overview}}
+- {{{name}}} ({{count}})
+{{/each}}
+
+## License Texts
+
+{{#each licenses}}
+### {{{name}}}
+
+Used by:
+{{#each used_by}}
+- {{crate.name}} {{crate.version}}
+{{/each}}
+
+```text
+{{{text}}}
+```
+
+{{/each}}

@@ -29,10 +29,7 @@ impl GuiHandler {
 }
 
 impl Handler for GuiHandler {
-    fn handle<'a>(
-        &'a self,
-        req: Request,
-    ) -> Pin<Box<dyn Future<Output = Response> + Send + 'a>> {
+    fn handle<'a>(&'a self, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + 'a>> {
         Box::pin(async move {
             match req {
                 Request::WorkspaceCreate { ref name, ref root } => {
@@ -85,7 +82,11 @@ impl Handler for GuiHandler {
                     let _ = self
                         .bridge
                         .tx
-                        .send(GtkCommand::PaneSendKeys { pane, keys, ack: tx })
+                        .send(GtkCommand::PaneSendKeys {
+                            pane,
+                            keys,
+                            ack: tx,
+                        })
                         .await;
                     match rx.await {
                         Ok(Ok(())) => Response::Ok,
@@ -125,7 +126,9 @@ impl Handler for GuiHandler {
                     // Split the root pane (count - 1) times to get `count` panes.
                     let ws = match store.get_workspace(ws_id).await {
                         Some(w) => w,
-                        None => return Response::Error(RpcError::Internal("workspace vanished".into())),
+                        None => {
+                            return Response::Error(RpcError::Internal("workspace vanished".into()))
+                        }
                     };
                     // First leaf id from the root pane:
                     let mut leaves = vec![];
@@ -134,7 +137,11 @@ impl Handler for GuiHandler {
                     }
                     let mut current = match leaves.first().copied() {
                         Some(id) => id,
-                        None => return Response::Error(RpcError::Internal("workspace had no leaves".into())),
+                        None => {
+                            return Response::Error(RpcError::Internal(
+                                "workspace had no leaves".into(),
+                            ))
+                        }
                     };
                     let mut all_panes = vec![current];
                     for i in 1..count {
@@ -233,7 +240,11 @@ impl Handler for GuiHandler {
                     let _ = self
                         .bridge
                         .tx
-                        .send(GtkCommand::BrowserEval { pane, source, ack: tx })
+                        .send(GtkCommand::BrowserEval {
+                            pane,
+                            source,
+                            ack: tx,
+                        })
                         .await;
                     match rx.await {
                         Ok(Ok(value)) => Response::BrowserResult { value },
@@ -242,7 +253,12 @@ impl Handler for GuiHandler {
                     }
                 }
 
-                Request::Notify { pane, ref title, ref body, level } => {
+                Request::Notify {
+                    pane,
+                    ref title,
+                    ref body,
+                    level,
+                } => {
                     // Tee to the GUI's in-process notification log so
                     // the sidebar bell popover sees it. The desktop
                     // toast still goes out through DaemonHandler.

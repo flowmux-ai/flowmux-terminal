@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 # cargo-deb metadata for flowmux. Build with:
 #   cargo install cargo-deb
 #   cargo deb -p flowmux-app --variant=cargo-deb
@@ -9,7 +10,7 @@
 [package.metadata.deb]
 name = "flowmux"
 maintainer = "The flowmux Authors <noreply@flowmux.invalid>"
-copyright = "2026 The flowmux Authors. Upstream cmux: 2024 Manaflow, Inc."
+copyright = "2026 The flowmux Authors. Upstream cmux: 2024-present Manaflow, Inc."
 license-file = ["LICENSE", "0"]
 extended-description = """
 A Linux/GTK4 terminal with vertical tabs and notifications for AI
@@ -25,5 +26,6 @@ assets = [
     ["resources/desktop/com.flowmux.App.desktop", "usr/share/applications/", "644"],
     ["LICENSE", "usr/share/doc/flowmux/LICENSE", "644"],
     ["NOTICE",  "usr/share/doc/flowmux/NOTICE",  "644"],
+    ["THIRD_PARTY_LICENSES.md", "usr/share/doc/flowmux/THIRD_PARTY_LICENSES.md", "644"],
     ["README.md", "usr/share/doc/flowmux/README.md", "644"],
 ]

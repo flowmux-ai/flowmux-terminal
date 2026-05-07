@@ -1,8 +1,10 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 [package]
 name = "flowmux-notify"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 description = "OSC notification parser (9 / 99 / 777) and a D-Bus desktop sender."
 
 [dependencies]

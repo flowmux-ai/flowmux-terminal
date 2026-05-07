@@ -1,8 +1,10 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 [package]
 name = "flowmux-ssh"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 description = "SSH workspace support: russh shell + scp upload + remote port forwarding."
 
 [dependencies]

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! IPC protocol between the flowmux GUI process and the `flowmux` CLI.
 //!
 //! Wire format: newline-delimited JSON over a Unix domain socket at
@@ -8,8 +9,8 @@
 //! than removing them, so the CLI shape stays stable while features
 //! land.
 
-pub mod protocol;
 pub mod client;
+pub mod protocol;
 pub mod server;
 
 pub use protocol::{Envelope, Request, Response, RpcError};

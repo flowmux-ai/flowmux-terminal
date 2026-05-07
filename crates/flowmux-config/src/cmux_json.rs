@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! `cmux.json` parser. Schema follows the public documentation at
 //! cmux.com/docs/custom-commands.
 //!

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 [workspace]
 resolver = "2"
 members = ["crates/*"]
@@ -22,7 +23,7 @@ version = "0.0.1"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/junsuc/flowmux"
+repository = "https://github.com/JSUYA/flowmux"
 authors = ["The flowmux Authors"]
 
 [workspace.dependencies]

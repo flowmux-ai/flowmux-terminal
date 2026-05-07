@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Browser cookie + session import.
 //!
 //! Each browser stores cookies in its own SQLite database under its

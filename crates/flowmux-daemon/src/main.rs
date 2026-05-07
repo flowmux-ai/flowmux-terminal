@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! `flowmux-daemon` — IPC-only entrypoint.
 //!
 //! Boots the same handler that the GTK app uses, but without any

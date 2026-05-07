@@ -22,11 +22,15 @@ pub mod id {
             pub struct $name(pub Uuid);
 
             impl $name {
-                pub fn new() -> Self { Self(Uuid::new_v4()) }
+                pub fn new() -> Self {
+                    Self(Uuid::new_v4())
+                }
             }
 
             impl Default for $name {
-                fn default() -> Self { Self::new() }
+                fn default() -> Self {
+                    Self::new()
+                }
             }
 
             impl std::fmt::Display for $name {
@@ -87,7 +91,12 @@ pub struct LinkedPr {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum PrState { Open, Closed, Merged, Draft }
+pub enum PrState {
+    Open,
+    Closed,
+    Merged,
+    Draft,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Surface {
@@ -100,8 +109,13 @@ pub struct Surface {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SurfaceKind {
-    Terminal { shell: Option<String>, cwd: Option<PathBuf> },
-    Browser { initial_url: Option<String> },
+    Terminal {
+        shell: Option<String>,
+        cwd: Option<PathBuf>,
+    },
+    Browser {
+        initial_url: Option<String>,
+    },
 }
 
 /// A pane is either a leaf (rendered content) or a binary split. This
@@ -125,7 +139,10 @@ pub enum Pane {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum SplitDirection { Horizontal, Vertical }
+pub enum SplitDirection {
+    Horizontal,
+    Vertical,
+}
 
 impl Pane {
     /// Find the leaf with `target` and replace it with a new split that
@@ -157,11 +174,23 @@ impl Pane {
                         }),
                     },
                 );
-                if let (Pane::Split { first, second, .. }, Pane::Leaf { content: orig_content, .. }) =
-                    (self, &original)
+                if let (
+                    Pane::Split { first, second, .. },
+                    Pane::Leaf {
+                        content: orig_content,
+                        ..
+                    },
+                ) = (self, &original)
                 {
-                    *first = Box::new(Pane::Leaf { id: target, content: orig_content.clone() });
-                    let new_id = if let Pane::Leaf { id, .. } = &**second { *id } else { unreachable!() };
+                    *first = Box::new(Pane::Leaf {
+                        id: target,
+                        content: orig_content.clone(),
+                    });
+                    let new_id = if let Pane::Leaf { id, .. } = &**second {
+                        *id
+                    } else {
+                        unreachable!()
+                    };
                     return Some(new_id);
                 }
                 None
@@ -201,35 +230,39 @@ impl Pane {
         match self {
             Pane::Leaf { id, .. } if id == target => RemoveOutcome::EntirelyRemoved,
             leaf @ Pane::Leaf { .. } => RemoveOutcome::NotFound(leaf),
-            Pane::Split { id, direction, ratio, first, second } => {
-                match first.remove_leaf(target) {
-                    RemoveOutcome::Replaced(new_first) => RemoveOutcome::Replaced(Pane::Split {
+            Pane::Split {
+                id,
+                direction,
+                ratio,
+                first,
+                second,
+            } => match first.remove_leaf(target) {
+                RemoveOutcome::Replaced(new_first) => RemoveOutcome::Replaced(Pane::Split {
+                    id,
+                    direction,
+                    ratio,
+                    first: Box::new(new_first),
+                    second,
+                }),
+                RemoveOutcome::EntirelyRemoved => RemoveOutcome::Replaced(*second),
+                RemoveOutcome::NotFound(orig_first) => match second.remove_leaf(target) {
+                    RemoveOutcome::Replaced(new_second) => RemoveOutcome::Replaced(Pane::Split {
                         id,
                         direction,
                         ratio,
-                        first: Box::new(new_first),
-                        second,
+                        first: Box::new(orig_first),
+                        second: Box::new(new_second),
                     }),
-                    RemoveOutcome::EntirelyRemoved => RemoveOutcome::Replaced(*second),
-                    RemoveOutcome::NotFound(orig_first) => match second.remove_leaf(target) {
-                        RemoveOutcome::Replaced(new_second) => RemoveOutcome::Replaced(Pane::Split {
-                            id,
-                            direction,
-                            ratio,
-                            first: Box::new(orig_first),
-                            second: Box::new(new_second),
-                        }),
-                        RemoveOutcome::EntirelyRemoved => RemoveOutcome::Replaced(orig_first),
-                        RemoveOutcome::NotFound(orig_second) => RemoveOutcome::NotFound(Pane::Split {
-                            id,
-                            direction,
-                            ratio,
-                            first: Box::new(orig_first),
-                            second: Box::new(orig_second),
-                        }),
-                    },
-                }
-            }
+                    RemoveOutcome::EntirelyRemoved => RemoveOutcome::Replaced(orig_first),
+                    RemoveOutcome::NotFound(orig_second) => RemoveOutcome::NotFound(Pane::Split {
+                        id,
+                        direction,
+                        ratio,
+                        first: Box::new(orig_first),
+                        second: Box::new(orig_second),
+                    }),
+                },
+            },
         }
     }
 }
@@ -292,7 +325,10 @@ mod tests {
     #[test]
     fn split_leaf_replaces_target_with_a_split() {
         let leaf_id = PaneId::new();
-        let mut p = Pane::Leaf { id: leaf_id, content: PaneContent::Terminal { pid: None } };
+        let mut p = Pane::Leaf {
+            id: leaf_id,
+            content: PaneContent::Terminal { pid: None },
+        };
         let new_id = p
             .split_leaf(
                 leaf_id,
@@ -302,7 +338,12 @@ mod tests {
             )
             .unwrap();
         match &p {
-            Pane::Split { direction, first, second, .. } => {
+            Pane::Split {
+                direction,
+                first,
+                second,
+                ..
+            } => {
                 assert_eq!(*direction, SplitDirection::Vertical);
                 assert!(matches!(**first, Pane::Leaf { id, .. } if id == leaf_id));
                 assert!(matches!(**second, Pane::Leaf { id, .. } if id == new_id));
@@ -319,8 +360,14 @@ mod tests {
             id: PaneId::new(),
             direction: SplitDirection::Horizontal,
             ratio: 0.5,
-            first: Box::new(Pane::Leaf { id: l1, content: PaneContent::Terminal { pid: None } }),
-            second: Box::new(Pane::Leaf { id: l2, content: PaneContent::Terminal { pid: None } }),
+            first: Box::new(Pane::Leaf {
+                id: l1,
+                content: PaneContent::Terminal { pid: None },
+            }),
+            second: Box::new(Pane::Leaf {
+                id: l2,
+                content: PaneContent::Terminal { pid: None },
+            }),
         };
         let new_id = p
             .split_leaf(
@@ -346,8 +393,14 @@ mod tests {
             id: PaneId::new(),
             direction: SplitDirection::Vertical,
             ratio: 0.5,
-            first: Box::new(Pane::Leaf { id: l1, content: PaneContent::Terminal { pid: None } }),
-            second: Box::new(Pane::Leaf { id: l2, content: PaneContent::Terminal { pid: None } }),
+            first: Box::new(Pane::Leaf {
+                id: l1,
+                content: PaneContent::Terminal { pid: None },
+            }),
+            second: Box::new(Pane::Leaf {
+                id: l2,
+                content: PaneContent::Terminal { pid: None },
+            }),
         };
         match p.remove_leaf(l1) {
             RemoveOutcome::Replaced(Pane::Leaf { id, .. }) => assert_eq!(id, l2),
@@ -358,7 +411,10 @@ mod tests {
     #[test]
     fn remove_leaf_returns_entirely_removed_on_root_match() {
         let id = PaneId::new();
-        let p = Pane::Leaf { id, content: PaneContent::Terminal { pid: None } };
+        let p = Pane::Leaf {
+            id,
+            content: PaneContent::Terminal { pid: None },
+        };
         assert!(matches!(p.remove_leaf(id), RemoveOutcome::EntirelyRemoved));
     }
 
@@ -366,7 +422,10 @@ mod tests {
     fn remove_leaf_returns_not_found_when_id_missing() {
         let id = PaneId::new();
         let other = PaneId::new();
-        let p = Pane::Leaf { id, content: PaneContent::Terminal { pid: None } };
+        let p = Pane::Leaf {
+            id,
+            content: PaneContent::Terminal { pid: None },
+        };
         assert!(matches!(p.remove_leaf(other), RemoveOutcome::NotFound(_)));
     }
 
@@ -380,7 +439,10 @@ mod tests {
             listening_ports: vec![3000, 5173],
             surfaces: vec![Surface {
                 id: SurfaceId::new(),
-                kind: SurfaceKind::Terminal { shell: None, cwd: None },
+                kind: SurfaceKind::Terminal {
+                    shell: None,
+                    cwd: None,
+                },
                 title: "main".into(),
                 root_pane: Pane::Leaf {
                     id: PaneId::new(),

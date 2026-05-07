@@ -1,8 +1,10 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 [package]
 name = "flowmux-terminal"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 description = "Terminal backend abstraction for flowmux. Backends: vte4 (default), libghostty (planned)."
 
 [features]

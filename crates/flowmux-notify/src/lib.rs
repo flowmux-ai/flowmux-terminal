@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Two responsibilities:
 //!
 //! 1. Parse OSC notification escape sequences emitted by terminal

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 [build]
 # Faster linker on Linux — falls back silently if mold isn't installed.
 # rustflags = ["-C", "link-arg=-fuse-ld=mold"]

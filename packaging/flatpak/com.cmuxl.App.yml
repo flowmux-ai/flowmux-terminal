@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 app-id: com.flowmux.App
 runtime: org.gnome.Platform
 runtime-version: '46'
@@ -31,6 +32,7 @@ modules:
       - install -Dm644 resources/desktop/com.flowmux.App.desktop /app/share/applications/com.flowmux.App.desktop
       - install -Dm644 LICENSE /app/share/licenses/flowmux/LICENSE
       - install -Dm644 NOTICE  /app/share/licenses/flowmux/NOTICE
+      - install -Dm644 THIRD_PARTY_LICENSES.md /app/share/licenses/flowmux/THIRD_PARTY_LICENSES.md
     sources:
       - type: dir
         path: ../..

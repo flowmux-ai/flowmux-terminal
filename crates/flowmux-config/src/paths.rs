@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! XDG paths for flowmux. cmux on macOS uses
 //! `~/Library/Application Support/cmux`; on Linux we follow XDG.
 

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Pull cmux upstream into a sibling checkout and produce a triage report
 # of what changed since the pinned commit. We do NOT vendor cmux source
 # into this tree — the checkout lives in `.upstream-cmux/` (gitignored)
