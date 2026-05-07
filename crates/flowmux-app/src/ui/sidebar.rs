@@ -379,9 +379,7 @@ fn row_widget(ws: &Workspace, on_close: Rc<dyn Fn(WorkspaceId)>, bridge: Bridge)
         popover.set_child(Some(&v));
         popover.set_parent(&row_for_click);
         popover.set_has_arrow(false);
-        let rect = gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1);
-        popover.set_pointing_to(Some(&rect));
-        popover.set_position(gtk::PositionType::Bottom);
+        crate::ui::popover_pos::anchor_at_click(&popover, &row_for_click, x, y);
         popover.connect_closed(|p| p.unparent());
         popover.popup();
         gesture.set_state(gtk::EventSequenceState::Claimed);
