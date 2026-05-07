@@ -134,10 +134,36 @@ impl Sidebar {
         });
         toolbar.append(&bell_button);
 
-        // ---- Outer vbox: toolbar + list ----
+        // ---- Bottom footer: 좌측 작은 옵션 버튼 ----
+        // 클릭하면 bridge로 ShowOptionsDialog 보내 윈도우 dispatch에서
+        // 모달 다이얼로그를 띄운다.
+        let footer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        footer.set_margin_top(2);
+        footer.set_margin_bottom(4);
+        footer.set_margin_start(4);
+        footer.set_margin_end(4);
+        let options_btn = gtk::Button::from_icon_name("emblem-system-symbolic");
+        options_btn.add_css_class("flat");
+        options_btn.set_tooltip_text(Some("옵션"));
+        options_btn.set_focus_on_click(false);
+        // 작은 크기 — 사이드바의 다른 버튼과 동일한 high-contrast가
+        // 아니라 dimmed 톤으로 두어 시각적으로 잠잠하게.
+        options_btn.add_css_class("flowmux-sidebar-options");
+        options_btn.set_halign(gtk::Align::Start);
+        let bridge_for_options = bridge.clone();
+        options_btn.connect_clicked(move |_| {
+            let bridge = bridge_for_options.clone();
+            gtk::glib::MainContext::default().spawn_local(async move {
+                let _ = bridge.tx.send(GtkCommand::ShowOptionsDialog).await;
+            });
+        });
+        footer.append(&options_btn);
+
+        // ---- Outer vbox: toolbar + list + footer ----
         let root_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root_box.append(&toolbar);
         root_box.append(&scroll);
+        root_box.append(&footer);
 
         Self {
             root: root_box,

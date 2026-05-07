@@ -128,6 +128,12 @@ pub struct PaneCallbacks {
     pub on_browser_uri_changed: Rc<RefCell<dyn FnMut(PaneId, SurfaceId, String)>>,
     /// WebKit reported that a browser pane's page title changed.
     pub on_browser_title_changed: Rc<RefCell<dyn FnMut(PaneId, SurfaceId, String)>>,
+    /// 현재 시점의 사용자 옵션을 가져온다 (새 BrowserPane 생성 시
+    /// 엔진 선택 + 위젯 생성 직후 줌 적용에 사용). WindowController가
+    /// 보유한 `Rc<RefCell<Options>>`에서 clone해 돌려주는 가벼운
+    /// 함수. 다이얼로그가 옵션을 갱신하면 다음 호출부터 새 값이
+    /// 보인다.
+    pub read_options: Rc<dyn Fn() -> flowmux_config::options::Options>,
 }
 
 impl TerminalPane {

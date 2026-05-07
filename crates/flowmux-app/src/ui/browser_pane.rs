@@ -10,6 +10,7 @@
 //!   wrapping it in a stable IPC verb shape, not new widgets.
 
 use crate::ui::terminal_pane::PaneCallbacks;
+use flowmux_config::options::BrowserEngine;
 use flowmux_core::{PaneId, SurfaceId};
 use gtk::prelude::*;
 use webkit6::prelude::*;
@@ -28,7 +29,21 @@ impl BrowserPane {
         surface_id: SurfaceId,
         initial_url: Option<&str>,
         callbacks: PaneCallbacks,
+        engine: BrowserEngine,
     ) -> Self {
+        // 옵션의 엔진 선택은 사용자가 새 탭브라우저를 만들 때 어떤
+        // 백엔드를 쓰고 싶은지를 기록한다. 이번 단계에서는 모든 엔진을
+        // WebKitGTK로 그리고, 외부 프로세스 spawn 분기는 별도 작업에서
+        // 추가한다. 사용자가 의도한 엔진은 trace 로그로 남겨 어떤 옵션
+        // 으로 만들어진 탭브라우저인지 추적 가능하게 한다.
+        if !matches!(engine, BrowserEngine::Webkit) {
+            tracing::warn!(
+                engine = ?engine,
+                "BrowserEngine ≠ WebKit 옵션은 현 단계에서 WebKitGTK로 동작합니다 (엔진 spawn은 다음 작업)"
+            );
+        } else {
+            tracing::debug!(engine = ?engine, "creating browser pane with WebKitGTK");
+        }
         // Idempotent webkit sandbox bypass — main.rs entry에서도 같은
         // env를 설정하지만, 단위 테스트(bin이 아닌 lib 경로)에서는
         // main.rs를 거치지 않으므로 BrowserPane을 만드는 시점에 한

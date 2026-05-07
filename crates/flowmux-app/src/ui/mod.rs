@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 pub mod browser_pane;
+pub mod options_dialog;
 pub mod popover_pos;
 pub mod sidebar;
 pub mod terminal_pane;

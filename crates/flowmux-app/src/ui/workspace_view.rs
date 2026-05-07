@@ -19,6 +19,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use vte::prelude::*;
+use webkit6::prelude::*;
 
 #[derive(Default)]
 pub struct PaneRegistry {
@@ -730,6 +731,9 @@ fn build_panel(
             let argv = shell.clone().map(|s| vec![s]).unwrap_or(argv);
             let pane = TerminalPane::spawn(pane_id, argv, cwd.clone(), callbacks.clone());
             theme.apply_to_vte(&pane.widget);
+            // 새 터미널 위젯도 현재 옵션의 줌 배율로 시작한다.
+            pane.widget
+                .set_font_scale((callbacks.read_options)().zoom_factor());
 
             {
                 let cb = callbacks.on_terminal_cwd_changed.clone();
@@ -749,12 +753,18 @@ fn build_panel(
             widget
         }
         SurfaceKind::Browser { initial_url } => {
+            let opts = (callbacks.read_options)();
             let pane = BrowserPane::new(
                 pane_id,
                 surface.id,
                 initial_url.as_deref(),
                 callbacks.clone(),
+                opts.default_browser_engine.clone(),
             );
+            // 다이얼로그에서 적용된 줌 배율을 새 탭브라우저에 즉시
+            // 반영 — apply_zoom 호출 전에 만들어진 위젯도 옵션과
+            // 동기화된 상태에서 시작한다.
+            pane.web_view.set_zoom_level(opts.zoom_factor());
             let widget = pane.root.clone().upcast::<gtk::Widget>();
             let mut r = registry.borrow_mut();
             r.browsers.insert(surface.id, pane);

@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 use tokio::sync::oneshot;
+use vte::prelude::*;
 use webkit6::prelude::*;
 
 #[derive(Clone)]
@@ -34,6 +35,7 @@ pub struct WindowController {
     bridge: Bridge,
     theme: Arc<ResolvedTheme>,
     notification_log: NotificationLog,
+    options: Rc<RefCell<flowmux_config::options::Options>>,
 }
 
 impl WindowController {
@@ -86,7 +88,15 @@ impl WindowController {
 
         let pane_registry: Rc<RefCell<PaneRegistry>> =
             Rc::new(RefCell::new(PaneRegistry::default()));
-        let callbacks = make_callbacks(focused_pane.clone(), bridge.clone());
+        let initial_options = flowmux_config::options::load();
+        tracing::info!(
+            zoom_percent = initial_options.zoom_percent,
+            engine = ?initial_options.default_browser_engine,
+            "options loaded"
+        );
+        let options = Rc::new(RefCell::new(initial_options));
+        let callbacks =
+            make_callbacks(focused_pane.clone(), bridge.clone(), options.clone());
 
         // gtk::Paned lets the user drag the divider between the
         // sidebar and the content stack — replaces the fixed-width
@@ -130,6 +140,7 @@ impl WindowController {
             bridge,
             theme,
             notification_log,
+            options,
         };
         controller.install_state_flush_on_close();
         controller
@@ -347,6 +358,25 @@ impl WindowController {
 
     pub async fn dispatch(&self, cmd: GtkCommand) {
         match cmd {
+            GtkCommand::ShowOptionsDialog => {
+                let current = self.options.borrow().clone();
+                let options_cell = self.options.clone();
+                let registry = self.pane_registry.clone();
+                crate::ui::options_dialog::present(&self.window, current, move |opts| {
+                    if let Err(e) = flowmux_config::options::save(&opts) {
+                        tracing::warn!(error = %e, "options save failed");
+                        return;
+                    }
+                    *options_cell.borrow_mut() = opts.clone();
+                    let registry = registry.borrow();
+                    for terminal in registry.terminals.values() {
+                        terminal.widget.set_font_scale(opts.zoom_factor());
+                    }
+                    for browser in registry.browsers.values() {
+                        browser.web_view.set_zoom_level(opts.zoom_factor());
+                    }
+                });
+            }
             GtkCommand::WorkspaceCreated {
                 id,
                 name: _,
@@ -900,7 +930,11 @@ impl WindowController {
     }
 }
 
-fn make_callbacks(focused: FocusedPane, bridge: Bridge) -> PaneCallbacks {
+fn make_callbacks(
+    focused: FocusedPane,
+    bridge: Bridge,
+    options: Rc<RefCell<flowmux_config::options::Options>>,
+) -> PaneCallbacks {
     use std::cell::RefCell;
     use std::rc::Rc;
     PaneCallbacks {
@@ -1087,6 +1121,10 @@ fn make_callbacks(focused: FocusedPane, bridge: Bridge) -> PaneCallbacks {
                         .await;
                 });
             }))
+        },
+        read_options: {
+            let options = options.clone();
+            Rc::new(move || options.borrow().clone())
         },
     }
 }

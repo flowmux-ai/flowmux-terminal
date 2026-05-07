@@ -68,6 +68,10 @@ pub enum WsNav {
 /// `oneshot::Sender` for replies if the caller needs the result.
 #[derive(Debug)]
 pub enum GtkCommand {
+    /// 사이드 패널 좌하단 옵션 버튼이 눌리면 GTK 측에서 모달
+    /// 옵션 다이얼로그를 띄운다. 다이얼로그 자체가 OK / 취소
+    /// 결과를 보유 — bridge에는 결과를 돌려주지 않는다.
+    ShowOptionsDialog,
     /// Render a freshly-created workspace in the sidebar + open its first pane.
     WorkspaceCreated {
         id: WorkspaceId,
