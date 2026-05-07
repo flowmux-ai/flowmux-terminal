@@ -275,7 +275,8 @@ impl WindowController {
     /// 포커스된 pane이 없거나 그 pane에 active surface가 없으면
     /// "flowmux"로 폴백한다.
     async fn refresh_window_title(&self) {
-        let title = match self.focused_pane.get() {
+        let focused = self.focused_pane.get();
+        let title = match focused {
             None => None,
             Some(pane) => {
                 let active = self.pane_registry.borrow().active_surface(pane);
@@ -289,6 +290,12 @@ impl WindowController {
             Some(t) if !t.is_empty() => format!("flowmux - {t}"),
             _ => "flowmux".to_string(),
         };
+        tracing::debug!(
+            focused = ?focused,
+            label = ?title,
+            next = %next,
+            "refresh_window_title"
+        );
         self.window.set_title(Some(&next));
     }
 

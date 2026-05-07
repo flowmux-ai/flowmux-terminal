@@ -778,6 +778,12 @@ fn build_panel(
                         .window_title()
                         .map(|t| t.to_string())
                         .unwrap_or_default();
+                    tracing::debug!(
+                        %pane_id,
+                        %surface_id,
+                        title = %title,
+                        "VTE window-title notify"
+                    );
                     (cb.borrow_mut())(pane_id, surface_id, title);
                 });
             }
@@ -818,16 +824,21 @@ fn build_panel(
             // 동기화된 상태에서 시작한다.
             pane.web_view.set_zoom_level(opts.zoom_factor());
 
-            // 탭브라우저도 포커스 표시는 동일하게 — WebView가 키보드
-            // 포커스를 받으면 frame에 .focused가 붙어 사용자가 어떤
-            // 탭이 입력 대상인지 한눈에 알 수 있다.
+            // 탭브라우저도 포커스 표시 + on_focus 콜백 동일하게 처리.
+            // on_focus를 호출해야 WindowController.focused_pane이 갱신
+            // 되고 RefreshWindowTitle이 새 active surface 라벨로
+            // 윈도우 타이틀을 다시 계산한다 (브라우저 탭 클릭 시
+            // 윈도우 제목이 안 바뀌던 회귀 수정).
             let frame_in = frame.clone();
             let frame_out = frame.clone();
+            let on_focus = callbacks.on_focus.clone();
             let focus = gtk::EventControllerFocus::new();
             focus.connect_enter(move |_| {
+                tracing::debug!(%pane_id, "browser pane focus enter");
                 if !frame_in.has_css_class("focused") {
                     frame_in.add_css_class("focused");
                 }
+                (on_focus.borrow_mut())(pane_id);
             });
             focus.connect_leave(move |_| {
                 frame_out.remove_css_class("focused");
