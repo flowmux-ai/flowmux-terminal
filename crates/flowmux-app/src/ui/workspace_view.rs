@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Render a workspace's pane tree as a recursive GTK widget tree.
 //!
 //! `Pane::Leaf` becomes a [`TerminalPane`] (or, later, a browser
@@ -6,6 +7,7 @@
 //!
 //! State is owned by the controller; this module only builds widgets.
 
+use crate::theme::ResolvedTheme;
 use crate::ui::browser_pane::BrowserPane;
 use crate::ui::terminal_pane::{PaneCallbacks, TerminalPane};
 use flowmux_core::{Pane, PaneContent, PaneId, SplitDirection, Surface, SurfaceKind};
@@ -13,6 +15,7 @@ use gtk::prelude::*;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 
 #[derive(Default)]
 pub struct PaneRegistry {
@@ -24,21 +27,15 @@ pub fn build_surface(
     surface: &Surface,
     callbacks: &PaneCallbacks,
     registry: Rc<RefCell<PaneRegistry>>,
+    theme: Arc<ResolvedTheme>,
 ) -> gtk::Widget {
     match &surface.kind {
         SurfaceKind::Terminal { cwd, shell } => {
             let argv = shell.clone().map(|s| vec![s]).unwrap_or_default();
-            build_pane(&surface.root_pane, argv, cwd.clone(), callbacks, registry)
+            build_pane(&surface.root_pane, argv, cwd.clone(), callbacks, registry, theme)
         }
         SurfaceKind::Browser { initial_url } => {
-            // Walk to the first leaf and build a browser pane there.
-            // For browser surfaces the tree is virtually always a single
-            // leaf, but we keep the recursion so split-and-browse works.
-            build_browser_subtree(
-                &surface.root_pane,
-                initial_url.as_deref(),
-                registry,
-            )
+            build_browser_subtree(&surface.root_pane, initial_url.as_deref(), registry)
         }
     }
 }
@@ -86,16 +83,16 @@ fn build_pane(
     cwd: Option<std::path::PathBuf>,
     callbacks: &PaneCallbacks,
     registry: Rc<RefCell<PaneRegistry>>,
+    theme: Arc<ResolvedTheme>,
 ) -> gtk::Widget {
     match pane {
         Pane::Leaf { id, content } => match content {
             PaneContent::Terminal { .. } => {
                 let pane = TerminalPane::spawn(*id, argv, cwd, callbacks.clone());
-                let frame = gtk::Frame::new(None);
-                frame.set_child(Some(&pane.widget));
-                frame.add_css_class("flowmux-pane");
+                theme.apply_to_vte(&pane.widget);
+                let widget = pane.root.clone();
                 registry.borrow_mut().terminals.insert(*id, pane);
-                frame.upcast()
+                widget
             }
             PaneContent::Browser { url } => {
                 let pane = BrowserPane::new(*id, Some(url));
@@ -112,16 +109,21 @@ fn build_pane(
             let paned = gtk::Paned::new(orient);
             paned.set_hexpand(true);
             paned.set_vexpand(true);
-            let left = build_pane(first, argv.clone(), cwd.clone(), callbacks, registry.clone());
-            let right = build_pane(second, argv, cwd, callbacks, registry);
+            let left = build_pane(
+                first,
+                argv.clone(),
+                cwd.clone(),
+                callbacks,
+                registry.clone(),
+                theme.clone(),
+            );
+            let right = build_pane(second, argv, cwd, callbacks, registry, theme);
             paned.set_start_child(Some(&left));
             paned.set_end_child(Some(&right));
             paned.set_resize_start_child(true);
             paned.set_resize_end_child(true);
             paned.set_shrink_start_child(false);
             paned.set_shrink_end_child(false);
-            // Ratio is a hint; GTK measures children at allocation time
-            // and we set `position` once the widget knows its size.
             let r = *ratio;
             paned.connect_realize(move |p| {
                 let total = match p.orientation() {

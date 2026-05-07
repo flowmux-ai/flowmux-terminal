@@ -73,7 +73,7 @@ impl WindowController {
         let sidebar = Sidebar::new(on_select, on_close, bridge.clone(), notification_log.clone());
 
         let pane_registry: Rc<RefCell<PaneRegistry>> = Rc::new(RefCell::new(PaneRegistry::default()));
-        let callbacks = make_callbacks(focused_pane.clone());
+        let callbacks = make_callbacks(focused_pane.clone(), bridge.clone());
 
         // gtk::Paned lets the user drag the divider between the
         // sidebar and the content stack — replaces the fixed-width
@@ -476,7 +476,7 @@ impl WindowController {
     }
 }
 
-fn make_callbacks(focused: FocusedPane) -> PaneCallbacks {
+fn make_callbacks(focused: FocusedPane, bridge: Bridge) -> PaneCallbacks {
     use std::cell::RefCell;
     use std::rc::Rc;
     PaneCallbacks {
@@ -492,6 +492,16 @@ fn make_callbacks(focused: FocusedPane) -> PaneCallbacks {
         on_focus: Rc::new(RefCell::new(move |pane| {
             tracing::debug!(%pane, "pane focused");
             focused.set(Some(pane));
+        })),
+        on_close_pane: Rc::new(RefCell::new(move |pane| {
+            let bridge = bridge.clone();
+            glib::MainContext::default().spawn_local(async move {
+                let (tx, _rx) = oneshot::channel();
+                let _ = bridge
+                    .tx
+                    .send(GtkCommand::CloseFocused { pane, ack: tx })
+                    .await;
+            });
         })),
     }
 }

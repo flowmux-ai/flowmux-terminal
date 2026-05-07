@@ -24,9 +24,13 @@ use vte::prelude::*;
 #[derive(Clone)]
 pub struct TerminalPane {
     pub id: PaneId,
+    /// The VTE widget itself — apply_to_vte / feed call into this.
     pub widget: vte::Terminal,
-    /// PID of the spawned shell. Set asynchronously by the
-    /// `spawn_async` callback once the child is actually running.
+    /// Outer container (Frame > Overlay > Terminal) that goes into
+    /// the workspace's widget tree. Holds the .flowmux-pane styling
+    /// and the per-pane close button overlay.
+    pub root: gtk::Widget,
+    /// PID of the spawned shell.
     pub pid: Rc<Cell<Option<i32>>>,
 }
 
@@ -101,6 +105,8 @@ pub struct PaneCallbacks {
     pub on_bell: Rc<RefCell<dyn FnMut(PaneId)>>,
     pub on_child_exited: Rc<RefCell<dyn FnMut(PaneId, i32)>>,
     pub on_focus: Rc<RefCell<dyn FnMut(PaneId)>>,
+    /// Triggered by the per-pane close button on the Overlay.
+    pub on_close_pane: Rc<RefCell<dyn FnMut(PaneId)>>,
 }
 
 impl TerminalPane {
@@ -217,7 +223,67 @@ impl TerminalPane {
             },
         );
 
-        Self { id, widget: term, pid }
+        // Wrap the terminal in: Frame(.flowmux-pane) > Overlay > Terminal
+        // The overlay carries a small close (X) button at top-end that
+        // shows on hover. The frame holds the rounded-corner styling
+        // and toggles `focused` on focus enter/leave.
+        let overlay = gtk::Overlay::new();
+        overlay.set_child(Some(&term));
+
+        let close = gtk::Button::from_icon_name("window-close-symbolic");
+        close.add_css_class("flat");
+        close.add_css_class("circular");
+        close.add_css_class("osd");
+        close.set_tooltip_text(Some("Close pane"));
+        close.set_halign(gtk::Align::End);
+        close.set_valign(gtk::Align::Start);
+        close.set_margin_top(4);
+        close.set_margin_end(4);
+        close.set_opacity(0.0);
+        close.set_can_target(false);
+        let on_close_pane = callbacks.on_close_pane.clone();
+        let id_for_close = id;
+        close.connect_clicked(move |_| (on_close_pane.borrow_mut())(id_for_close));
+        overlay.add_overlay(&close);
+
+        let pane_motion = gtk::EventControllerMotion::new();
+        let close_enter = close.clone();
+        pane_motion.connect_enter(move |_, _, _| {
+            close_enter.set_opacity(0.85);
+            close_enter.set_can_target(true);
+        });
+        let close_leave = close.clone();
+        pane_motion.connect_leave(move |_| {
+            close_leave.set_opacity(0.0);
+            close_leave.set_can_target(false);
+        });
+        overlay.add_controller(pane_motion);
+
+        let frame = gtk::Frame::new(None);
+        frame.add_css_class("flowmux-pane");
+        frame.set_child(Some(&overlay));
+
+        // Focus enter/leave on the VTE drives a `.focused` CSS class
+        // on the frame so theme.css can paint an accent border.
+        let frame_focus_in = frame.clone();
+        let frame_focus_out = frame.clone();
+        let already_focus_ctrl = gtk::EventControllerFocus::new();
+        already_focus_ctrl.connect_enter(move |_| {
+            if !frame_focus_in.has_css_class("focused") {
+                frame_focus_in.add_css_class("focused");
+            }
+        });
+        already_focus_ctrl.connect_leave(move |_| {
+            frame_focus_out.remove_css_class("focused");
+        });
+        term.add_controller(already_focus_ctrl);
+
+        Self {
+            id,
+            widget: term,
+            root: frame.upcast(),
+            pid,
+        }
     }
 
     pub fn feed(&self, bytes: &[u8]) {
