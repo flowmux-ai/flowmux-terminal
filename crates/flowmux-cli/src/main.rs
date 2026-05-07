@@ -61,8 +61,15 @@ enum Cmd {
     /// Send keystrokes to a pane (escape sequences accepted).
     SendKeys { pane: PaneId, keys: String },
 
-    /// Open URL in the in-app browser.
-    Browser { url: String },
+    /// Open URL in a new in-app browser pane (splits next to the
+    /// currently focused pane). Default split direction is right.
+    Browser {
+        url: String,
+        #[arg(long, conflicts_with = "down")]
+        right: bool,
+        #[arg(long)]
+        down: bool,
+    },
 
     /// Open a remote workspace over SSH.
     Ssh { target: String },
@@ -96,6 +103,37 @@ enum Cmd {
 
     /// Run JS in a browser pane and print the result.
     BrowserEval { pane: PaneId, source: String },
+
+    /// Navigate a browser pane to a new URL.
+    BrowserNavigate { pane: PaneId, url: String },
+    /// Move a browser pane backward in session history.
+    BrowserBack { pane: PaneId },
+    /// Move a browser pane forward in session history.
+    BrowserForward { pane: PaneId },
+    /// Reload the current page in a browser pane.
+    BrowserReload { pane: PaneId },
+    /// Print the current URL of a browser pane.
+    BrowserUrl { pane: PaneId },
+    /// Print the current page title of a browser pane.
+    BrowserTitle { pane: PaneId },
+    /// Click an element by its `data-flowmux-ref` id (from a snapshot).
+    BrowserClick { pane: PaneId, target: String },
+    /// Fill an input/textarea by ref id with `value`.
+    BrowserFill { pane: PaneId, target: String, value: String },
+    /// Select a `<select>` option by value or visible text.
+    BrowserSelect { pane: PaneId, target: String, value: String },
+    /// Scroll an element into view, then offset the viewport by (x, y).
+    BrowserScroll { pane: PaneId, target: String, x: i32, y: i32 },
+    /// Type literal text into the active element of a browser pane.
+    BrowserType { pane: PaneId, text: String },
+    /// Press a single named key (Enter, Tab, ArrowDown, …).
+    BrowserPress { pane: PaneId, key: String },
+    /// Read innerText of an element.
+    BrowserText { pane: PaneId, target: String },
+    /// Read .value of an input/textarea/select.
+    BrowserValue { pane: PaneId, target: String },
+    /// Read an attribute (`href`, `id`, `class`, …) of an element.
+    BrowserAttr { pane: PaneId, target: String, name: String },
 
     /// Import cookies from a host browser into the in-app browser jar.
     ImportCookies {
@@ -257,7 +295,20 @@ fn build_request(cmd: Cmd) -> anyhow::Result<Request> {
             Request::PaneSplit { pane, direction }
         }
         Cmd::SendKeys { pane, keys } => Request::PaneSendKeys { pane, keys },
-        Cmd::Browser { url } => Request::BrowserOpen { url, surface: None },
+        Cmd::Browser { url, right, down } => {
+            let direction = if down {
+                SplitDirection::Horizontal
+            } else if right {
+                SplitDirection::Vertical
+            } else {
+                SplitDirection::Vertical
+            };
+            Request::BrowserOpen {
+                url,
+                target_pane: None,
+                direction,
+            }
+        }
         Cmd::Ssh { target } => Request::SshConnect { target },
         Cmd::NotifyStream { .. } => unreachable!("handled before request build"),
         Cmd::ClaudeTeams { count, root, args } => Request::ClaudeTeams {
@@ -267,6 +318,21 @@ fn build_request(cmd: Cmd) -> anyhow::Result<Request> {
         },
         Cmd::BrowserSnapshot { pane } => Request::BrowserSnapshot { pane },
         Cmd::BrowserEval { pane, source } => Request::BrowserEval { pane, source },
+        Cmd::BrowserNavigate { pane, url } => Request::BrowserNavigate { pane, url },
+        Cmd::BrowserBack { pane } => Request::BrowserBack { pane },
+        Cmd::BrowserForward { pane } => Request::BrowserForward { pane },
+        Cmd::BrowserReload { pane } => Request::BrowserReload { pane },
+        Cmd::BrowserUrl { pane } => Request::BrowserUrl { pane },
+        Cmd::BrowserTitle { pane } => Request::BrowserTitle { pane },
+        Cmd::BrowserClick { pane, target } => Request::BrowserClick { pane, target },
+        Cmd::BrowserFill { pane, target, value } => Request::BrowserFill { pane, target, value },
+        Cmd::BrowserSelect { pane, target, value } => Request::BrowserSelect { pane, target, value },
+        Cmd::BrowserScroll { pane, target, x, y } => Request::BrowserScroll { pane, target, x, y },
+        Cmd::BrowserType { pane, text } => Request::BrowserType { pane, text },
+        Cmd::BrowserPress { pane, key } => Request::BrowserPress { pane, key },
+        Cmd::BrowserText { pane, target } => Request::BrowserText { pane, target },
+        Cmd::BrowserValue { pane, target } => Request::BrowserValue { pane, target },
+        Cmd::BrowserAttr { pane, target, name } => Request::BrowserAttr { pane, target, name },
         Cmd::ImportCookies { from, domain } => Request::ImportCookies {
             source: from,
             domain,

@@ -9,14 +9,15 @@ use crate::theme::ResolvedTheme;
 use crate::ui::browser_pane::BrowserPane;
 use crate::ui::terminal_pane::{PaneCallbacks, TerminalPane};
 use flowmux_core::{
-    Pane, PaneContent, PaneId, PaneSurface, SplitDirection, Surface, SurfaceId, SurfaceKind,
-    WorkspaceId,
+    terminal_tab_title_for_cwd, Pane, PaneContent, PaneId, PaneSurface, SplitDirection, Surface,
+    SurfaceId, SurfaceKind, WorkspaceId,
 };
 use gtk::prelude::*;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 #[derive(Default)]
 pub struct PaneRegistry {
@@ -27,6 +28,7 @@ pub struct PaneRegistry {
     pane_frames: HashMap<PaneId, gtk::Widget>,
     surface_stacks: HashMap<PaneId, gtk::Stack>,
     surface_tabs: HashMap<PaneId, Vec<(SurfaceId, gtk::Widget)>>,
+    surface_tab_labels: HashMap<SurfaceId, gtk::Label>,
     pane_workspace: HashMap<PaneId, WorkspaceId>,
     surface_workspace: HashMap<SurfaceId, WorkspaceId>,
 }
@@ -59,16 +61,22 @@ impl PaneRegistry {
             .copied()
     }
 
-    pub fn next_surface(&self, pane: PaneId) -> Option<SurfaceId> {
-        let tabs = self.surface_tabs.get(&pane)?;
-        if tabs.len() < 2 {
-            return None;
+    pub fn terminal_cwds(&self) -> Vec<(PaneId, SurfaceId, std::path::PathBuf)> {
+        self.terminals
+            .iter()
+            .filter_map(|(surface, terminal)| {
+                terminal
+                    .current_dir()
+                    .map(|cwd| (terminal.id, *surface, cwd))
+            })
+            .collect()
+    }
+
+    pub fn set_surface_title(&self, surface: SurfaceId, title: &str) {
+        if let Some(label) = self.surface_tab_labels.get(&surface) {
+            label.set_text(title);
+            label.set_tooltip_text(Some(title));
         }
-        let active = self.active_surface(pane);
-        let idx = active
-            .and_then(|surface| tabs.iter().position(|(id, _)| *id == surface))
-            .unwrap_or(0);
-        Some(tabs[(idx + 1) % tabs.len()].0)
     }
 
     pub fn clear_workspace(&mut self, workspace: WorkspaceId) {
@@ -94,6 +102,7 @@ impl PaneRegistry {
         for surface in surfaces {
             self.terminals.remove(&surface);
             self.browsers.remove(&surface);
+            self.surface_tab_labels.remove(&surface);
             self.surface_workspace.remove(&surface);
         }
     }
@@ -253,16 +262,30 @@ fn build_leaf_pane(
 
     let mut tab_widgets = Vec::new();
     for surface in &surfaces {
-        let tab = surface_tab(surface, surface.id == active);
+        let (tab, label) = surface_tab(surface, surface.id == active);
         let button = tab
             .first_child()
             .and_downcast::<gtk::Button>()
             .expect("surface tab starts with button");
         {
-            let cb = callbacks.on_activate_surface.clone();
+            let activate_cb = callbacks.on_activate_surface.clone();
+            let rename_cb = callbacks.on_rename_surface.clone();
+            let last_click = Rc::new(Cell::new(None::<Instant>));
             let pane_id = pane_id;
             let surface_id = surface.id;
-            button.connect_clicked(move |_| (cb.borrow_mut())(pane_id, surface_id));
+            button.connect_clicked(move |_| {
+                let now = Instant::now();
+                let double_clicked = last_click
+                    .get()
+                    .is_some_and(|last| now.duration_since(last) <= Duration::from_millis(500));
+                if double_clicked {
+                    last_click.set(None);
+                    (rename_cb.borrow_mut())(pane_id, surface_id);
+                } else {
+                    last_click.set(Some(now));
+                    (activate_cb.borrow_mut())(pane_id, surface_id);
+                }
+            });
         }
         let close = tab
             .last_child()
@@ -276,6 +299,10 @@ fn build_leaf_pane(
         }
         tabs.append(&tab);
         tab_widgets.push((surface.id, tab.clone().upcast::<gtk::Widget>()));
+        registry
+            .borrow_mut()
+            .surface_tab_labels
+            .insert(surface.id, label);
 
         let widget = build_panel(
             pane_id,
@@ -341,15 +368,19 @@ fn materialize_surfaces(
 ) -> Vec<PaneSurface> {
     match content {
         PaneContent::Tabs { surfaces, .. } if !surfaces.is_empty() => surfaces.clone(),
-        PaneContent::Terminal { .. } => {
-            vec![PaneSurface::terminal("Terminal", fallback_cwd)]
-        }
+        PaneContent::Terminal { .. } => vec![PaneSurface::terminal(
+            terminal_tab_title_for_cwd(fallback_cwd.as_deref()),
+            fallback_cwd,
+        )],
         PaneContent::Browser { url } => vec![PaneSurface::browser("Browser", url.clone())],
-        PaneContent::Tabs { .. } => vec![PaneSurface::terminal("Terminal", fallback_cwd)],
+        PaneContent::Tabs { .. } => vec![PaneSurface::terminal(
+            terminal_tab_title_for_cwd(fallback_cwd.as_deref()),
+            fallback_cwd,
+        )],
     }
 }
 
-fn surface_tab(surface: &PaneSurface, active: bool) -> gtk::Box {
+fn surface_tab(surface: &PaneSurface, active: bool) -> (gtk::Box, gtk::Label) {
     let tab = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     tab.add_css_class("flowmux-pane-tab");
     if active {
@@ -370,6 +401,7 @@ fn surface_tab(surface: &PaneSurface, active: bool) -> gtk::Box {
     let label = gtk::Label::new(Some(&surface.title));
     label.set_ellipsize(gtk::pango::EllipsizeMode::End);
     label.set_max_width_chars(18);
+    label.set_tooltip_text(Some(&surface.title));
     row.append(&label);
     button.set_child(Some(&row));
     tab.append(&button);
@@ -380,7 +412,7 @@ fn surface_tab(surface: &PaneSurface, active: bool) -> gtk::Box {
     close.set_tooltip_text(Some("Close tab"));
     tab.append(&close);
 
-    tab
+    (tab, label)
 }
 
 fn pane_tool_button(icon_name: &str, tooltip: &str) -> gtk::Button {

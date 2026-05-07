@@ -12,6 +12,43 @@ use flowmux_core::{NotificationLevel, PaneId, SplitDirection, SurfaceId, Workspa
 use std::path::PathBuf;
 use tokio::sync::oneshot;
 
+/// Cmux-style scriptable browser controller verb. One variant per
+/// public method on `flowmux_browser::BrowserController`. Bundled into
+/// a single bridge variant so the dispatcher only has to handle one
+/// "browser" arm regardless of how many verbs there are.
+#[derive(Debug, Clone)]
+pub enum BrowserOp {
+    Navigate { url: String },
+    Back,
+    Forward,
+    Reload,
+    Url,
+    Title,
+    Snapshot,
+    Eval { source: String },
+    Click { target: String },
+    Fill { target: String, value: String },
+    Select { target: String, value: String },
+    Scroll { target: String, x: i32, y: i32 },
+    Type { text: String },
+    Press { key: String },
+    Text { target: String },
+    Value { target: String },
+    Attr { target: String, name: String },
+}
+
+/// Result shape returned by [`BrowserOp`] dispatch.
+#[derive(Debug, Clone)]
+pub enum BrowserActionResult {
+    /// Acknowledgement for verbs that don't read anything back.
+    Ok,
+    /// Boolean result (Back / Forward navigation success).
+    Bool(bool),
+    /// String result (URL, title, page text/value/attr, eval output,
+    /// snapshot JSON).
+    String(String),
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum FocusDir {
     Left,
@@ -78,9 +115,16 @@ pub enum GtkCommand {
         surface: SurfaceId,
         ack: oneshot::Sender<Result<(), String>>,
     },
-    /// Create a brand-new workspace and add it to the sidebar. This is
-    /// what Ctrl+Shift+T binds to in our model — matching how ghostty's
-    /// `cmd+t = new_tab` adds a visible top-level navigation entry.
+    /// Rename a pane-local surface tab and refresh its workspace.
+    RenameSurface {
+        pane: PaneId,
+        surface: SurfaceId,
+        title: String,
+        ack: oneshot::Sender<Result<(), String>>,
+    },
+    /// Open the rename dialog for a pane-local surface tab.
+    ShowRenameSurfaceDialog { pane: PaneId, surface: SurfaceId },
+    /// Create a brand-new workspace and add it to the sidebar.
     NewWorkspace { root: std::path::PathBuf },
     /// Remove a workspace entirely (sidebar row + stack page + state).
     /// Triggered by the hover X button on a sidebar row.
@@ -135,6 +179,24 @@ pub enum GtkCommand {
         pane: PaneId,
         source: String,
         ack: oneshot::Sender<Result<String, String>>,
+    },
+    /// Run a [`BrowserOp`] against a specific browser pane. Used by
+    /// the cmux-style scriptable verbs (navigate / click / fill /
+    /// snapshot / …) the IPC layer exposes.
+    BrowserAction {
+        pane: PaneId,
+        op: BrowserOp,
+        ack: oneshot::Sender<Result<BrowserActionResult, String>>,
+    },
+    /// Split a target pane and put a brand-new browser pane in the
+    /// new sibling. `target_pane = None` means "use the focused
+    /// pane"; the dispatcher resolves it on the GTK side. Returns
+    /// the new browser pane's id.
+    BrowserOpenSplit {
+        target_pane: Option<PaneId>,
+        url: String,
+        direction: SplitDirection,
+        ack: oneshot::Sender<Result<PaneId, String>>,
     },
     /// Inject a list of cookies into the WebKit cookie manager.
     InjectCookies {

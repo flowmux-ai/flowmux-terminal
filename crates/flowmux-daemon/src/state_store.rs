@@ -7,8 +7,8 @@
 //! boot.
 
 use flowmux_core::{
-    CloseSurfaceOutcome, Pane, PaneContent, PaneId, PaneSurface, RemoveOutcome, SplitDirection,
-    Surface, SurfaceId, SurfaceKind, Workspace, WorkspaceId,
+    terminal_tab_title_for_cwd, CloseSurfaceOutcome, Pane, PaneContent, PaneId, PaneSurface,
+    RemoveOutcome, SplitDirection, Surface, SurfaceId, SurfaceKind, Workspace, WorkspaceId,
 };
 use flowmux_state::State;
 use std::sync::Arc;
@@ -51,13 +51,16 @@ impl StateStore {
     /// persistence loop on the current runtime.
     pub fn new(initial: State) -> Self {
         let mut initial = initial;
-        normalize_state(&mut initial);
+        let normalized = normalize_state(&mut initial);
         let store = Self {
             inner: Arc::new(Mutex::new(initial)),
             dirty: Arc::new(Notify::new()),
         };
         let bg = store.clone();
         tokio::spawn(async move { bg.persist_loop().await });
+        if normalized {
+            store.mark_dirty();
+        }
         store
     }
 
@@ -66,11 +69,15 @@ impl StateStore {
     /// from the GTK main thread before the runtime is fully wired.
     pub fn new_lazy(initial: State) -> Self {
         let mut initial = initial;
-        normalize_state(&mut initial);
-        Self {
+        let normalized = normalize_state(&mut initial);
+        let store = Self {
             inner: Arc::new(Mutex::new(initial)),
             dirty: Arc::new(Notify::new()),
+        };
+        if normalized {
+            store.mark_dirty();
         }
+        store
     }
 
     /// Spawn the persist loop on `handle`. Pair with [`new_lazy`].
@@ -96,6 +103,7 @@ impl StateStore {
         let id = WorkspaceId::new();
         let surface_id = SurfaceId::new();
         let pane_id = PaneId::new();
+        let tab_title = terminal_tab_title_for_cwd(Some(&root));
         let ws = Workspace {
             id,
             name: name.unwrap_or_else(|| {
@@ -116,7 +124,7 @@ impl StateStore {
                 title: "main".into(),
                 root_pane: Pane::Leaf {
                     id: pane_id,
-                    content: PaneContent::tabbed_terminal("Terminal", Some(root)),
+                    content: PaneContent::tabbed_terminal(tab_title, Some(root)),
                 },
             }],
             color: Some(default_color_for(id)),
@@ -154,6 +162,37 @@ impl StateStore {
         self.mark_dirty();
     }
 
+    /// Split a target leaf and replace the new sibling with a
+    /// browser pane carrying `url`. Used by `flowmux browser open` to
+    /// drop a webview next to a terminal without touching the
+    /// terminal's content. The new pane uses the tabbed-browser
+    /// content shape so it slots into the pane-local surface-tab
+    /// bar like any other browser pane.
+    pub async fn split_pane_with_browser(
+        &self,
+        target: PaneId,
+        direction: SplitDirection,
+        url: String,
+    ) -> Option<(WorkspaceId, PaneId)> {
+        let mut s = self.inner.lock().await;
+        for ws in s.workspaces.iter_mut() {
+            for surface in ws.surfaces.iter_mut() {
+                if let Some(new_id) = surface.root_pane.split_leaf(
+                    target,
+                    direction,
+                    0.5,
+                    PaneContent::tabbed_browser("Browser", url.clone()),
+                ) {
+                    let ws_id = ws.id;
+                    drop(s);
+                    self.mark_dirty();
+                    return Some((ws_id, new_id));
+                }
+            }
+        }
+        None
+    }
+
     /// Find the pane in any workspace and split it. Returns the new
     /// pane's id and the workspace it lives in so the GUI can rebuild
     /// the affected widget tree.
@@ -165,11 +204,16 @@ impl StateStore {
         let mut s = self.inner.lock().await;
         for ws in s.workspaces.iter_mut() {
             for surface in ws.surfaces.iter_mut() {
+                let cwd = surface
+                    .root_pane
+                    .terminal_surface_cwd(target)
+                    .or_else(|| Some(ws.root_dir.clone()));
+                let title = terminal_tab_title_for_cwd(cwd.as_deref());
                 if let Some(new_id) = surface.root_pane.split_leaf(
                     target,
                     direction,
                     0.5,
-                    PaneContent::tabbed_terminal("Terminal", None),
+                    PaneContent::tabbed_terminal(title, cwd),
                 ) {
                     let ws_id = ws.id;
                     drop(s);
@@ -244,11 +288,14 @@ impl StateStore {
         let valid = id
             .map(|i| s.workspaces.iter().any(|w| w.id == i))
             .unwrap_or(true);
-        if valid {
+        let changed = valid && s.active_workspace != id;
+        if changed {
             s.active_workspace = id;
         }
         drop(s);
-        self.mark_dirty();
+        if changed {
+            self.mark_dirty();
+        }
     }
 
     /// Set a workspace's sidebar color. Returns true on success.
@@ -279,6 +326,71 @@ impl StateStore {
             self.mark_dirty();
         }
         renamed
+    }
+
+    pub async fn surface_title(&self, pane: PaneId, surface_id: SurfaceId) -> Option<String> {
+        let s = self.inner.lock().await;
+        for ws in &s.workspaces {
+            for surface in &ws.surfaces {
+                if let Some(title) = surface.root_pane.surface_title(pane, surface_id) {
+                    return Some(title.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    pub async fn rename_surface(
+        &self,
+        pane: PaneId,
+        surface_id: SurfaceId,
+        title: String,
+    ) -> Option<WorkspaceId> {
+        let mut s = self.inner.lock().await;
+        for ws in s.workspaces.iter_mut() {
+            for surface in ws.surfaces.iter_mut() {
+                if surface
+                    .root_pane
+                    .rename_surface(pane, surface_id, title.clone())
+                {
+                    let ws_id = ws.id;
+                    drop(s);
+                    self.mark_dirty();
+                    return Some(ws_id);
+                }
+            }
+        }
+        None
+    }
+
+    pub async fn update_surface_cwd(
+        &self,
+        pane: PaneId,
+        surface_id: SurfaceId,
+        cwd: std::path::PathBuf,
+    ) -> Option<WorkspaceId> {
+        let mut s = self.inner.lock().await;
+        let updated = update_surface_cwd_in_state(&mut s, pane, surface_id, cwd);
+        drop(s);
+        if updated.is_some() {
+            self.mark_dirty();
+        }
+        updated
+    }
+
+    pub fn update_surface_cwd_blocking(
+        &self,
+        pane: PaneId,
+        surface_id: SurfaceId,
+        cwd: std::path::PathBuf,
+    ) -> Option<WorkspaceId> {
+        let mut s = self.inner.blocking_lock();
+        let updated = update_surface_cwd_in_state(&mut s, pane, surface_id, cwd);
+        drop(s);
+        if updated.is_some() {
+            self.mark_dirty();
+        }
+        updated
     }
 
     /// Remove an entire workspace. Used by the sidebar's X close
@@ -339,12 +451,11 @@ impl StateStore {
         let mut s = self.inner.lock().await;
         let w = s.workspaces.iter_mut().find(|w| w.id == workspace)?;
         let pane = w.surfaces.first()?.root_pane.first_leaf_id()?;
-        let tab_count = w
-            .surfaces
-            .first()
-            .and_then(|surface| surface.root_pane.surface_count(pane))
-            .unwrap_or(0);
-        let surface = PaneSurface::terminal(format!("Terminal {}", tab_count + 1), cwd);
+        let cwd = cwd
+            .or_else(|| w.surfaces[0].root_pane.terminal_surface_cwd(pane))
+            .or_else(|| Some(w.root_dir.clone()));
+        let title = terminal_tab_title_for_cwd(cwd.as_deref());
+        let surface = PaneSurface::terminal(title, cwd);
         let surface_id = w.surfaces[0].root_pane.add_surface_to_leaf(pane, surface)?;
         drop(s);
         self.mark_dirty();
@@ -359,8 +470,12 @@ impl StateStore {
         let mut s = self.inner.lock().await;
         for ws in s.workspaces.iter_mut() {
             for surface in ws.surfaces.iter_mut() {
-                let tab_count = surface.root_pane.surface_count(pane).unwrap_or(0);
-                let tab = PaneSurface::terminal(format!("Terminal {}", tab_count + 1), cwd.clone());
+                let resolved_cwd = cwd
+                    .clone()
+                    .or_else(|| surface.root_pane.terminal_surface_cwd(pane))
+                    .or_else(|| Some(ws.root_dir.clone()));
+                let title = terminal_tab_title_for_cwd(resolved_cwd.as_deref());
+                let tab = PaneSurface::terminal(title, resolved_cwd);
                 if let Some(surface_id) = surface.root_pane.add_surface_to_leaf(pane, tab) {
                     let ws_id = ws.id;
                     drop(s);
@@ -468,28 +583,63 @@ impl StateStore {
             }
         }
     }
+
+    pub async fn save_now(&self) -> Result<(), flowmux_state::StateError> {
+        let snap = self.snapshot().await;
+        flowmux_state::save(&snap)
+    }
+
+    pub fn save_now_blocking(&self) -> Result<(), flowmux_state::StateError> {
+        let snap = self.inner.blocking_lock().clone();
+        flowmux_state::save(&snap)
+    }
 }
 
-fn normalize_state(state: &mut State) {
+fn update_surface_cwd_in_state(
+    state: &mut State,
+    pane: PaneId,
+    surface_id: SurfaceId,
+    cwd: std::path::PathBuf,
+) -> Option<WorkspaceId> {
+    for ws in state.workspaces.iter_mut() {
+        for surface in ws.surfaces.iter_mut() {
+            if surface
+                .root_pane
+                .set_surface_cwd(pane, surface_id, cwd.clone())
+            {
+                return Some(ws.id);
+            }
+        }
+    }
+    None
+}
+
+fn normalize_state(state: &mut State) -> bool {
+    let mut changed = false;
     for ws in &mut state.workspaces {
         for surface in &mut ws.surfaces {
             let fallback_cwd = match &surface.kind {
                 SurfaceKind::Terminal { cwd, .. } => cwd.clone(),
                 SurfaceKind::Browser { .. } => None,
             };
-            surface.root_pane.normalize_leaf_tabs(fallback_cwd);
+            changed |= surface.root_pane.normalize_leaf_tabs(fallback_cwd);
         }
         if ws.surfaces.len() > 1 {
-            migrate_top_level_surfaces_to_first_pane(ws);
+            changed |= migrate_top_level_surfaces_to_first_pane(ws);
+        }
+        for surface in &mut ws.surfaces {
+            changed |= surface.root_pane.normalize_leaf_tabs(None);
         }
     }
+    changed
 }
 
-fn migrate_top_level_surfaces_to_first_pane(ws: &mut Workspace) {
+fn migrate_top_level_surfaces_to_first_pane(ws: &mut Workspace) -> bool {
     let Some(target_pane) = ws.surfaces[0].root_pane.first_leaf_id() else {
-        return;
+        return false;
     };
     let extra_surfaces = ws.surfaces.split_off(1);
+    let changed = !extra_surfaces.is_empty();
     for surface in extra_surfaces {
         let Some(mut tab) = first_active_pane_surface(&surface.root_pane) else {
             continue;
@@ -502,6 +652,7 @@ fn migrate_top_level_surfaces_to_first_pane(ws: &mut Workspace) {
             .root_pane
             .add_surface_to_leaf(target_pane, tab);
     }
+    changed
 }
 
 fn first_active_pane_surface(pane: &Pane) -> Option<PaneSurface> {
@@ -557,6 +708,15 @@ mod tests {
             &ws.surfaces[0].kind,
             SurfaceKind::Terminal { cwd: Some(cwd), .. } if cwd == &root
         ));
+        let Pane::Leaf {
+            content: PaneContent::Tabs { surfaces, .. },
+            ..
+        } = &ws.surfaces[0].root_pane
+        else {
+            panic!("expected tabbed leaf")
+        };
+        assert_eq!(surfaces[0].title, "demo");
+        assert!(!surfaces[0].title_locked);
     }
 
     #[tokio::test]
@@ -573,6 +733,17 @@ mod tests {
             .unwrap();
         assert_eq!(split_ws, ws_id);
         assert_eq!(store.workspace_for_pane(new_pane).await, Some(ws_id));
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        let new_surface = ws.surfaces[0]
+            .root_pane
+            .active_surface_id(new_pane)
+            .expect("expected active surface in new pane");
+        assert_eq!(
+            ws.surfaces[0]
+                .root_pane
+                .surface_title(new_pane, new_surface),
+            Some("demo")
+        );
 
         let outcome = store.close_pane(new_pane).await.unwrap();
         assert!(matches!(outcome, CloseOutcome::PaneRemoved { workspace } if workspace == ws_id));
@@ -670,6 +841,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn normalizes_legacy_terminal_number_titles_to_cwd_folder() {
+        let ws_id = WorkspaceId::new();
+        let pane_id = PaneId::new();
+        let tab = PaneSurface::terminal("Terminal 3", Some("/tmp/project".into()));
+        let tab_id = tab.id;
+        let mut state = State::default();
+        state.workspaces.push(Workspace {
+            id: ws_id,
+            name: "legacy".into(),
+            root_dir: "/tmp/legacy".into(),
+            git: None,
+            listening_ports: vec![],
+            surfaces: vec![Surface {
+                id: SurfaceId::new(),
+                kind: SurfaceKind::Terminal {
+                    shell: None,
+                    cwd: Some("/tmp/legacy".into()),
+                },
+                title: "main".into(),
+                root_pane: Pane::Leaf {
+                    id: pane_id,
+                    content: PaneContent::Tabs {
+                        active: tab_id,
+                        surfaces: vec![tab],
+                    },
+                },
+            }],
+            color: None,
+        });
+
+        let store = StateStore::new_lazy(state);
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        let Pane::Leaf {
+            content: PaneContent::Tabs { surfaces, .. },
+            ..
+        } = &ws.surfaces[0].root_pane
+        else {
+            panic!("expected tabbed leaf")
+        };
+        assert_eq!(surfaces[0].title, "project");
+        assert!(!surfaces[0].title_locked);
+    }
+
+    #[tokio::test]
+    async fn locks_legacy_custom_terminal_titles_during_normalization() {
+        let ws_id = WorkspaceId::new();
+        let pane_id = PaneId::new();
+        let tab = PaneSurface::terminal("server", Some("/tmp/one".into()));
+        let tab_id = tab.id;
+        let mut state = State::default();
+        state.workspaces.push(Workspace {
+            id: ws_id,
+            name: "legacy".into(),
+            root_dir: "/tmp/legacy".into(),
+            git: None,
+            listening_ports: vec![],
+            surfaces: vec![Surface {
+                id: SurfaceId::new(),
+                kind: SurfaceKind::Terminal {
+                    shell: None,
+                    cwd: Some("/tmp/legacy".into()),
+                },
+                title: "main".into(),
+                root_pane: Pane::Leaf {
+                    id: pane_id,
+                    content: PaneContent::Tabs {
+                        active: tab_id,
+                        surfaces: vec![tab],
+                    },
+                },
+            }],
+            color: None,
+        });
+
+        let store = StateStore::new_lazy(state);
+        assert_eq!(
+            store
+                .update_surface_cwd(pane_id, tab_id, "/tmp/two".into())
+                .await,
+            Some(ws_id)
+        );
+
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        let Pane::Leaf {
+            content: PaneContent::Tabs { surfaces, .. },
+            ..
+        } = &ws.surfaces[0].root_pane
+        else {
+            panic!("expected tabbed leaf")
+        };
+        assert_eq!(surfaces[0].title, "server");
+        assert!(surfaces[0].title_locked);
+        assert!(matches!(
+            &surfaces[0].kind,
+            SurfaceKind::Terminal { cwd: Some(cwd), .. } if cwd == &std::path::PathBuf::from("/tmp/two")
+        ));
+    }
+
+    #[tokio::test]
     async fn add_surfaces_and_remove_workspace_keep_order_consistent() {
         let store = StateStore::new_lazy(State::default());
         let first = store
@@ -732,5 +1002,158 @@ mod tests {
             CloseOutcome::WorkspaceRemoved { workspace } if workspace == ws_id
         ));
         assert!(store.snapshot().await.workspaces.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rename_surface_updates_pane_tab_title() {
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("one".into()), std::path::PathBuf::from("/tmp/one"))
+            .await;
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        let pane = first_pane(&ws);
+        let surface = first_pane_active_surface(&ws);
+
+        assert_eq!(
+            store.surface_title(pane, surface).await.as_deref(),
+            Some("one")
+        );
+        assert_eq!(
+            store.rename_surface(pane, surface, "server".into()).await,
+            Some(ws_id)
+        );
+        assert_eq!(
+            store.surface_title(pane, surface).await.as_deref(),
+            Some("server")
+        );
+    }
+
+    #[tokio::test]
+    async fn update_surface_cwd_persists_terminal_tab_cwd() {
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("one".into()), std::path::PathBuf::from("/tmp/one"))
+            .await;
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        let pane = first_pane(&ws);
+        let surface = first_pane_active_surface(&ws);
+
+        assert_eq!(
+            store
+                .update_surface_cwd(pane, surface, "/tmp/two".into())
+                .await,
+            Some(ws_id)
+        );
+
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        let Pane::Leaf {
+            content: PaneContent::Tabs { surfaces, .. },
+            ..
+        } = &ws.surfaces[0].root_pane
+        else {
+            panic!("expected tabbed leaf")
+        };
+        assert!(matches!(
+            &surfaces[0].kind,
+            SurfaceKind::Terminal { cwd: Some(cwd), .. } if cwd == &std::path::PathBuf::from("/tmp/two")
+        ));
+        assert_eq!(surfaces[0].title, "two");
+        assert!(!surfaces[0].title_locked);
+    }
+
+    #[tokio::test]
+    async fn update_surface_cwd_keeps_manually_renamed_tab_title() {
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("one".into()), std::path::PathBuf::from("/tmp/one"))
+            .await;
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        let pane = first_pane(&ws);
+        let surface = first_pane_active_surface(&ws);
+
+        assert_eq!(
+            store.rename_surface(pane, surface, "server".into()).await,
+            Some(ws_id)
+        );
+        assert_eq!(
+            store
+                .update_surface_cwd(pane, surface, "/tmp/two".into())
+                .await,
+            Some(ws_id)
+        );
+
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        let Pane::Leaf {
+            content: PaneContent::Tabs { surfaces, .. },
+            ..
+        } = &ws.surfaces[0].root_pane
+        else {
+            panic!("expected tabbed leaf")
+        };
+        assert_eq!(surfaces[0].title, "server");
+        assert!(surfaces[0].title_locked);
+    }
+
+    #[tokio::test]
+    async fn add_terminal_surface_defaults_title_to_truncated_cwd_folder() {
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("one".into()), std::path::PathBuf::from("/tmp/one"))
+            .await;
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        let pane = first_pane(&ws);
+
+        store
+            .add_terminal_surface_to_pane(pane, Some("/tmp/1234567890123456".into()))
+            .await
+            .unwrap();
+
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        let Pane::Leaf {
+            content: PaneContent::Tabs { surfaces, active },
+            ..
+        } = &ws.surfaces[0].root_pane
+        else {
+            panic!("expected tabbed leaf")
+        };
+        let active = surfaces
+            .iter()
+            .find(|surface| surface.id == *active)
+            .expect("expected active surface");
+        assert_eq!(active.title, "123456789012345...");
+        assert!(!active.title_locked);
+    }
+
+    #[tokio::test]
+    async fn add_terminal_surface_without_cwd_uses_pane_cwd() {
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("one".into()), std::path::PathBuf::from("/tmp/one"))
+            .await;
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        let pane = first_pane(&ws);
+
+        store
+            .add_terminal_surface_to_pane(pane, None)
+            .await
+            .unwrap();
+
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        let Pane::Leaf {
+            content: PaneContent::Tabs { surfaces, active },
+            ..
+        } = &ws.surfaces[0].root_pane
+        else {
+            panic!("expected tabbed leaf")
+        };
+        let active = surfaces
+            .iter()
+            .find(|surface| surface.id == *active)
+            .expect("expected active surface");
+        assert_eq!(active.title, "one");
+        assert!(matches!(
+            &active.kind,
+            SurfaceKind::Terminal { cwd: Some(cwd), .. } if cwd == &std::path::PathBuf::from("/tmp/one")
+        ));
     }
 }

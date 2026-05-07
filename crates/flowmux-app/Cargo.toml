@@ -39,6 +39,7 @@ flowmux-vcs = { workspace = true }
 flowmux-procmon = { workspace = true }
 flowmux-daemon = { workspace = true }
 flowmux-cookies = { workspace = true }
+flowmux-browser = { workspace = true }
 
 anyhow = { workspace = true }
 tokio = { workspace = true }

@@ -3,7 +3,7 @@
 //! stack and exposes a [`WindowController`] that routes [`GtkCommand`]
 //! values from the bridge to widget operations.
 
-use crate::bridge::{Bridge, FocusDir, GtkCommand, WsNav};
+use crate::bridge::{Bridge, BrowserActionResult, BrowserOp, FocusDir, GtkCommand, WsNav};
 use crate::keybindings::FocusedPane;
 use crate::notifications::{NotificationEntry, NotificationLog};
 use crate::theme::ResolvedTheme;
@@ -11,14 +11,16 @@ use crate::ui::sidebar::Sidebar;
 use crate::ui::terminal_pane::PaneCallbacks;
 use crate::ui::workspace_view::{build_surface, PaneRegistry};
 use adw::prelude::*;
-use flowmux_core::{PaneId, Workspace, WorkspaceId};
+use flowmux_core::{PaneId, SurfaceId, Workspace, WorkspaceId};
 use flowmux_daemon::StateStore;
 use gtk::glib;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::oneshot;
+use webkit6::prelude::*;
 
 #[derive(Clone)]
 pub struct WindowController {
@@ -59,11 +61,16 @@ impl WindowController {
             Rc::new(RefCell::new(HashMap::new()));
         let surfaces_for_select = surfaces.clone();
         let stack_for_select = stack.clone();
+        let store_for_select = store.clone();
 
         let on_select = move |id: WorkspaceId| {
             if surfaces_for_select.borrow().contains_key(&id) {
                 stack_for_select.set_visible_child_name(&id.to_string());
             }
+            let store = store_for_select.clone();
+            glib::MainContext::default().spawn_local(async move {
+                store.set_active_workspace(Some(id)).await;
+            });
         };
         let bridge_for_close = bridge.clone();
         let on_close = move |id: WorkspaceId| {
@@ -118,7 +125,7 @@ impl WindowController {
 
         register_workspace_actions(&window, &store, &bridge);
 
-        Self {
+        let controller = Self {
             window,
             focused_pane,
             sidebar,
@@ -131,22 +138,31 @@ impl WindowController {
             theme,
             notification_log,
             tokio_handle,
-        }
+        };
+        controller.install_cwd_persistence();
+        controller
     }
 
     pub fn show_status_when_empty(&self) {
         if self.surfaces.borrow().is_empty() {
-            let status = adw::StatusPage::builder()
-                .icon_name("utilities-terminal-symbolic")
-                .title("flowmux")
-                .description("No workspaces yet — open one with: flowmux workspace new --root .")
-                .build();
-            self.stack.add_named(&status, Some("__empty"));
+            if self.stack.child_by_name("__empty").is_none() {
+                let status = adw::StatusPage::builder()
+                    .icon_name("utilities-terminal-symbolic")
+                    .title("flowmux")
+                    .description("No workspaces yet — open one with: flowmux workspace new --root .")
+                    .build();
+                self.stack.add_named(&status, Some("__empty"));
+            }
             self.stack.set_visible_child_name("__empty");
+            self.focused_pane.set(None);
         }
     }
 
     pub fn render_workspace(&self, ws: &Workspace) {
+        self.render_workspace_with_activation(ws, true);
+    }
+
+    fn render_workspace_with_activation(&self, ws: &Workspace, activate: bool) {
         self.sidebar.upsert(ws);
         let mut surfaces = self.surfaces.borrow_mut();
         if surfaces.contains_key(&ws.id) {
@@ -156,9 +172,14 @@ impl WindowController {
         let name = ws.id.to_string();
         self.stack.add_named(&widget, Some(&name));
         surfaces.insert(ws.id, widget);
-        self.stack.set_visible_child_name(&name);
+        if activate {
+            self.stack.set_visible_child_name(&name);
+        }
         drop(surfaces);
-        self.focus_first_leaf_of(ws);
+        if activate {
+            self.sidebar.select_workspace(ws.id);
+            self.focus_first_leaf_of(ws);
+        }
     }
 
     pub fn rerender_workspace(&self, ws: &Workspace) {
@@ -174,6 +195,7 @@ impl WindowController {
         surfaces.insert(ws.id, new_widget);
         self.stack.set_visible_child_name(&name);
         drop(surfaces);
+        self.sidebar.select_workspace(ws.id);
         self.focus_first_leaf_of(ws);
     }
 
@@ -182,6 +204,51 @@ impl WindowController {
     /// main thread without going through the bridge.
     pub fn pane_registry(&self) -> Rc<RefCell<PaneRegistry>> {
         self.pane_registry.clone()
+    }
+
+    fn install_cwd_persistence(&self) {
+        let controller = self.clone();
+        glib::timeout_add_local(Duration::from_secs(2), move || {
+            let controller = controller.clone();
+            glib::MainContext::default().spawn_local(async move {
+                controller.persist_terminal_cwds().await;
+            });
+            glib::ControlFlow::Continue
+        });
+
+        let controller = self.clone();
+        self.window.connect_close_request(move |_| {
+            controller.persist_terminal_cwds_blocking();
+            if let Err(e) = controller.store.save_now_blocking() {
+                tracing::warn!(error = %e, "state save on close failed");
+            }
+            glib::Propagation::Proceed
+        });
+    }
+
+    async fn persist_terminal_cwds(&self) {
+        let cwd_entries = self.pane_registry.borrow().terminal_cwds();
+        for (pane, surface, cwd) in cwd_entries {
+            if self
+                .store
+                .update_surface_cwd(pane, surface, cwd)
+                .await
+                .is_some()
+            {
+                if let Some(title) = self.store.surface_title(pane, surface).await {
+                    self.pane_registry
+                        .borrow()
+                        .set_surface_title(surface, &title);
+                }
+            }
+        }
+    }
+
+    fn persist_terminal_cwds_blocking(&self) {
+        let cwd_entries = self.pane_registry.borrow().terminal_cwds();
+        for (pane, surface, cwd) in cwd_entries {
+            let _ = self.store.update_surface_cwd_blocking(pane, surface, cwd);
+        }
     }
 
     /// Drop the workspace's stack page entirely (used when its last
@@ -193,6 +260,16 @@ impl WindowController {
         if let Some(old) = surfaces.remove(&id) {
             self.stack.remove(&old);
         }
+    }
+
+    async fn activate_active_or_show_empty(&self) {
+        if let Some(id) = self.store.active_or_first().await {
+            if self.surfaces.borrow().contains_key(&id) {
+                self.activate_workspace(id).await;
+                return;
+            }
+        }
+        self.show_status_when_empty();
     }
 
     /// Find the first leaf in this workspace's first surface and
@@ -288,6 +365,7 @@ impl WindowController {
                 }
                 Some(flowmux_daemon::CloseOutcome::WorkspaceRemoved { workspace }) => {
                     self.drop_workspace(workspace);
+                    self.activate_active_or_show_empty().await;
                     let _ = ack.send(Ok(()));
                 }
             },
@@ -328,6 +406,7 @@ impl WindowController {
                     }
                     Some(flowmux_daemon::CloseOutcome::WorkspaceRemoved { workspace }) => {
                         self.drop_workspace(workspace);
+                        self.activate_active_or_show_empty().await;
                         let _ = ack.send(Ok(()));
                     }
                     Some(flowmux_daemon::CloseOutcome::PaneRemoved { workspace })
@@ -337,6 +416,37 @@ impl WindowController {
                         }
                         let _ = ack.send(Ok(()));
                     }
+                }
+            }
+            GtkCommand::RenameSurface {
+                pane,
+                surface,
+                title,
+                ack,
+            } => match self
+                .store
+                .rename_surface(pane, surface, title.clone())
+                .await
+            {
+                None => {
+                    let _ = ack.send(Err(format!("surface not found: {surface}")));
+                }
+                Some(_) => {
+                    self.pane_registry
+                        .borrow()
+                        .set_surface_title(surface, &title);
+                    let _ = ack.send(Ok(()));
+                }
+            },
+            GtkCommand::ShowRenameSurfaceDialog { pane, surface } => {
+                if let Some(title) = self.store.surface_title(pane, surface).await {
+                    show_rename_surface_dialog(
+                        &self.window,
+                        pane,
+                        surface,
+                        &title,
+                        self.bridge.clone(),
+                    );
                 }
             }
             GtkCommand::NewWorkspace { root } => {
@@ -359,8 +469,10 @@ impl WindowController {
                 }
             }
             GtkCommand::RemoveWorkspace { id, ack } => {
-                self.store.remove_workspace(id).await;
-                self.drop_workspace(id);
+                if self.store.remove_workspace(id).await {
+                    self.drop_workspace(id);
+                    self.activate_active_or_show_empty().await;
+                }
                 let _ = ack.send(());
             }
             GtkCommand::RenameWorkspace { id, name, ack } => {
@@ -391,9 +503,9 @@ impl WindowController {
                 if snap.workspace_order.is_empty() {
                     return;
                 }
-                let active = snap
+                let active = self.sidebar.selected_workspace().or(snap
                     .active_workspace
-                    .or_else(|| snap.workspace_order.first().copied());
+                    .or_else(|| snap.workspace_order.first().copied()));
                 let Some(active) = active else { return };
                 let cur = snap
                     .workspace_order
@@ -501,6 +613,126 @@ impl WindowController {
                     }
                 }
             }
+            GtkCommand::BrowserAction { pane, op, ack } => {
+                let browser = self.pane_registry.borrow().active_browser(pane).cloned();
+                let Some(browser) = browser else {
+                    let _ = ack.send(Err(format!("browser pane not found: {pane}")));
+                    return;
+                };
+                match op {
+                    BrowserOp::Navigate { url } => {
+                        browser.web_view.load_uri(&url);
+                        let _ = ack.send(Ok(BrowserActionResult::Ok));
+                    }
+                    BrowserOp::Back => {
+                        let moved = browser.web_view.can_go_back();
+                        if moved {
+                            browser.web_view.go_back();
+                        }
+                        let _ = ack.send(Ok(BrowserActionResult::Bool(moved)));
+                    }
+                    BrowserOp::Forward => {
+                        let moved = browser.web_view.can_go_forward();
+                        if moved {
+                            browser.web_view.go_forward();
+                        }
+                        let _ = ack.send(Ok(BrowserActionResult::Bool(moved)));
+                    }
+                    BrowserOp::Reload => {
+                        browser.web_view.reload();
+                        let _ = ack.send(Ok(BrowserActionResult::Ok));
+                    }
+                    BrowserOp::Url => {
+                        let value = browser
+                            .web_view
+                            .uri()
+                            .map(|uri| uri.to_string())
+                            .unwrap_or_default();
+                        let _ = ack.send(Ok(BrowserActionResult::String(value)));
+                    }
+                    BrowserOp::Title => {
+                        let value = browser
+                            .web_view
+                            .title()
+                            .map(|title| title.to_string())
+                            .unwrap_or_default();
+                        let _ = ack.send(Ok(BrowserActionResult::String(value)));
+                    }
+                    BrowserOp::Eval { source } => {
+                        let cell = std::cell::Cell::new(Some(ack));
+                        browser.evaluate_js(&source, move |result| {
+                            if let Some(ack) = cell.take() {
+                                let _ = ack.send(result.map(BrowserActionResult::String));
+                            }
+                        });
+                    }
+                    BrowserOp::Snapshot => {
+                        run_browser_js(&browser, flowmux_browser::scripts::SNAPSHOT_JS, ack, false);
+                    }
+                    BrowserOp::Click { target } => {
+                        let js = flowmux_browser::scripts::click_by_ref(&target);
+                        run_browser_js(&browser, &js, ack, true);
+                    }
+                    BrowserOp::Fill { target, value } => {
+                        let js = flowmux_browser::scripts::fill_by_ref(&target, &value);
+                        run_browser_js(&browser, &js, ack, true);
+                    }
+                    BrowserOp::Select { target, value } => {
+                        let js = flowmux_browser::scripts::select_option_by_ref(&target, &value);
+                        run_browser_js(&browser, &js, ack, true);
+                    }
+                    BrowserOp::Scroll { target, x, y } => {
+                        let js = flowmux_browser::scripts::scroll_by_ref(&target, x, y);
+                        run_browser_js(&browser, &js, ack, true);
+                    }
+                    BrowserOp::Type { text } => {
+                        let js = flowmux_browser::scripts::type_keys(&text);
+                        run_browser_js(&browser, &js, ack, true);
+                    }
+                    BrowserOp::Press { key } => {
+                        let js = flowmux_browser::scripts::press_key(&key);
+                        run_browser_js(&browser, &js, ack, true);
+                    }
+                    BrowserOp::Text { target } => {
+                        let js = flowmux_browser::scripts::text_of(&target);
+                        run_browser_js(&browser, &js, ack, false);
+                    }
+                    BrowserOp::Value { target } => {
+                        let js = flowmux_browser::scripts::value_of(&target);
+                        run_browser_js(&browser, &js, ack, false);
+                    }
+                    BrowserOp::Attr { target, name } => {
+                        let js = flowmux_browser::scripts::attr_of(&target, &name);
+                        run_browser_js(&browser, &js, ack, false);
+                    }
+                }
+            }
+            GtkCommand::BrowserOpenSplit {
+                target_pane,
+                url,
+                direction,
+                ack,
+            } => {
+                let Some(target) = target_pane.or_else(|| self.focused_pane.get()) else {
+                    let _ = ack.send(Err("no target pane focused".into()));
+                    return;
+                };
+                match self
+                    .store
+                    .split_pane_with_browser(target, direction, url)
+                    .await
+                {
+                    None => {
+                        let _ = ack.send(Err(format!("pane not found: {target}")));
+                    }
+                    Some((workspace, new_pane)) => {
+                        if let Some(ws) = self.store.get_workspace(workspace).await {
+                            self.rerender_workspace(&ws);
+                        }
+                        let _ = ack.send(Ok(new_pane));
+                    }
+                }
+            }
         }
     }
 
@@ -573,6 +805,7 @@ impl WindowController {
         if self.surfaces.borrow().contains_key(&id) {
             self.stack.set_visible_child_name(&id.to_string());
         }
+        self.sidebar.select_workspace(id);
         self.store.set_active_workspace(Some(id)).await;
         if let Some(ws) = self.store.get_workspace(id).await {
             self.focus_first_leaf_of(&ws);
@@ -582,12 +815,13 @@ impl WindowController {
     pub async fn restore_from_store(&self) {
         let snap = self.store.snapshot().await;
         for ws in &snap.workspaces {
-            self.render_workspace(ws);
+            self.render_workspace_with_activation(ws, false);
         }
-        if let Some(active) = snap.active_workspace {
-            if self.surfaces.borrow().contains_key(&active) {
-                self.stack.set_visible_child_name(&active.to_string());
-            }
+        let active = snap
+            .active_workspace
+            .or_else(|| snap.workspace_order.first().copied());
+        if let Some(active) = active {
+            self.activate_workspace(active).await;
         }
     }
 }
@@ -690,6 +924,18 @@ fn make_callbacks(focused: FocusedPane, bridge: Bridge) -> PaneCallbacks {
                             surface,
                             ack: tx,
                         })
+                        .await;
+                });
+            }))
+        },
+        on_rename_surface: {
+            let bridge = bridge.clone();
+            Rc::new(RefCell::new(move |pane, surface| {
+                let bridge = bridge.clone();
+                glib::MainContext::default().spawn_local(async move {
+                    let _ = bridge
+                        .tx
+                        .send(GtkCommand::ShowRenameSurfaceDialog { pane, surface })
                         .await;
                 });
             }))
@@ -853,6 +1099,50 @@ fn show_rename_dialog(
     dialog.present(Some(window));
 }
 
+fn show_rename_surface_dialog(
+    window: &adw::ApplicationWindow,
+    pane: PaneId,
+    surface: SurfaceId,
+    current_title: &str,
+    bridge: Bridge,
+) {
+    let dialog = adw::AlertDialog::new(Some("Rename Pane Tab"), None);
+    let entry = gtk::Entry::new();
+    entry.set_text(current_title);
+    entry.set_activates_default(true);
+    entry.set_hexpand(true);
+    dialog.set_extra_child(Some(&entry));
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("ok", "OK");
+    dialog.set_default_response(Some("ok"));
+    dialog.set_close_response("cancel");
+    dialog.set_response_appearance("ok", adw::ResponseAppearance::Suggested);
+
+    let entry_for_resp = entry.clone();
+    dialog.connect_response(None, move |dialog, response| {
+        if response == "ok" {
+            let new_title = entry_for_resp.text().trim().to_string();
+            if !new_title.is_empty() {
+                let bridge = bridge.clone();
+                glib::MainContext::default().spawn_local(async move {
+                    let (tx, _rx) = oneshot::channel();
+                    let _ = bridge
+                        .tx
+                        .send(GtkCommand::RenameSurface {
+                            pane,
+                            surface,
+                            title: new_title,
+                            ack: tx,
+                        })
+                        .await;
+                });
+            }
+        }
+        dialog.close();
+    });
+    dialog.present(Some(window));
+}
+
 fn show_color_dialog(
     window: &adw::ApplicationWindow,
     id: WorkspaceId,
@@ -893,6 +1183,41 @@ fn show_color_dialog(
             });
         },
     );
+}
+
+/// Evaluate a script on `browser`'s WebView and forward the result
+/// through `ack`. When `ok_string_required` is true, the script's
+/// returned string must be exactly `"ok"` for the ack to resolve to
+/// `BrowserActionResult::Ok` — anything else (including the
+/// `"error: …"` strings flowmux_browser scripts use) becomes an Err.
+/// When false, the raw string is forwarded so the caller can parse
+/// JSON (Snapshot) or read a value back (Text / Value / Attr).
+fn run_browser_js(
+    browser: &crate::ui::browser_pane::BrowserPane,
+    js: &str,
+    ack: tokio::sync::oneshot::Sender<Result<BrowserActionResult, String>>,
+    ok_string_required: bool,
+) {
+    let cell = std::cell::Cell::new(Some(ack));
+    browser.evaluate_js(js, move |result| {
+        if let Some(ack) = cell.take() {
+            let mapped = match result {
+                Ok(s) => {
+                    if ok_string_required {
+                        if s == "ok" {
+                            Ok(BrowserActionResult::Ok)
+                        } else {
+                            Err(s)
+                        }
+                    } else {
+                        Ok(BrowserActionResult::String(s))
+                    }
+                }
+                Err(e) => Err(e),
+            };
+            let _ = ack.send(mapped);
+        }
+    });
 }
 
 /// Spawn the GTK-side dispatch loop. Lives on the main context.

@@ -107,9 +107,51 @@ impl BrowserPane {
         }
     }
 
+    pub fn navigate(&self, url: &str) {
+        self.web_view.load_uri(url);
+    }
+
+    /// Move backwards in session history. Returns false if there's
+    /// nothing to go back to.
+    pub fn back(&self) -> bool {
+        if self.web_view.can_go_back() {
+            self.web_view.go_back();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn forward(&self) -> bool {
+        if self.web_view.can_go_forward() {
+            self.web_view.go_forward();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn reload(&self) {
+        self.web_view.reload();
+    }
+
+    pub fn current_url(&self) -> String {
+        self.web_view
+            .uri()
+            .map(|s| s.to_string())
+            .unwrap_or_default()
+    }
+
+    pub fn current_title(&self) -> String {
+        self.web_view
+            .title()
+            .map(|s| s.to_string())
+            .unwrap_or_default()
+    }
+
     /// Run JS and call `on_done` with the JS result string. The
-    /// scriptable API (Task 15) wraps this with a oneshot channel that
-    /// the IPC handler awaits.
+    /// scriptable API wraps this with a oneshot channel that the IPC
+    /// handler awaits.
     pub fn evaluate_js<F: FnOnce(Result<String, String>) + 'static>(
         &self,
         source: &str,

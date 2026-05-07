@@ -536,6 +536,7 @@ dependencies = [
  "anyhow",
  "async-channel",
  "chrono",
+ "flowmux-browser",
  "flowmux-config",
  "flowmux-cookies",
  "flowmux-core",
@@ -553,6 +554,19 @@ dependencies = [
  "tracing-subscriber",
  "vte4",
  "webkit6",
+]
+
+[[package]]
+name = "flowmux-browser"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "dirs",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]

@@ -9,8 +9,71 @@
 //! `docs/upstream-mapping/domain-model.md`.
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
+
+const TERMINAL_TAB_TITLE_MAX_CHARS: usize = 15;
+const FALLBACK_TERMINAL_TAB_TITLE: &str = "Terminal";
+
+pub fn terminal_tab_title_for_cwd(cwd: Option<&Path>) -> String {
+    let folder = cwd
+        .and_then(|path| path.file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| FALLBACK_TERMINAL_TAB_TITLE.to_string());
+    truncate_tab_title(&folder)
+}
+
+fn truncate_tab_title(title: &str) -> String {
+    if title.chars().count() <= TERMINAL_TAB_TITLE_MAX_CHARS {
+        return title.to_string();
+    }
+    let prefix: String = title.chars().take(TERMINAL_TAB_TITLE_MAX_CHARS).collect();
+    format!("{prefix}...")
+}
+
+fn looks_like_legacy_terminal_title(title: &str) -> bool {
+    let title = title.trim();
+    if title.is_empty() || title == FALLBACK_TERMINAL_TAB_TITLE {
+        return true;
+    }
+    title
+        .strip_prefix("Terminal ")
+        .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn normalize_unlocked_terminal_title(surface: &mut PaneSurface) -> bool {
+    if surface.title_locked {
+        return false;
+    }
+    let SurfaceKind::Terminal { cwd, .. } = &surface.kind else {
+        return false;
+    };
+
+    if looks_like_legacy_terminal_title(&surface.title) {
+        let Some(cwd) = cwd.as_deref() else {
+            return false;
+        };
+        let title = terminal_tab_title_for_cwd(Some(cwd));
+        if surface.title == title {
+            return false;
+        }
+        surface.title = title;
+        return true;
+    }
+
+    let title_matches_cwd = cwd
+        .as_deref()
+        .map(|cwd| terminal_tab_title_for_cwd(Some(cwd)))
+        .as_deref()
+        == Some(surface.title.as_str());
+    if title_matches_cwd {
+        return false;
+    }
+
+    surface.title_locked = true;
+    true
+}
 
 pub mod id {
     use super::*;
@@ -125,6 +188,10 @@ pub enum SurfaceKind {
 pub struct PaneSurface {
     pub id: SurfaceId,
     pub title: String,
+    /// False while flowmux owns the title from cwd changes. Set true
+    /// once the user explicitly renames the tab.
+    #[serde(default)]
+    pub title_locked: bool,
     pub kind: SurfaceKind,
 }
 
@@ -227,12 +294,12 @@ impl Pane {
     }
 
     /// Normalize legacy leaf content into pane-local surface tabs.
-    pub fn normalize_leaf_tabs(&mut self, fallback_cwd: Option<PathBuf>) {
+    pub fn normalize_leaf_tabs(&mut self, fallback_cwd: Option<PathBuf>) -> bool {
         match self {
             Pane::Leaf { content, .. } => content.normalize_to_tabs(fallback_cwd),
             Pane::Split { first, second, .. } => {
-                first.normalize_leaf_tabs(fallback_cwd.clone());
-                second.normalize_leaf_tabs(fallback_cwd);
+                first.normalize_leaf_tabs(fallback_cwd.clone())
+                    | second.normalize_leaf_tabs(fallback_cwd)
             }
         }
     }
@@ -279,6 +346,105 @@ impl Pane {
             Pane::Split { first, second, .. } => {
                 first.set_active_surface(target, surface_id)
                     || second.set_active_surface(target, surface_id)
+            }
+        }
+    }
+
+    pub fn surface_title(&self, target: PaneId, surface_id: SurfaceId) -> Option<&str> {
+        match self {
+            Pane::Leaf { id, content } if *id == target => match content {
+                PaneContent::Tabs { surfaces, .. } => surfaces
+                    .iter()
+                    .find(|surface| surface.id == surface_id)
+                    .map(|surface| surface.title.as_str()),
+                PaneContent::Terminal { .. } | PaneContent::Browser { .. } => None,
+            },
+            Pane::Leaf { .. } => None,
+            Pane::Split { first, second, .. } => first
+                .surface_title(target, surface_id)
+                .or_else(|| second.surface_title(target, surface_id)),
+        }
+    }
+
+    pub fn terminal_surface_cwd(&self, target: PaneId) -> Option<PathBuf> {
+        match self {
+            Pane::Leaf { id, content } if *id == target => {
+                content
+                    .active_surface()
+                    .and_then(|surface| match &surface.kind {
+                        SurfaceKind::Terminal { cwd, .. } => cwd.clone(),
+                        SurfaceKind::Browser { .. } => None,
+                    })
+            }
+            Pane::Leaf { .. } => None,
+            Pane::Split { first, second, .. } => first
+                .terminal_surface_cwd(target)
+                .or_else(|| second.terminal_surface_cwd(target)),
+        }
+    }
+
+    pub fn rename_surface(&mut self, target: PaneId, surface_id: SurfaceId, title: String) -> bool {
+        match self {
+            Pane::Leaf { id, content } if *id == target => match content {
+                PaneContent::Tabs { surfaces, .. } => {
+                    if let Some(surface) =
+                        surfaces.iter_mut().find(|surface| surface.id == surface_id)
+                    {
+                        surface.title = title;
+                        surface.title_locked = true;
+                        true
+                    } else {
+                        false
+                    }
+                }
+                PaneContent::Terminal { .. } | PaneContent::Browser { .. } => false,
+            },
+            Pane::Leaf { .. } => false,
+            Pane::Split { first, second, .. } => {
+                first.rename_surface(target, surface_id, title.clone())
+                    || second.rename_surface(target, surface_id, title)
+            }
+        }
+    }
+
+    pub fn set_surface_cwd(
+        &mut self,
+        target: PaneId,
+        surface_id: SurfaceId,
+        new_cwd: PathBuf,
+    ) -> bool {
+        match self {
+            Pane::Leaf { id, content } if *id == target => match content {
+                PaneContent::Tabs { surfaces, .. } => {
+                    if let Some(surface) =
+                        surfaces.iter_mut().find(|surface| surface.id == surface_id)
+                    {
+                        if let SurfaceKind::Terminal { cwd, .. } = &mut surface.kind {
+                            let cwd_changed = cwd.as_ref() != Some(&new_cwd);
+                            let next_title = (!surface.title_locked)
+                                .then(|| terminal_tab_title_for_cwd(Some(&new_cwd)));
+                            let title_changed = next_title
+                                .as_ref()
+                                .is_some_and(|title| surface.title != *title);
+                            if cwd_changed {
+                                *cwd = Some(new_cwd);
+                            }
+                            if let Some(title) = next_title {
+                                if title_changed {
+                                    surface.title = title;
+                                }
+                            }
+                            return cwd_changed || title_changed;
+                        }
+                    }
+                    false
+                }
+                PaneContent::Terminal { .. } | PaneContent::Browser { .. } => false,
+            },
+            Pane::Leaf { .. } => false,
+            Pane::Split { first, second, .. } => {
+                first.set_surface_cwd(target, surface_id, new_cwd.clone())
+                    || second.set_surface_cwd(target, surface_id, new_cwd)
             }
         }
     }
@@ -433,6 +599,7 @@ impl PaneSurface {
         Self {
             id: SurfaceId::new(),
             title: title.into(),
+            title_locked: false,
             kind: SurfaceKind::Terminal { shell: None, cwd },
         }
     }
@@ -441,6 +608,7 @@ impl PaneSurface {
         Self {
             id: SurfaceId::new(),
             title: title.into(),
+            title_locked: false,
             kind: SurfaceKind::Browser {
                 initial_url: Some(url),
             },
@@ -495,28 +663,42 @@ impl PaneContent {
         }
     }
 
-    pub fn normalize_to_tabs(&mut self, fallback_cwd: Option<PathBuf>) {
+    pub fn normalize_to_tabs(&mut self, fallback_cwd: Option<PathBuf>) -> bool {
         let replacement = match self {
-            PaneContent::Terminal { .. } => {
-                Some(PaneContent::tabbed_terminal("Terminal", fallback_cwd))
-            }
+            PaneContent::Terminal { .. } => Some(PaneContent::tabbed_terminal(
+                terminal_tab_title_for_cwd(fallback_cwd.as_deref()),
+                fallback_cwd,
+            )),
             PaneContent::Browser { url } => {
                 Some(PaneContent::tabbed_browser("Browser", url.clone()))
             }
             PaneContent::Tabs { active, surfaces } => {
                 if surfaces.is_empty() {
-                    let surface = PaneSurface::terminal("Terminal", fallback_cwd);
+                    let surface = PaneSurface::terminal(
+                        terminal_tab_title_for_cwd(fallback_cwd.as_deref()),
+                        fallback_cwd,
+                    );
                     *active = surface.id;
                     surfaces.push(surface);
-                } else if !surfaces.iter().any(|surface| surface.id == *active) {
-                    *active = surfaces[0].id;
+                    return true;
+                } else {
+                    let mut changed = false;
+                    for surface in surfaces.iter_mut() {
+                        changed |= normalize_unlocked_terminal_title(surface);
+                    }
+                    if !surfaces.iter().any(|surface| surface.id == *active) {
+                        *active = surfaces[0].id;
+                        changed = true;
+                    }
+                    return changed;
                 }
-                None
             }
         };
         if let Some(replacement) = replacement {
             *self = replacement;
+            return true;
         }
+        false
     }
 }
 
@@ -676,10 +858,81 @@ mod tests {
         };
         assert_eq!(surfaces.len(), 1);
         assert_eq!(surfaces[0].id, active);
+        assert_eq!(surfaces[0].title, "flowmux-core-test");
         assert!(matches!(
             &surfaces[0].kind,
             SurfaceKind::Terminal { cwd: Some(got), .. } if got == &cwd
         ));
+    }
+
+    #[test]
+    fn terminal_tab_title_for_cwd_uses_folder_and_truncates() {
+        assert_eq!(
+            terminal_tab_title_for_cwd(Some(Path::new("/tmp/project"))),
+            "project"
+        );
+        assert_eq!(
+            terminal_tab_title_for_cwd(Some(Path::new("/tmp/1234567890123456"))),
+            "123456789012345..."
+        );
+        assert_eq!(terminal_tab_title_for_cwd(Some(Path::new("/"))), "Terminal");
+    }
+
+    #[test]
+    fn pane_content_normalizes_legacy_terminal_number_titles() {
+        let mut first = PaneSurface::terminal("Terminal 3", Some("/tmp/project".into()));
+        let first_id = first.id;
+        let mut locked = PaneSurface::terminal("Terminal 4", Some("/tmp/locked".into()));
+        locked.title_locked = true;
+        first.title_locked = false;
+        let mut content = PaneContent::Tabs {
+            active: first_id,
+            surfaces: vec![first, locked],
+        };
+
+        content.normalize_to_tabs(None);
+
+        let PaneContent::Tabs { surfaces, .. } = content else {
+            panic!("expected tabbed content")
+        };
+        assert_eq!(surfaces[0].title, "project");
+        assert_eq!(surfaces[1].title, "Terminal 4");
+    }
+
+    #[test]
+    fn pane_content_locks_non_legacy_terminal_titles_on_normalize() {
+        let custom = PaneSurface::terminal("server", Some("/tmp/project".into()));
+        let custom_id = custom.id;
+        let mut content = PaneContent::Tabs {
+            active: custom_id,
+            surfaces: vec![custom],
+        };
+
+        assert!(content.normalize_to_tabs(None));
+
+        let PaneContent::Tabs { surfaces, .. } = content else {
+            panic!("expected tabbed content")
+        };
+        assert_eq!(surfaces[0].title, "server");
+        assert!(surfaces[0].title_locked);
+    }
+
+    #[test]
+    fn pane_content_keeps_cwd_title_unlocked_on_normalize() {
+        let surface = PaneSurface::terminal("project", Some("/tmp/project".into()));
+        let surface_id = surface.id;
+        let mut content = PaneContent::Tabs {
+            active: surface_id,
+            surfaces: vec![surface],
+        };
+
+        assert!(!content.normalize_to_tabs(None));
+
+        let PaneContent::Tabs { surfaces, .. } = content else {
+            panic!("expected tabbed content")
+        };
+        assert_eq!(surfaces[0].title, "project");
+        assert!(!surfaces[0].title_locked);
     }
 
     #[test]
@@ -714,6 +967,57 @@ mod tests {
             pane.close_surface_in_leaf(pane_id, second_id),
             CloseSurfaceOutcome::LastSurfaceRemoved
         );
+    }
+
+    #[test]
+    fn pane_surface_title_can_be_renamed() {
+        let pane_id = PaneId::new();
+        let mut pane = Pane::Leaf {
+            id: pane_id,
+            content: PaneContent::tabbed_terminal("one", None),
+        };
+        let surface_id = pane.active_surface_id(pane_id).unwrap();
+
+        assert_eq!(pane.surface_title(pane_id, surface_id), Some("one"));
+        assert!(pane.rename_surface(pane_id, surface_id, "renamed".into()));
+        assert_eq!(pane.surface_title(pane_id, surface_id), Some("renamed"));
+        let Pane::Leaf {
+            content: PaneContent::Tabs { surfaces, .. },
+            ..
+        } = pane
+        else {
+            panic!("expected tabbed leaf")
+        };
+        assert!(surfaces[0].title_locked);
+    }
+
+    #[test]
+    fn terminal_surface_cwd_updates_unlocked_title_only() {
+        let pane_id = PaneId::new();
+        let mut pane = Pane::Leaf {
+            id: pane_id,
+            content: PaneContent::tabbed_terminal("one", Some("/tmp/old".into())),
+        };
+        let surface_id = pane.active_surface_id(pane_id).unwrap();
+
+        assert!(pane.set_surface_cwd(pane_id, surface_id, "/tmp/new".into()));
+        assert_eq!(pane.surface_title(pane_id, surface_id), Some("new"));
+        assert!(!pane.set_surface_cwd(pane_id, surface_id, "/tmp/new".into()));
+        assert!(pane.rename_surface(pane_id, surface_id, "fixed".into()));
+        assert!(pane.set_surface_cwd(pane_id, surface_id, "/tmp/another".into()));
+        assert_eq!(pane.surface_title(pane_id, surface_id), Some("fixed"));
+
+        let Pane::Leaf {
+            content: PaneContent::Tabs { surfaces, .. },
+            ..
+        } = pane
+        else {
+            panic!("expected tabbed leaf")
+        };
+        assert!(matches!(
+            &surfaces[0].kind,
+            SurfaceKind::Terminal { cwd: Some(cwd), .. } if cwd == &PathBuf::from("/tmp/another")
+        ));
     }
 
     #[test]

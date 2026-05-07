@@ -189,7 +189,10 @@ mod tests {
         async fn fill(&self, r: &str, v: &str) -> Result<(), BrowserError> {
             self.log(format!("fill {r} {v}"));
             let mut s = self.state.borrow_mut();
-            let n = s.nodes.get_mut(r).ok_or(BrowserError::RefNotFound(r.into()))?;
+            let n = s
+                .nodes
+                .get_mut(r)
+                .ok_or(BrowserError::RefNotFound(r.into()))?;
             n.value = v.into();
             Ok(())
         }

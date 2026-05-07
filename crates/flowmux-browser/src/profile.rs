@@ -119,20 +119,26 @@ mod tests {
 
     #[test]
     fn custom_slug_sanitizes_unsafe_characters() {
-        let p = BrowserProfile::Custom { name: "Work GitHub!".into() };
+        let p = BrowserProfile::Custom {
+            name: "Work GitHub!".into(),
+        };
         assert_eq!(p.slug(), "custom-work-github");
     }
 
     #[test]
     fn custom_slug_collapses_runs_of_specials() {
-        let p = BrowserProfile::Custom { name: "a / b // c".into() };
+        let p = BrowserProfile::Custom {
+            name: "a / b // c".into(),
+        };
         // runs of "non-allowed" chars collapse to a single '-'
         assert_eq!(p.slug(), "custom-a-b-c");
     }
 
     #[test]
     fn custom_slug_falls_back_to_unnamed_when_empty() {
-        let p = BrowserProfile::Custom { name: "  / / /  ".into() };
+        let p = BrowserProfile::Custom {
+            name: "  / / /  ".into(),
+        };
         assert_eq!(p.slug(), "custom-unnamed");
     }
 
@@ -152,7 +158,9 @@ mod tests {
         );
         assert_eq!(
             BrowserProfile::parse_slug("custom-work"),
-            Some(BrowserProfile::Custom { name: "work".into() })
+            Some(BrowserProfile::Custom {
+                name: "work".into()
+            })
         );
     }
 
@@ -182,9 +190,15 @@ mod tests {
     #[test]
     fn display_name_is_user_facing() {
         assert_eq!(BrowserProfile::Default.display_name(), "Default");
-        assert_eq!(BrowserProfile::FirefoxImport.display_name(), "Firefox import");
         assert_eq!(
-            BrowserProfile::Custom { name: "Work".into() }.display_name(),
+            BrowserProfile::FirefoxImport.display_name(),
+            "Firefox import"
+        );
+        assert_eq!(
+            BrowserProfile::Custom {
+                name: "Work".into()
+            }
+            .display_name(),
             "Work"
         );
     }
@@ -195,7 +209,9 @@ mod tests {
             BrowserProfile::Default,
             BrowserProfile::FirefoxImport,
             BrowserProfile::ChromeImport,
-            BrowserProfile::Custom { name: "work".into() },
+            BrowserProfile::Custom {
+                name: "work".into(),
+            },
         ] {
             let s = serde_json::to_string(&p).unwrap();
             let back: BrowserProfile = serde_json::from_str(&s).unwrap();

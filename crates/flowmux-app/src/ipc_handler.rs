@@ -7,7 +7,7 @@
 //! [`Bridge`] to the GTK main loop and the response is awaited via a
 //! `oneshot` channel.
 
-use crate::bridge::{Bridge, GtkCommand};
+use crate::bridge::{Bridge, BrowserActionResult, BrowserOp, GtkCommand};
 use flowmux_core::SplitDirection;
 use flowmux_daemon::DaemonHandler;
 use flowmux_ipc::protocol::{Request, Response, RpcError};
@@ -16,6 +16,21 @@ use std::future::Future;
 use std::pin::Pin;
 use tokio::sync::oneshot;
 use tracing::warn;
+
+async fn browser_action(bridge: &Bridge, pane: flowmux_core::PaneId, op: BrowserOp) -> Response {
+    let (tx, rx) = oneshot::channel();
+    let _ = bridge
+        .tx
+        .send(GtkCommand::BrowserAction { pane, op, ack: tx })
+        .await;
+    match rx.await {
+        Ok(Ok(BrowserActionResult::Ok)) => Response::BrowserOk,
+        Ok(Ok(BrowserActionResult::Bool(value))) => Response::BrowserBoolResult { value },
+        Ok(Ok(BrowserActionResult::String(value))) => Response::BrowserResult { value },
+        Ok(Err(e)) => Response::Error(RpcError::Internal(e)),
+        Err(_) => Response::Error(RpcError::Internal("bridge closed".into())),
+    }
+}
 
 pub struct GuiHandler {
     inner: DaemonHandler,
@@ -94,27 +109,76 @@ impl Handler for GuiHandler {
                         Err(_) => Response::Error(RpcError::Internal("bridge closed".into())),
                     }
                 }
-                Request::BrowserOpen { url, surface: _ } => {
-                    let store = self.inner.store();
-                    let ws_id = match store.active_or_first().await {
-                        Some(id) => id,
-                        None => {
-                            return Response::Error(RpcError::InvalidArgument(
-                                "no active workspace; create one first".into(),
-                            ))
-                        }
-                    };
-                    if store.add_browser_surface(ws_id, url).await.is_none() {
-                        return Response::Error(RpcError::NotFound(ws_id.to_string()));
-                    }
+                Request::BrowserOpen {
+                    url,
+                    target_pane,
+                    direction,
+                } => {
                     let (tx, rx) = oneshot::channel();
                     let _ = self
                         .bridge
                         .tx
-                        .send(GtkCommand::WorkspaceRerender { id: ws_id, ack: tx })
+                        .send(GtkCommand::BrowserOpenSplit {
+                            target_pane,
+                            url,
+                            direction,
+                            ack: tx,
+                        })
                         .await;
-                    let _ = rx.await;
-                    Response::Ok
+                    match rx.await {
+                        Ok(Ok(pane)) => Response::BrowserPaneOpened { pane },
+                        Ok(Err(e)) => Response::Error(RpcError::Internal(e)),
+                        Err(_) => Response::Error(RpcError::Internal("bridge closed".into())),
+                    }
+                }
+                Request::BrowserNavigate { pane, url } => {
+                    browser_action(&self.bridge, pane, BrowserOp::Navigate { url }).await
+                }
+                Request::BrowserBack { pane } => {
+                    browser_action(&self.bridge, pane, BrowserOp::Back).await
+                }
+                Request::BrowserForward { pane } => {
+                    browser_action(&self.bridge, pane, BrowserOp::Forward).await
+                }
+                Request::BrowserReload { pane } => {
+                    browser_action(&self.bridge, pane, BrowserOp::Reload).await
+                }
+                Request::BrowserUrl { pane } => {
+                    browser_action(&self.bridge, pane, BrowserOp::Url).await
+                }
+                Request::BrowserTitle { pane } => {
+                    browser_action(&self.bridge, pane, BrowserOp::Title).await
+                }
+                Request::BrowserClick { pane, target } => {
+                    browser_action(&self.bridge, pane, BrowserOp::Click { target }).await
+                }
+                Request::BrowserFill {
+                    pane,
+                    target,
+                    value,
+                } => browser_action(&self.bridge, pane, BrowserOp::Fill { target, value }).await,
+                Request::BrowserSelect {
+                    pane,
+                    target,
+                    value,
+                } => browser_action(&self.bridge, pane, BrowserOp::Select { target, value }).await,
+                Request::BrowserScroll { pane, target, x, y } => {
+                    browser_action(&self.bridge, pane, BrowserOp::Scroll { target, x, y }).await
+                }
+                Request::BrowserType { pane, text } => {
+                    browser_action(&self.bridge, pane, BrowserOp::Type { text }).await
+                }
+                Request::BrowserPress { pane, key } => {
+                    browser_action(&self.bridge, pane, BrowserOp::Press { key }).await
+                }
+                Request::BrowserText { pane, target } => {
+                    browser_action(&self.bridge, pane, BrowserOp::Text { target }).await
+                }
+                Request::BrowserValue { pane, target } => {
+                    browser_action(&self.bridge, pane, BrowserOp::Value { target }).await
+                }
+                Request::BrowserAttr { pane, target, name } => {
+                    browser_action(&self.bridge, pane, BrowserOp::Attr { target, name }).await
                 }
                 Request::ClaudeTeams { count, args, root } => {
                     let count = count.max(1).min(8);

@@ -115,6 +115,8 @@ pub struct PaneCallbacks {
     pub on_new_surface: Rc<RefCell<dyn FnMut(PaneId)>>,
     /// Pane-local close tab.
     pub on_close_surface: Rc<RefCell<dyn FnMut(PaneId, SurfaceId)>>,
+    /// Pane-local rename tab.
+    pub on_rename_surface: Rc<RefCell<dyn FnMut(PaneId, SurfaceId)>>,
 }
 
 impl TerminalPane {
