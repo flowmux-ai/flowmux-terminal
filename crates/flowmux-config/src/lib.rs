@@ -13,5 +13,6 @@
 
 pub mod cmux_json;
 pub mod ghostty;
+pub mod options;
 pub mod paths;
 pub mod theme;
