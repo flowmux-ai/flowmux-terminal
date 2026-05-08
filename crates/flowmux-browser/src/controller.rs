@@ -15,8 +15,10 @@ use async_trait::async_trait;
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum BrowserError {
-    /// `data-flowmux-ref` attribute set by the most recent snapshot is
-    /// no longer in the live DOM (page navigated, element removed).
+    /// The ref token from the most recent snapshot is no longer
+    /// resolvable — either the server's [`crate::refs::RefStore`]
+    /// does not have it, or the cssSelector it maps to no longer
+    /// matches a live DOM element (page navigated, element removed).
     #[error("element ref not found: {0}")]
     RefNotFound(String),
     /// JS evaluation threw or returned an unexpected shape.

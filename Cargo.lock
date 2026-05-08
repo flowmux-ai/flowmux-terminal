@@ -548,6 +548,7 @@ dependencies = [
  "flowmux-vcs",
  "gtk4",
  "libadwaita",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",

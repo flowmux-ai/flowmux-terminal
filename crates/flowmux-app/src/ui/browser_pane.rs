@@ -17,10 +17,12 @@
 //! 디렉토리를 분리한다.
 
 use crate::ui::terminal_pane::PaneCallbacks;
-use flowmux_browser::BrowserProfile;
+use flowmux_browser::{BrowserProfile, RefScope, RefStore};
 use flowmux_config::options::BrowserEngine;
 use flowmux_core::{PaneId, SurfaceId};
 use gtk::prelude::*;
+use std::cell::RefCell;
+use std::rc::Rc;
 use webkit6::prelude::*;
 
 #[derive(Clone)]
@@ -29,6 +31,19 @@ pub struct BrowserPane {
     pub root: gtk::Box,
     pub web_view: webkit6::WebView,
     pub address_bar: gtk::Entry,
+    /// cmux-style server-side ref store. Each snapshot clears + repopulates
+    /// the entry for this pane; subsequent click/fill/etc. resolve their
+    /// `eN` ref through this map to a CSS selector before injecting JS.
+    pub refs: Rc<RefCell<RefStore>>,
+    /// Scope key — derived from the surface id so multiple browser
+    /// surfaces in the same pane keep their refs separate.
+    pub ref_scope: RefScope,
+}
+
+/// Build a [`RefScope`] from a [`SurfaceId`]. The scope is just the
+/// surface uuid as u128 — opaque to the store, stable across calls.
+pub fn ref_scope_for_surface(surface_id: SurfaceId) -> RefScope {
+    RefScope::from_u128(surface_id.0.as_u128())
 }
 
 impl BrowserPane {
@@ -222,6 +237,8 @@ impl BrowserPane {
             root,
             web_view,
             address_bar: address,
+            refs: Rc::new(RefCell::new(RefStore::new())),
+            ref_scope: ref_scope_for_surface(surface_id),
         }
     }
 

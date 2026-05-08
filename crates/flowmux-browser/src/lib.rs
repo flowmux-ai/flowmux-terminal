@@ -14,8 +14,10 @@
 //!
 //! * [`BrowserController`]  — async trait every concrete controller
 //!   implements (WebKit, mock, future libcef bindings, …).
-//! * [`DomSnapshot`] / [`DomNode`] — serde-stable shape for the
-//!   accessibility-tree dump.
+//! * [`DomSnapshot`] — serde-stable shape for the snapshot the
+//!   page-side JS returns (Markdown tree + ref→meta map + page meta).
+//! * [`refs::RefStore`] — server-side `(scope, ref_token) → cssSelector`
+//!   map that subsequent `click`/`fill`/etc. calls resolve through.
 //! * [`BrowserProfile`]  — pick a cookie / data store: WebKit
 //!   default, Firefox import, Chrome import, named custom profile.
 //! * [`scripts`]         — string constants holding the JS the
@@ -23,9 +25,11 @@
 
 pub mod controller;
 pub mod profile;
+pub mod refs;
 pub mod scripts;
 pub mod snapshot;
 
 pub use controller::{BrowserController, BrowserError};
 pub use profile::{BrowserProfile, ProfileError};
-pub use snapshot::{DomNode, DomSnapshot};
+pub use refs::{RefScope, RefStore};
+pub use snapshot::{DomSnapshot, PageMeta, RefMeta};

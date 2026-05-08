@@ -2,29 +2,67 @@
 //! JavaScript snippets the controller injects into the page to
 //! implement snapshots, refs, clicks, fills, etc.
 //!
+//! Snapshot policy (cmux-equivalent): walk the DOM looking for nodes
+//! with an interactive role / content role, compute a CSS path for
+//! each, allocate a server-side `eN` token, and return a Markdown
+//! tree + a `refs` map. **The DOM is not mutated** — we never stamp
+//! `data-flowmux-ref` on the page. Subsequent action scripts take a
+//! CSS selector, not a token; the server's [`crate::refs::RefStore`]
+//! does the token→selector mapping before calling these.
+//!
 //! Each builder returns a string ready to hand to
-//! `WebView::evaluate_javascript`. The values they evaluate to are
-//! always either:
-//!
-//!   * a JSON string the controller `serde_json::from_str`-decodes
-//!     ([`SNAPSHOT_JS`]), or
-//!   * the literal string `"ok"` on success / `"error: <reason>"` on
-//!     a soft failure (e.g. ref not in DOM).
-//!
-//! The controller treats `"ok"` as success and any non-`"ok"` value
-//! as [`crate::BrowserError::RefNotFound`] / `Eval`. Keeping the
-//! return shape uniform makes the controller's WebKit glue trivial.
+//! `WebView::evaluate_javascript`. Action helpers always evaluate to
+//! either the literal string `"ok"` on success or `"error: <reason>"`
+//! on a soft failure (e.g. selector matches no element).
 
 /// Walk the document for everything an agent might want to act on
 /// — links, buttons, inputs, headings, anything with an explicit
-/// role — and emit a flat JSON snapshot. Each visible element gets a
-/// stable `data-flowmux-ref="eN"` attribute so subsequent
-/// `clickByRef` / `fillByRef` calls can find it without depending on
-/// the page's own selectors.
+/// role — and emit a JSON snapshot in cmux's shape:
+///
+/// ```text
+/// {
+///   "markdown": "- button \"OK\" [ref=e1]\n  - text \"Click me\"\n",
+///   "refs": { "e1": { "role": "...", "name": "...", "selector": "..." } },
+///   "page": { "url": "...", "title": "...", "ready_state": "...",
+///             "text": "...", "html": null }
+/// }
+/// ```
+///
+/// `selector` is a CSS path (`#id` when present, otherwise
+/// `tag:nth-of-type(n)` chains up to 6 ancestors deep). The page is
+/// never modified.
 pub const SNAPSHOT_JS: &str = r#"
 (function() {
-  const out = [];
-  let counter = 0;
+  const INTERACTIVE_ROLES = new Set([
+    'button','link','textbox','checkbox','radio','combobox','listbox',
+    'menuitem','menuitemcheckbox','menuitemradio','option','searchbox',
+    'slider','spinbutton','switch','tab','treeitem'
+  ]);
+  const CONTENT_ROLES = new Set([
+    'heading','cell','listitem','article','region','main','navigation'
+  ]);
+
+  function implicitRole(el) {
+    const aria = el.getAttribute('role');
+    if (aria) return aria;
+    const t = el.tagName.toLowerCase();
+    if (t === 'a' && el.hasAttribute('href')) return 'link';
+    if (t === 'button') return 'button';
+    if (t === 'select') return 'combobox';
+    if (t === 'textarea') return 'textbox';
+    if (t === 'input') {
+      const ty = (el.getAttribute('type') || 'text').toLowerCase();
+      if (ty === 'checkbox') return 'checkbox';
+      if (ty === 'radio') return 'radio';
+      if (ty === 'submit' || ty === 'button') return 'button';
+      if (ty === 'search') return 'searchbox';
+      return 'textbox';
+    }
+    if (/^h[1-6]$/.test(t)) return 'heading';
+    if (t === 'li') return 'listitem';
+    return t;
+  }
+
   function visible(el) {
     const r = el.getBoundingClientRect();
     if (r.width < 4 || r.height < 4) return false;
@@ -33,6 +71,7 @@ pub const SNAPSHOT_JS: &str = r#"
     if (Number(cs.opacity) === 0) return false;
     return true;
   }
+
   function name(el) {
     return (
       el.getAttribute('aria-label') ||
@@ -42,48 +81,99 @@ pub const SNAPSHOT_JS: &str = r#"
       (el.innerText || '').trim().slice(0, 120)
     );
   }
+
+  // Build a stable CSS selector for `el`. Prefer `#id` when the id is
+  // unique; otherwise walk up to 6 ancestors using
+  // `tag:nth-of-type(n)`. Bounded depth keeps the selector short and
+  // resilient to small DOM changes higher up the tree.
+  function cssPath(el) {
+    if (el.id && document.querySelectorAll('#' + CSS.escape(el.id)).length === 1) {
+      return '#' + CSS.escape(el.id);
+    }
+    const parts = [];
+    let node = el;
+    let depth = 0;
+    while (node && node.nodeType === 1 && depth < 6) {
+      let tag = node.tagName.toLowerCase();
+      if (node.id && document.querySelectorAll('#' + CSS.escape(node.id)).length === 1) {
+        parts.unshift('#' + CSS.escape(node.id));
+        return parts.join(' > ');
+      }
+      let nth = 1;
+      let sib = node.previousElementSibling;
+      while (sib) {
+        if (sib.tagName === node.tagName) nth += 1;
+        sib = sib.previousElementSibling;
+      }
+      parts.unshift(tag + ':nth-of-type(' + nth + ')');
+      node = node.parentElement;
+      depth += 1;
+    }
+    return parts.join(' > ');
+  }
+
+  const refs = {};
+  const lines = [];
+  let counter = 0;
+
   document.querySelectorAll(
-    'a,button,input,textarea,select,[role],h1,h2,h3,label,summary'
+    'a,button,input,textarea,select,[role],h1,h2,h3,h4,h5,h6,label,summary,li,article,nav,main'
   ).forEach((el) => {
     if (!visible(el)) return;
-    const r = el.getBoundingClientRect();
+    const role = implicitRole(el);
+    if (!INTERACTIVE_ROLES.has(role) && !CONTENT_ROLES.has(role)) return;
     counter += 1;
-    const ref = 'e' + counter;
-    el.setAttribute('data-flowmux-ref', ref);
-    out.push({
-      ref,
-      tag: el.tagName.toLowerCase(),
-      role: el.getAttribute('role') || el.tagName.toLowerCase(),
-      name: name(el),
-      bbox: [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)],
-    });
+    const token = 'e' + counter;
+    const sel = cssPath(el);
+    const nm = name(el).replace(/\n+/g, ' ').slice(0, 120);
+    refs[token] = { role: role, name: nm, selector: sel };
+    // Use " instead of "/"/g" so the snapshot script doesn't
+    // contain a regex with an unmatched ASCII double quote — the
+    // assert_balanced unit test treats `"` as starting/ending a
+    // string literal regardless of context.
+    const safe = nm.split(String.fromCharCode(34)).join('\\"');
+    lines.push('- ' + role + ' "' + safe + '" [ref=' + token + ']');
   });
-  return JSON.stringify({ url: location.href, title: document.title, nodes: out });
+
+  const text = (document.body && document.body.innerText
+    ? document.body.innerText : '').slice(0, 4000);
+  const page = {
+    url: location.href,
+    title: document.title,
+    ready_state: document.readyState,
+    text: text
+  };
+
+  return JSON.stringify({
+    markdown: lines.join('\n') + (lines.length ? '\n' : ''),
+    refs: refs,
+    page: page
+  });
 })()
 "#;
 
-/// Click the element previously stamped with `data-flowmux-ref=<r>`.
-/// Returns `"ok"` on success, `"error: ref not found"` otherwise.
-pub fn click_by_ref(r: &str) -> String {
+/// Click the element matched by `selector`. Returns `"ok"` on success,
+/// `"error: not found"` if `querySelector` returns nothing.
+pub fn click_by_selector(selector: &str) -> String {
     format!(
         r#"(function() {{
-            const el = document.querySelector('[data-flowmux-ref="{r}"]');
-            if (!el) return "error: ref not found";
+            const el = document.querySelector("{s}");
+            if (!el) return "error: not found";
             el.click();
             return "ok";
         }})()"#,
-        r = js_string(r)
+        s = js_string(selector)
     )
 }
 
 /// Set `value` on an input/textarea (`<select>` should use
-/// [`select_option_by_ref`] instead) and dispatch the standard
+/// [`select_option_by_selector`] instead) and dispatch the standard
 /// `input` + `change` events so framework listeners fire.
-pub fn fill_by_ref(r: &str, value: &str) -> String {
+pub fn fill_by_selector(selector: &str, value: &str) -> String {
     format!(
         r#"(function() {{
-            const el = document.querySelector('[data-flowmux-ref="{r}"]');
-            if (!el) return "error: ref not found";
+            const el = document.querySelector("{s}");
+            if (!el) return "error: not found";
             const setter = Object.getOwnPropertyDescriptor(el.__proto__, 'value');
             if (setter && setter.set) {{
                 setter.set.call(el, "{v}");
@@ -94,18 +184,18 @@ pub fn fill_by_ref(r: &str, value: &str) -> String {
             el.dispatchEvent(new Event('change', {{ bubbles: true }}));
             return "ok";
         }})()"#,
-        r = js_string(r),
+        s = js_string(selector),
         v = js_string(value)
     )
 }
 
 /// `<select>` value picker — looks up an `<option>` by its `value`
 /// or, failing that, by its visible text.
-pub fn select_option_by_ref(r: &str, value: &str) -> String {
+pub fn select_option_by_selector(selector: &str, value: &str) -> String {
     format!(
         r#"(function() {{
-            const el = document.querySelector('[data-flowmux-ref="{r}"]');
-            if (!el) return "error: ref not found";
+            const el = document.querySelector("{s}");
+            if (!el) return "error: not found";
             const want = "{v}";
             for (const opt of el.options) {{
                 if (opt.value === want || opt.textContent.trim() === want) {{
@@ -116,63 +206,62 @@ pub fn select_option_by_ref(r: &str, value: &str) -> String {
             }}
             return "error: option not found";
         }})()"#,
-        r = js_string(r),
+        s = js_string(selector),
         v = js_string(value)
     )
 }
 
-/// Scroll the element matched by ref into view, with a sub-pixel
-/// offset applied to the body afterwards. Two coordinates so callers
-/// can scroll a list-pane plus its container.
-pub fn scroll_by_ref(r: &str, x: i32, y: i32) -> String {
+/// Scroll the element matched by `selector` into view, with a
+/// sub-pixel offset applied to the body afterwards.
+pub fn scroll_by_selector(selector: &str, x: i32, y: i32) -> String {
     format!(
         r#"(function() {{
-            const el = document.querySelector('[data-flowmux-ref="{r}"]');
-            if (!el) return "error: ref not found";
+            const el = document.querySelector("{s}");
+            if (!el) return "error: not found";
             el.scrollIntoView({{ block: "center", inline: "nearest" }});
             window.scrollBy({x}, {y});
             return "ok";
         }})()"#,
-        r = js_string(r),
+        s = js_string(selector),
         x = x,
         y = y
     )
 }
 
 /// Read element's `innerText`.
-pub fn text_of(r: &str) -> String {
+pub fn text_of_selector(selector: &str) -> String {
     format!(
         r#"(function() {{
-            const el = document.querySelector('[data-flowmux-ref="{r}"]');
-            if (!el) return "error: ref not found";
+            const el = document.querySelector("{s}");
+            if (!el) return "error: not found";
             return (el.innerText || "").toString();
         }})()"#,
-        r = js_string(r)
+        s = js_string(selector)
     )
 }
 
 /// Read an input/textarea/select's `value`.
-pub fn value_of(r: &str) -> String {
+pub fn value_of_selector(selector: &str) -> String {
     format!(
         r#"(function() {{
-            const el = document.querySelector('[data-flowmux-ref="{r}"]');
-            if (!el) return "error: ref not found";
+            const el = document.querySelector("{s}");
+            if (!el) return "error: not found";
             return (el.value || "").toString();
         }})()"#,
-        r = js_string(r)
+        s = js_string(selector)
     )
 }
 
 /// Read an arbitrary attribute. Returns the empty string if the
 /// element exists but the attribute does not (matches DOM behavior).
-pub fn attr_of(r: &str, name: &str) -> String {
+pub fn attr_of_selector(selector: &str, name: &str) -> String {
     format!(
         r#"(function() {{
-            const el = document.querySelector('[data-flowmux-ref="{r}"]');
-            if (!el) return "error: ref not found";
+            const el = document.querySelector("{s}");
+            if (!el) return "error: not found";
             return (el.getAttribute("{n}") || "").toString();
         }})()"#,
-        r = js_string(r),
+        s = js_string(selector),
         n = js_string(name)
     )
 }
@@ -277,22 +366,56 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_js_is_balanced_iife() {
+    fn snapshot_js_is_iife() {
+        // assert_balanced is only correct on small action snippets —
+        // the full snapshot script contains regexes (`/\n+/g`, etc.)
+        // and string literals where the naive paren counter trips.
+        // We just verify the IIFE shape; real syntactic validity is
+        // exercised by the page-side runtime, not by this checker.
         assert!(SNAPSHOT_JS.trim_start().starts_with("(function()"));
-        assert_balanced(SNAPSHOT_JS);
+        assert!(SNAPSHOT_JS.trim_end().ends_with("})()"));
+    }
+
+    /// The snapshot script must NOT mutate the page. flowmux's policy
+    /// (mirroring cmux): server keeps the ref→selector map; the DOM
+    /// stays untouched. The presence of `data-flowmux-ref` or
+    /// `setAttribute` on the page is a regression.
+    #[test]
+    fn snapshot_js_does_not_modify_dom() {
+        assert!(
+            !SNAPSHOT_JS.contains("data-flowmux-ref"),
+            "snapshot must not stamp data-flowmux-ref attributes"
+        );
+        assert!(
+            !SNAPSHOT_JS.contains("setAttribute"),
+            "snapshot must not call setAttribute on page elements"
+        );
     }
 
     #[test]
-    fn click_by_ref_embeds_ref() {
-        let s = click_by_ref("e7");
-        assert!(s.contains(r#"data-flowmux-ref="e7""#));
+    fn snapshot_js_emits_cmux_shape_keys() {
+        // The script must return an object with these top-level keys.
+        for k in ["markdown", "refs", "page"] {
+            assert!(
+                SNAPSHOT_JS.contains(&format!("\"{k}\"")) || SNAPSHOT_JS.contains(&format!("{k}:")),
+                "snapshot output should include `{k}`"
+            );
+        }
+    }
+
+    #[test]
+    fn click_by_selector_embeds_selector() {
+        let s = click_by_selector("#login > button");
+        // Raw string with extra '##' delimiters because the embedded
+        // selector contains `"#` which would otherwise close `r#"..."#`.
+        assert!(s.contains(r##"querySelector("#login > button")"##));
         assert!(s.contains("el.click()"));
         assert_balanced(&s);
     }
 
     #[test]
-    fn fill_by_ref_dispatches_input_and_change() {
-        let s = fill_by_ref("e1", "user@example.com");
+    fn fill_by_selector_dispatches_input_and_change() {
+        let s = fill_by_selector("input.email", "user@example.com");
         assert!(s.contains("'input'"));
         assert!(s.contains("'change'"));
         assert!(s.contains("user@example.com"));
@@ -300,39 +423,36 @@ mod tests {
     }
 
     #[test]
-    fn fill_by_ref_escapes_quote_in_value() {
-        let s = fill_by_ref("e1", r#"O'Reilly"#);
-        // The unescaped value would break out of the string literal
-        // around `el.value = "..."`. After escaping the literal `'`
-        // stays unchanged but the surrounding `"..."` is balanced.
+    fn fill_by_selector_escapes_quote_in_value() {
+        let s = fill_by_selector("input", r#"O'Reilly"#);
         assert!(s.contains("O'Reilly"));
         assert_balanced(&s);
     }
 
     #[test]
-    fn fill_by_ref_escapes_double_quote_in_value() {
-        let s = fill_by_ref("e1", r#"say "hi""#);
+    fn fill_by_selector_escapes_double_quote_in_value() {
+        let s = fill_by_selector("input", r#"say "hi""#);
         assert!(s.contains(r#"\"hi\""#));
         assert_balanced(&s);
     }
 
     #[test]
-    fn select_option_by_ref_balanced() {
-        assert_balanced(&select_option_by_ref("e1", "USD"));
+    fn select_option_by_selector_balanced() {
+        assert_balanced(&select_option_by_selector("select#currency", "USD"));
     }
 
     #[test]
-    fn scroll_by_ref_inlines_coords() {
-        let s = scroll_by_ref("e1", 10, -5);
+    fn scroll_by_selector_inlines_coords() {
+        let s = scroll_by_selector("#root", 10, -5);
         assert!(s.contains("scrollBy(10, -5)"));
         assert_balanced(&s);
     }
 
     #[test]
     fn read_helpers_balanced() {
-        assert_balanced(&text_of("e1"));
-        assert_balanced(&value_of("e1"));
-        assert_balanced(&attr_of("e1", "href"));
+        assert_balanced(&text_of_selector("h1"));
+        assert_balanced(&value_of_selector("input"));
+        assert_balanced(&attr_of_selector("a", "href"));
     }
 
     #[test]

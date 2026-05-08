@@ -1171,24 +1171,76 @@ impl WindowController {
                         });
                     }
                     BrowserOp::Snapshot => {
-                        run_browser_js(&browser, flowmux_browser::scripts::SNAPSHOT_JS, ack, false);
+                        // After the page-side script returns, mirror the
+                        // (token → selector) entries into the pane's
+                        // server-side RefStore so subsequent action
+                        // calls can resolve `eN` to a CSS selector
+                        // without depending on the live DOM.
+                        let refs = browser.refs.clone();
+                        let scope = browser.ref_scope;
+                        let cell = std::cell::Cell::new(Some(ack));
+                        browser.evaluate_js(
+                            flowmux_browser::scripts::SNAPSHOT_JS,
+                            move |result| {
+                                if let Some(ack) = cell.take() {
+                                    let mapped = match result {
+                                        Ok(s) => {
+                                            update_ref_store_from_snapshot(&refs, scope, &s);
+                                            Ok(BrowserActionResult::String(s))
+                                        }
+                                        Err(e) => Err(e),
+                                    };
+                                    let _ = ack.send(mapped);
+                                }
+                            },
+                        );
                     }
                     BrowserOp::Click { target } => {
-                        let js = flowmux_browser::scripts::click_by_ref(&target);
-                        run_browser_js(&browser, &js, ack, true);
+                        match resolve_ref(&browser, &target) {
+                            Ok(sel) => run_browser_js(
+                                &browser,
+                                &flowmux_browser::scripts::click_by_selector(&sel),
+                                ack,
+                                true,
+                            ),
+                            Err(e) => {
+                                let _ = ack.send(Err(e));
+                            }
+                        }
                     }
-                    BrowserOp::Fill { target, value } => {
-                        let js = flowmux_browser::scripts::fill_by_ref(&target, &value);
-                        run_browser_js(&browser, &js, ack, true);
-                    }
-                    BrowserOp::Select { target, value } => {
-                        let js = flowmux_browser::scripts::select_option_by_ref(&target, &value);
-                        run_browser_js(&browser, &js, ack, true);
-                    }
-                    BrowserOp::Scroll { target, x, y } => {
-                        let js = flowmux_browser::scripts::scroll_by_ref(&target, x, y);
-                        run_browser_js(&browser, &js, ack, true);
-                    }
+                    BrowserOp::Fill { target, value } => match resolve_ref(&browser, &target) {
+                        Ok(sel) => run_browser_js(
+                            &browser,
+                            &flowmux_browser::scripts::fill_by_selector(&sel, &value),
+                            ack,
+                            true,
+                        ),
+                        Err(e) => {
+                            let _ = ack.send(Err(e));
+                        }
+                    },
+                    BrowserOp::Select { target, value } => match resolve_ref(&browser, &target) {
+                        Ok(sel) => run_browser_js(
+                            &browser,
+                            &flowmux_browser::scripts::select_option_by_selector(&sel, &value),
+                            ack,
+                            true,
+                        ),
+                        Err(e) => {
+                            let _ = ack.send(Err(e));
+                        }
+                    },
+                    BrowserOp::Scroll { target, x, y } => match resolve_ref(&browser, &target) {
+                        Ok(sel) => run_browser_js(
+                            &browser,
+                            &flowmux_browser::scripts::scroll_by_selector(&sel, x, y),
+                            ack,
+                            true,
+                        ),
+                        Err(e) => {
+                            let _ = ack.send(Err(e));
+                        }
+                    },
                     BrowserOp::Type { text } => {
                         let js = flowmux_browser::scripts::type_keys(&text);
                         run_browser_js(&browser, &js, ack, true);
@@ -1197,18 +1249,39 @@ impl WindowController {
                         let js = flowmux_browser::scripts::press_key(&key);
                         run_browser_js(&browser, &js, ack, true);
                     }
-                    BrowserOp::Text { target } => {
-                        let js = flowmux_browser::scripts::text_of(&target);
-                        run_browser_js(&browser, &js, ack, false);
-                    }
-                    BrowserOp::Value { target } => {
-                        let js = flowmux_browser::scripts::value_of(&target);
-                        run_browser_js(&browser, &js, ack, false);
-                    }
-                    BrowserOp::Attr { target, name } => {
-                        let js = flowmux_browser::scripts::attr_of(&target, &name);
-                        run_browser_js(&browser, &js, ack, false);
-                    }
+                    BrowserOp::Text { target } => match resolve_ref(&browser, &target) {
+                        Ok(sel) => run_browser_js(
+                            &browser,
+                            &flowmux_browser::scripts::text_of_selector(&sel),
+                            ack,
+                            false,
+                        ),
+                        Err(e) => {
+                            let _ = ack.send(Err(e));
+                        }
+                    },
+                    BrowserOp::Value { target } => match resolve_ref(&browser, &target) {
+                        Ok(sel) => run_browser_js(
+                            &browser,
+                            &flowmux_browser::scripts::value_of_selector(&sel),
+                            ack,
+                            false,
+                        ),
+                        Err(e) => {
+                            let _ = ack.send(Err(e));
+                        }
+                    },
+                    BrowserOp::Attr { target, name } => match resolve_ref(&browser, &target) {
+                        Ok(sel) => run_browser_js(
+                            &browser,
+                            &flowmux_browser::scripts::attr_of_selector(&sel, &name),
+                            ack,
+                            false,
+                        ),
+                        Err(e) => {
+                            let _ = ack.send(Err(e));
+                        }
+                    },
                 }
             }
             GtkCommand::BrowserOpenSplit {
@@ -1881,6 +1954,52 @@ fn show_color_dialog(
 /// `"error: …"` strings flowmux_browser scripts use) becomes an Err.
 /// When false, the raw string is forwarded so the caller can parse
 /// JSON (Snapshot) or read a value back (Text / Value / Attr).
+/// Resolve an agent-supplied ref token (e.g. `e3` or `@e3`) to a CSS
+/// selector via the browser pane's [`flowmux_browser::RefStore`].
+/// Returns a friendly error string when the ref isn't bound — the
+/// agent then knows to take a fresh `snapshot --interactive` first.
+fn resolve_ref(
+    browser: &crate::ui::browser_pane::BrowserPane,
+    ref_id: &str,
+) -> Result<String, String> {
+    let refs = browser.refs.borrow();
+    refs.resolve(browser.ref_scope, ref_id)
+        .map(|s| s.to_string())
+        .ok_or_else(|| {
+            format!(
+                "ref `{ref_id}` not found in this pane's snapshot — \
+                 take a fresh `flowmux browser snapshot` first"
+            )
+        })
+}
+
+/// After the WebView returns the snapshot JSON, copy each
+/// `(ref_token → selector)` pair into the pane's RefStore so future
+/// `click`/`fill`/etc. on the same surface can resolve those tokens.
+/// On a parse error (page returned malformed JSON) we leave the prior
+/// store in place — preferable to wiping it and dropping refs the
+/// agent might still want.
+fn update_ref_store_from_snapshot(
+    refs: &std::rc::Rc<std::cell::RefCell<flowmux_browser::RefStore>>,
+    scope: flowmux_browser::RefScope,
+    snapshot_json: &str,
+) {
+    let parsed: serde_json::Result<flowmux_browser::DomSnapshot> =
+        serde_json::from_str(snapshot_json);
+    let Ok(snap) = parsed else {
+        tracing::warn!(
+            json = %snapshot_json.chars().take(200).collect::<String>(),
+            "snapshot json did not match DomSnapshot shape; keeping prior refs"
+        );
+        return;
+    };
+    let mut store = refs.borrow_mut();
+    store.clear(scope);
+    for (token, meta) in snap.refs {
+        store.insert(scope, token, meta.selector);
+    }
+}
+
 fn run_browser_js(
     browser: &crate::ui::browser_pane::BrowserPane,
     js: &str,
