@@ -268,20 +268,29 @@ impl WindowController {
                 tracing::warn!(error = %e, "state save on close failed");
             }
             // 모든 WebView를 명시적으로 정리해 종료 race를 줄인다.
-            //   * stop_loading() — 진행 중인 fetch / navigation을 취소.
-            //     WebProcess의 internallyFailedLoadTimerFired ERROR가
-            //     보고되던 회귀가 여기서 발생: 종료 시점에 미완성 load
-            //     가 남아 있는 채로 NetworkSession이 정리되면 timer가
-            //     dangling이 된다.
-            //   * try_close() — page-level beforeunload + 내부 cleanup.
-            //     사이트가 onbeforeunload 다이얼로그를 띄우려 할 수도
-            //     있으나, 종료 close_request 응답에서는 GTK가 이미
-            //     dialog를 차단한다.
+            //   1. stop_loading() — 진행 중인 fetch / navigation을 취소.
+            //      WebProcess의 internallyFailedLoadTimerFired ERROR는
+            //      종료 시점에 미완성 load가 남아 NetworkSession이
+            //      정리될 때 internal load timer가 dangling되어 찍힌다
+            //      (fatal abort가 아니라 stderr cosmetic 경고).
+            //   2. load_uri("about:blank") — 진행 중인 request 자체를
+            //      빈 페이지로 갈아끼워 NetworkProcess 측 리퀘스트를
+            //      취소시킨다. stop_loading만으로는 일부 in-flight
+            //      fetch가 그대로 남는 케이스가 있다.
+            //   3. try_close() — page-level cleanup + beforeunload.
             for browser in controller.pane_registry.borrow().browsers.values() {
                 browser.web_view.stop_loading();
+                browser.web_view.load_uri("about:blank");
                 browser.web_view.try_close();
             }
-            glib::Propagation::Proceed
+            // 한 main-loop 사이클을 확보해 about:blank 전환이 NetworkProcess
+            // 까지 닿도록 비동기 윈도우 destroy로 미룬다 (즉시 destroy하면
+            // GTK가 child를 unparent하면서 NetworkProcess가 미처 응답을
+            // 정리하지 못한 채 통신이 끊긴다). Stop으로 close_request를
+            // 한 번 가로채고, idle 사이클 직후 강제 destroy.
+            let window = controller.window.clone();
+            glib::idle_add_local_once(move || window.destroy());
+            glib::Propagation::Stop
         });
     }
 
