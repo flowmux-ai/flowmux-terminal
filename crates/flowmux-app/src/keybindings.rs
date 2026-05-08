@@ -66,6 +66,10 @@ pub const BINDINGS: &[(&str, &[&str])] = &[
     ("win.copy", &["<Ctrl><Shift>c"]),
     ("win.paste", &["<Ctrl><Shift>v"]),
     ("win.new-surface", &["<Ctrl><Shift>t"]),
+    // Ctrl+Shift+B는 같은 pane에 새 탭브라우저를 추가한다 — 탭바
+    // 우측의 탭브라우저 추가 버튼과 동일 동작이며, Ctrl+Shift+T(새 탭)와
+    // 짝을 이룬다.
+    ("win.new-browser-surface", &["<Ctrl><Shift>b"]),
     ("win.new-workspace", &["<Ctrl><Shift>n"]),
 ];
 
@@ -151,6 +155,19 @@ pub fn install_actions(
             }
         }),
     );
+    let new_browser_surface = make_pane_action(
+        "new-browser-surface",
+        focused.clone(),
+        Box::new({
+            let bridge = bridge.clone();
+            move |pane| {
+                let bridge = bridge.clone();
+                glib::MainContext::default().spawn_local(async move {
+                    let _ = bridge.tx.send(GtkCommand::NewBrowserSurface { pane }).await;
+                });
+            }
+        }),
+    );
     let next_surface = make_surface_nav_action(
         "next-surface",
         focused.clone(),
@@ -211,6 +228,7 @@ pub fn install_actions(
         focus_down,
         close_surface,
         new_surface,
+        new_browser_surface,
         next_surface,
         prev_surface,
         new_workspace,
@@ -441,5 +459,11 @@ mod tests {
         assert!(accels("win.prev-workspace")
             .iter()
             .any(|accel| accel.contains("<Ctrl><Shift>Tab")));
+    }
+
+    #[test]
+    fn ctrl_shift_b_opens_new_browser_surface_distinct_from_terminal_tab() {
+        assert_eq!(accels("win.new-surface"), &["<Ctrl><Shift>t"]);
+        assert_eq!(accels("win.new-browser-surface"), &["<Ctrl><Shift>b"]);
     }
 }

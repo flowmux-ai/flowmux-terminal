@@ -344,6 +344,22 @@ impl WindowController {
             );
             if attached {
                 self.refresh_window_title().await;
+                // 새로 추가된 탭(터미널 / 탭브라우저)으로 키보드 포커스를
+                // 옮긴다. attach_surface_to_pane이 stack에 새 위젯을 붙이고
+                // visible_child를 새 surface로 바꾸지만 grab_focus까지는
+                // 하지 않아, Ctrl+Shift+T / Ctrl+Shift+B 직후 포커스가
+                // 이전(이제는 숨겨진) 위젯에 남아 있다가 윈도우로 떨어지는
+                // 회귀가 있었다. ActivateSurface 핸들러와 동일하게 idle에
+                // 한 번 미뤄 위젯 realize 직후 grab_focus한다.
+                let registry = self.pane_registry.clone();
+                glib::idle_add_local_once(move || {
+                    let r = registry.borrow();
+                    if let Some(term) = r.terminals.get(&surface_id) {
+                        term.widget.grab_focus();
+                    } else if let Some(browser) = r.browsers.get(&surface_id) {
+                        browser.web_view.grab_focus();
+                    }
+                });
                 return;
             }
         }

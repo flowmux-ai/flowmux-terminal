@@ -1091,6 +1091,18 @@ fn build_panel(
             // 되고 RefreshWindowTitle이 새 active surface 라벨로
             // 윈도우 타이틀을 다시 계산한다 (브라우저 탭 클릭 시
             // 윈도우 제목이 안 바뀌던 회귀 수정).
+            //
+            // 컨트롤러는 web_view가 아니라 BrowserPane.root에 단다.
+            // BrowserPane은 [chrome row(주소창/back/forward/reload) +
+            // web_view]로 구성되는데, web_view에만 컨트롤러가 있으면
+            // 사용자가 주소창을 클릭한 순간 web_view가 leave를 받아
+            // frame의 .focused 테두리가 사라지고, 주소창 쪽에는 컨트롤러
+            // 가 없어 on_focus도 호출되지 않아 focused_pane이 갱신되지
+            // 않는 문제가 있었다 (Alt+화살표가 갑자기 동작하지 않는 증상).
+            // root에 달면 GTK4 EventControllerFocus가 widget+descendants
+            // 단위로 enter/leave를 emit하므로 chrome row와 web_view 사이
+            // 에서 포커스가 오가는 것은 무시되고, pane 바깥으로 나갈 때
+            // 만 leave가 발생한다.
             let frame_in = frame.clone();
             let frame_out = frame.clone();
             let on_focus = callbacks.on_focus.clone();
@@ -1105,7 +1117,7 @@ fn build_panel(
             focus.connect_leave(move |_| {
                 frame_out.remove_css_class("focused");
             });
-            pane.web_view.add_controller(focus);
+            pane.root.add_controller(focus);
 
             let widget = pane.root.clone().upcast::<gtk::Widget>();
             let mut r = registry.borrow_mut();
