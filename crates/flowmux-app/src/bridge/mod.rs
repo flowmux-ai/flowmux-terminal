@@ -106,7 +106,13 @@ pub enum GtkCommand {
         ack: oneshot::Sender<Result<(), String>>,
     },
     /// Move keyboard focus to the nearest pane in `dir`.
-    FocusDirection { from: PaneId, dir: FocusDir },
+    /// `from = None` (현재 포커스된 pane이 없을 때) 인 경우 활성 워크스페이스의
+    /// 첫 leaf pane에 포커스를 잡아 — 사이드 패널에서 워크스페이스만 클릭한 직후
+    /// Alt+화살표를 처음 누른 케이스를 자연스럽게 처리한다.
+    FocusDirection {
+        from: Option<PaneId>,
+        dir: FocusDir,
+    },
     /// Open a brand-new terminal surface in the active workspace.
     /// (Reserved for the planned horizontal surface-tab bar; currently
     /// unused since the sidebar shows workspaces, not surfaces.)

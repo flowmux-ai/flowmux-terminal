@@ -101,25 +101,29 @@ pub fn install_actions(
         focused.clone(),
         move_split(bridge.clone(), SplitDirection::Horizontal),
     );
-    let focus_left = make_pane_action(
+    let focus_left = make_focus_direction_action(
         "focus-left",
         focused.clone(),
-        move_focus(bridge.clone(), FocusDir::Left),
+        bridge.clone(),
+        FocusDir::Left,
     );
-    let focus_right = make_pane_action(
+    let focus_right = make_focus_direction_action(
         "focus-right",
         focused.clone(),
-        move_focus(bridge.clone(), FocusDir::Right),
+        bridge.clone(),
+        FocusDir::Right,
     );
-    let focus_up = make_pane_action(
+    let focus_up = make_focus_direction_action(
         "focus-up",
         focused.clone(),
-        move_focus(bridge.clone(), FocusDir::Up),
+        bridge.clone(),
+        FocusDir::Up,
     );
-    let focus_down = make_pane_action(
+    let focus_down = make_focus_direction_action(
         "focus-down",
         focused.clone(),
-        move_focus(bridge.clone(), FocusDir::Down),
+        bridge.clone(),
+        FocusDir::Down,
     );
     let close_surface = make_close_surface_action(
         "close-surface",
@@ -346,16 +350,31 @@ fn move_split(bridge: Bridge, direction: SplitDirection) -> PaneAction {
     })
 }
 
-fn move_focus(bridge: Bridge, dir: FocusDir) -> PaneAction {
-    Box::new(move |pane| {
-        let bridge = bridge.clone();
-        glib::MainContext::default().spawn_local(async move {
-            let _ = bridge
-                .tx
-                .send(GtkCommand::FocusDirection { from: pane, dir })
-                .await;
-        });
-    })
+/// focus-{left,right,up,down} 전용 액션 빌더.
+///
+/// `make_pane_action`과 달리 현재 focused pane이 없어도 액션을 무시하지
+/// 않는다 — `from = None` 으로 디스패치해서 dispatcher가 활성 워크스페이스의
+/// 첫 leaf pane에 포커스를 잡도록 한다 (사이드 패널에서 워크스페이스만 클릭한
+/// 직후 Alt+화살표를 누른 케이스).
+fn make_focus_direction_action(
+    name: &'static str,
+    focused: FocusedPane,
+    bridge: Bridge,
+    dir: FocusDir,
+) -> gtk::gio::ActionEntry<adw::ApplicationWindow> {
+    gtk::gio::ActionEntry::builder(name)
+        .activate(move |_, _, _| {
+            let from = focused.get();
+            tracing::debug!(action = name, ?from, ?dir, "focus direction action fired");
+            let bridge = bridge.clone();
+            glib::MainContext::default().spawn_local(async move {
+                let _ = bridge
+                    .tx
+                    .send(GtkCommand::FocusDirection { from, dir })
+                    .await;
+            });
+        })
+        .build()
 }
 
 #[derive(Clone, Copy)]

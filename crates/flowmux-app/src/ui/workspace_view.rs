@@ -60,8 +60,23 @@ impl PaneRegistry {
         self.pane_frames.get(&pane).cloned()
     }
 
-    pub fn pane_ids(&self) -> impl Iterator<Item = PaneId> + '_ {
-        self.pane_frames.keys().copied()
+    /// `pane`이 속한 워크스페이스 id. Alt+화살표가 같은 워크스페이스 안에서만
+    /// 이동하도록 focus_in_direction의 후보 필터에 사용된다 — 다른 워크스페이스의
+    /// pane은 GtkStack에서 같은 좌표에 겹쳐 있어 compute_bounds가 잘못 잡으면
+    /// 포커스가 워크스페이스 밖으로 새어 나가던 회귀를 막는다.
+    pub fn workspace_of_pane(&self, pane: PaneId) -> Option<WorkspaceId> {
+        self.pane_workspace.get(&pane).copied()
+    }
+
+    /// `workspace`에 속한 모든 pane id를 돌려준다 — focus_in_direction의 후보
+    /// 필터링용.
+    pub fn pane_ids_in_workspace(
+        &self,
+        workspace: WorkspaceId,
+    ) -> impl Iterator<Item = PaneId> + '_ {
+        self.pane_workspace
+            .iter()
+            .filter_map(move |(pane, ws)| (*ws == workspace).then_some(*pane))
     }
 
     pub fn active_surface(&self, pane: PaneId) -> Option<SurfaceId> {

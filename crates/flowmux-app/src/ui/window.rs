@@ -571,6 +571,18 @@ impl WindowController {
         });
     }
 
+    /// 활성 워크스페이스의 첫 leaf pane으로 포커스를 잡는다. 사용자가 사이드
+    /// 패널에서 워크스페이스만 클릭해 focused_pane이 None인 상태에서 Alt+화살표
+    /// 어떤 방향이든 누른 경우 폴백으로 사용된다.
+    async fn focus_first_leaf_of_active_workspace(&self) {
+        let Some(active) = self.store.active_or_first().await else {
+            return;
+        };
+        if let Some(ws) = self.store.get_workspace(active).await {
+            self.focus_first_leaf_of(&ws);
+        }
+    }
+
     fn build_workspace_widget(&self, ws: &Workspace) -> gtk::Widget {
         match ws.surfaces.first() {
             Some(s) => build_surface(
@@ -689,9 +701,10 @@ impl WindowController {
                     let _ = ack.send(Ok(()));
                 }
             },
-            GtkCommand::FocusDirection { from, dir } => {
-                self.focus_in_direction(from, dir);
-            }
+            GtkCommand::FocusDirection { from, dir } => match from {
+                Some(p) => self.focus_in_direction(p, dir),
+                None => self.focus_first_leaf_of_active_workspace().await,
+            },
             GtkCommand::NewSurface { pane } => {
                 let cwd = {
                     let r = self.pane_registry.borrow();
@@ -1214,6 +1227,13 @@ impl WindowController {
             Some(p) => p,
             None => return,
         };
+        // Alt+화살표는 같은 워크스페이스 안에서만 이동한다. GtkStack은 비활성
+        // 워크스페이스의 위젯도 같은 좌표에 겹쳐 들고 있어 compute_bounds가
+        // 0이 아닌 값을 돌려주는 경우가 있어, 워크스페이스 필터 없이는 다른
+        // 워크스페이스의 pane으로 포커스가 새어 나가는 회귀가 있었다.
+        let Some(workspace) = registry.workspace_of_pane(from) else {
+            return;
+        };
         let stack = &self.stack;
         let Some(from_bbox) = from_widget.compute_bounds(stack) else {
             return;
@@ -1224,7 +1244,7 @@ impl WindowController {
         );
 
         let mut best: Option<(PaneId, f32)> = None;
-        for id in registry.pane_ids() {
+        for id in registry.pane_ids_in_workspace(workspace) {
             if id == from {
                 continue;
             }
@@ -2758,6 +2778,110 @@ mod tests {
         assert_eq!(
             store.surface_title(pane, surface).await.as_deref(),
             Some("flowmux-program-t...")
+        );
+    }
+
+    /// 회귀 방지: Alt+화살표 후보 필터가 같은 워크스페이스 내부 pane만
+    /// 보아야 한다. PaneRegistry::pane_ids_in_workspace가 다른 워크스페이스
+    /// 의 pane을 누락 없이 걸러내는지 확인 — focus_in_direction이 이 함수로
+    /// 후보 리스트를 만들기 때문에 이게 깨끗하면 다른 워크스페이스로 포커스가
+    /// 새어나갈 수 없다.
+    #[gtk::test]
+    async fn pane_ids_in_workspace_isolates_other_workspaces() {
+        adw::init().expect("libadwaita should initialize in GTK test");
+        let root_a = std::env::temp_dir().join("flowmux-ws-iso-a");
+        let root_b = std::env::temp_dir().join("flowmux-ws-iso-b");
+        std::fs::create_dir_all(&root_a).unwrap();
+        std::fs::create_dir_all(&root_b).unwrap();
+        let store = StateStore::new_lazy(State::default());
+        let ws_a_id = store.create_workspace(Some("a".into()), root_a).await;
+        let ws_b_id = store.create_workspace(Some("b".into()), root_b).await;
+        let ws_a = store.get_workspace(ws_a_id).await.unwrap();
+        let ws_b = store.get_workspace(ws_b_id).await.unwrap();
+        let pane_a = ws_a.surfaces[0].root_pane.first_leaf_id().unwrap();
+        let pane_b = ws_b.surfaces[0].root_pane.first_leaf_id().unwrap();
+
+        let (bridge, _rx) = Bridge::new();
+        let app = adw::Application::builder()
+            .application_id("com.flowmux.App.UiTest.WsIsolation")
+            .build();
+        app.register(None::<&gtk::gio::Cancellable>).unwrap();
+        let controller = WindowController::new(
+            &app,
+            store.clone(),
+            Arc::new(ResolvedTheme::load()),
+            bridge,
+            gtk::CssProvider::new(),
+        );
+        controller.render_workspace(&ws_a);
+        controller.render_workspace(&ws_b);
+
+        let r = controller.pane_registry.borrow();
+        let in_a: std::collections::HashSet<_> =
+            r.pane_ids_in_workspace(ws_a_id).collect();
+        let in_b: std::collections::HashSet<_> =
+            r.pane_ids_in_workspace(ws_b_id).collect();
+
+        assert!(in_a.contains(&pane_a));
+        assert!(!in_a.contains(&pane_b), "ws_a 후보에 ws_b의 pane이 포함되면 안 된다");
+        assert!(in_b.contains(&pane_b));
+        assert!(!in_b.contains(&pane_a), "ws_b 후보에 ws_a의 pane이 포함되면 안 된다");
+        assert_eq!(r.workspace_of_pane(pane_a), Some(ws_a_id));
+        assert_eq!(r.workspace_of_pane(pane_b), Some(ws_b_id));
+    }
+
+    /// 사용자가 사이드 패널에서 워크스페이스만 클릭해 focused_pane이 None인
+    /// 상태에서 Alt+화살표를 누르면, dispatcher가 활성 워크스페이스의 첫 leaf
+    /// pane으로 포커스를 잡아야 한다. 방향이 무엇이든 결과는 같다.
+    #[gtk::test]
+    async fn focus_direction_from_none_falls_back_to_first_leaf_of_active_workspace() {
+        adw::init().expect("libadwaita should initialize in GTK test");
+        let root = std::env::temp_dir().join("flowmux-focus-fallback");
+        std::fs::create_dir_all(&root).unwrap();
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store.create_workspace(Some("ui".into()), root).await;
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        let first_leaf = ws.surfaces[0].root_pane.first_leaf_id().unwrap();
+        store.set_active_workspace(Some(ws_id)).await;
+
+        let (bridge, _rx) = Bridge::new();
+        let app = adw::Application::builder()
+            .application_id("com.flowmux.App.UiTest.FocusFallback")
+            .build();
+        app.register(None::<&gtk::gio::Cancellable>).unwrap();
+        let controller = WindowController::new(
+            &app,
+            store.clone(),
+            Arc::new(ResolvedTheme::load()),
+            bridge,
+            gtk::CssProvider::new(),
+        );
+        controller.render_workspace(&ws);
+        // 사용자가 워크스페이스만 클릭하고 아직 어떤 pane에도 포커스 안 잡힌
+        // 상태를 재현.
+        controller.focused_pane.set(None);
+
+        controller
+            .dispatch(GtkCommand::FocusDirection {
+                from: None,
+                dir: FocusDir::Left,
+            })
+            .await;
+        // grab_focus는 focus_first_leaf_of가 큐잉한 idle_add_local_once 안에서
+        // 일어난다. idle 큐는 FIFO이므로 그 직후 또 하나의 idle을 큐잉해 oneshot
+        // 으로 신호 받는 시점에는 앞선 grab_focus가 이미 돌아간 상태이다 —
+        // gtk async test 안에서 main loop을 직접 iteration 하지 않고 idle을
+        // 비우는 안전한 패턴.
+        let (idle_tx, idle_rx) = oneshot::channel();
+        glib::idle_add_local_once(move || {
+            let _ = idle_tx.send(());
+        });
+        let _ = idle_rx.await;
+
+        assert_eq!(
+            controller.focused_pane.get(),
+            Some(first_leaf),
+            "focused_pane이 활성 워크스페이스의 첫 leaf로 잡혀야 한다",
         );
     }
 }
