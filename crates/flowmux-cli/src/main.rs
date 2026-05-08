@@ -210,6 +210,33 @@ enum Cmd {
     /// Print the number of elements matching a CSS selector.
     BrowserCount { pane: PaneId, selector: String },
 
+    // ---- Phase 7: agent session resume mapping ----
+    /// Record a `(agent, surface) → session_id` mapping so the next
+    /// app launch can `--resume <session_id>` in the same surface.
+    /// Mirrors cmux's hook-side `cmux agent-session update`.
+    AgentSessionUpdate {
+        #[arg(long)]
+        agent: String,
+        #[arg(long)]
+        surface: flowmux_core::SurfaceId,
+        #[arg(long)]
+        session_id: String,
+    },
+    /// Look up the session id previously recorded for `(agent, surface)`.
+    AgentSessionGet {
+        #[arg(long)]
+        agent: String,
+        #[arg(long)]
+        surface: flowmux_core::SurfaceId,
+    },
+    /// Forget the session previously recorded for `(agent, surface)`.
+    AgentSessionForget {
+        #[arg(long)]
+        agent: String,
+        #[arg(long)]
+        surface: flowmux_core::SurfaceId,
+    },
+
     /// Import cookies from a host browser into the in-app browser jar.
     ImportCookies {
         /// Browser slug: firefox, chrome, chromium, brave, edge, arc.
@@ -442,6 +469,20 @@ fn build_request(cmd: Cmd) -> anyhow::Result<Request> {
         Cmd::BrowserIsEnabled { pane, target } => Request::BrowserIsEnabled { pane, target },
         Cmd::BrowserIsChecked { pane, target } => Request::BrowserIsChecked { pane, target },
         Cmd::BrowserCount { pane, selector } => Request::BrowserCount { pane, selector },
+
+        Cmd::AgentSessionUpdate {
+            agent,
+            surface,
+            session_id,
+        } => Request::AgentSessionUpdate {
+            agent,
+            surface,
+            session_id,
+        },
+        Cmd::AgentSessionGet { agent, surface } => Request::AgentSessionGet { agent, surface },
+        Cmd::AgentSessionForget { agent, surface } => {
+            Request::AgentSessionForget { agent, surface }
+        }
 
         Cmd::ImportCookies { from, domain } => Request::ImportCookies {
             source: from,

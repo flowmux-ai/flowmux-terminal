@@ -184,6 +184,31 @@ pub enum Request {
         selector: String,
     },
 
+    // ---- Phase 7: agent session resume mapping ----
+    /// Record (or overwrite) the session id an agent (claude/codex/…)
+    /// is currently using inside `surface`. Persisted at
+    /// `$XDG_DATA_HOME/flowmux/agent-sessions/<agent>.json` so the next
+    /// app launch can `<agent> --resume <session_id>` in the same
+    /// surface. Mirrors cmux's hook → `~/.cmuxterm/<agent>-hook-sessions.json`
+    /// flow.
+    AgentSessionUpdate {
+        agent: String,
+        surface: SurfaceId,
+        session_id: String,
+    },
+    /// Look up the session id previously recorded for `(agent,
+    /// surface)`. Response carries `Option<String>`.
+    AgentSessionGet {
+        agent: String,
+        surface: SurfaceId,
+    },
+    /// Forget the recorded session for `(agent, surface)` — used when
+    /// the surface is closed for good.
+    AgentSessionForget {
+        agent: String,
+        surface: SurfaceId,
+    },
+
     /// `flowmux claude-teams [--count N] [-- args...]` — spin up a
     /// workspace with N panes, each running the `claude` CLI with the
     /// given args. Mirrors cmux's documented "claude-teams" launcher.
@@ -236,6 +261,9 @@ pub enum Response {
         placement_strategy: PlacementStrategy,
     },
     CookiesImported { count: usize },
+    /// Reply to `AgentSessionGet`. `session_id = None` means no
+    /// previous session was recorded for this `(agent, surface)`.
+    AgentSession { session_id: Option<String> },
     Error(RpcError),
 }
 
@@ -399,6 +427,44 @@ mod tests {
                 placement_strategy: PlacementStrategy::SplitRight,
             } if p == pane
         ));
+    }
+
+    #[test]
+    fn agent_session_update_roundtrips() {
+        let surface = SurfaceId::new();
+        let req = Request::AgentSessionUpdate {
+            agent: "claude".into(),
+            surface,
+            session_id: "sess-abc".into(),
+        };
+        match roundtrip_request(req) {
+            Request::AgentSessionUpdate {
+                agent,
+                surface: s,
+                session_id,
+            } => {
+                assert_eq!(agent, "claude");
+                assert_eq!(s, surface);
+                assert_eq!(session_id, "sess-abc");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_session_response_some_and_none_serialize() {
+        let s = serde_json::to_string(&Response::AgentSession {
+            session_id: Some("xyz".into()),
+        })
+        .unwrap();
+        let back: Response = serde_json::from_str(&s).unwrap();
+        assert!(
+            matches!(back, Response::AgentSession { session_id: Some(s) } if s == "xyz")
+        );
+
+        let s = serde_json::to_string(&Response::AgentSession { session_id: None }).unwrap();
+        let back: Response = serde_json::from_str(&s).unwrap();
+        assert!(matches!(back, Response::AgentSession { session_id: None }));
     }
 
     #[test]

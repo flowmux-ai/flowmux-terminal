@@ -14,6 +14,9 @@ use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+pub mod agent_sessions;
+pub use agent_sessions::AgentSessionStore;
+
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// 창 사이즈 + maximize 여부. 종료 시 저장하고 다음 실행에 복원.

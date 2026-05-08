@@ -17,6 +17,15 @@ use std::pin::Pin;
 use tokio::sync::oneshot;
 use tracing::warn;
 
+/// Resolve the agent-session store rooted at
+/// `$XDG_DATA_HOME/flowmux/agent-sessions/`. Returns `None` when the
+/// XDG data dir is unavailable (very rare on Linux, but possible in
+/// minimal containers without HOME / XDG_DATA_HOME).
+fn agent_session_store() -> Option<flowmux_state::AgentSessionStore> {
+    let dir = flowmux_config::paths::data_dir()?.join("agent-sessions");
+    Some(flowmux_state::AgentSessionStore::new(dir))
+}
+
 async fn browser_action(bridge: &Bridge, pane: flowmux_core::PaneId, op: BrowserOp) -> Response {
     let (tx, rx) = oneshot::channel();
     let _ = bridge
@@ -352,6 +361,34 @@ impl Handler for GuiHandler {
                         Err(_) => Response::Error(RpcError::Internal("bridge closed".into())),
                     }
                 }
+
+                // ---- Phase 7: agent session resume mapping --------
+                Request::AgentSessionUpdate {
+                    agent,
+                    surface,
+                    session_id,
+                } => match agent_session_store() {
+                    Some(store) => match store.record(&agent, surface, &session_id) {
+                        Ok(()) => Response::Ok,
+                        Err(e) => Response::Error(RpcError::Io(e.to_string())),
+                    },
+                    None => Response::Error(RpcError::Internal(
+                        "XDG data dir unavailable; cannot persist agent session".into(),
+                    )),
+                },
+                Request::AgentSessionGet { agent, surface } => match agent_session_store() {
+                    Some(store) => Response::AgentSession {
+                        session_id: store.lookup(&agent, surface),
+                    },
+                    None => Response::AgentSession { session_id: None },
+                },
+                Request::AgentSessionForget { agent, surface } => match agent_session_store() {
+                    Some(store) => match store.forget(&agent, surface) {
+                        Ok(()) => Response::Ok,
+                        Err(e) => Response::Error(RpcError::Io(e.to_string())),
+                    },
+                    None => Response::Ok,
+                },
 
                 Request::Notify {
                     pane,
