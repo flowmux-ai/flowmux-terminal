@@ -522,6 +522,22 @@ impl WindowController {
                         .await;
                 }
             }
+            GtkCommand::OpenUrlInBrowserTab { pane, url } => {
+                // 터미널에서 Ctrl+클릭한 URL을 같은 pane에 새 탭브라우저로 연다.
+                // 새 탭브라우저는 BrowserPane::build에서 initial_url로 url을
+                // 받아 즉시 load_uri를 수행하므로, 별도 navigate 명령은 필요
+                // 없다. surface 생성에 실패하면(예: pane이 이미 사라진 경우)
+                // 조용히 무시 — 사용자가 Ctrl+클릭한 직후 pane이 사라지는
+                // 흔치 않은 race이고, 실패 메시지가 도움이 되지 않는다.
+                if let Some((ws_id, surface_id)) = self
+                    .store
+                    .add_browser_surface_to_pane(pane, url)
+                    .await
+                {
+                    self.attach_or_rerender_surface(ws_id, pane, surface_id)
+                        .await;
+                }
+            }
             GtkCommand::ActivateSurface { pane, surface } => {
                 self.store.set_active_surface(pane, surface).await;
                 self.pane_registry
@@ -1297,6 +1313,18 @@ fn make_callbacks(
                     .iter()
                     .position(|(id, _)| *id == surface)
             })
+        },
+        on_open_url: {
+            let bridge = bridge.clone();
+            Rc::new(RefCell::new(move |pane, url| {
+                let bridge = bridge.clone();
+                glib::MainContext::default().spawn_local(async move {
+                    let _ = bridge
+                        .tx
+                        .send(GtkCommand::OpenUrlInBrowserTab { pane, url })
+                        .await;
+                });
+            }))
         },
     }
 }

@@ -113,6 +113,10 @@ pub enum GtkCommand {
     NewSurface { pane: PaneId },
     /// 같은 pane에 빈(about:blank) 탭브라우저를 새 탭으로 추가한다.
     NewBrowserSurface { pane: PaneId },
+    /// 터미널 안의 URL을 Ctrl-클릭했을 때 같은 pane에 새 탭브라우저로
+    /// URL을 로드해 연다. `pane`은 클릭이 발생한 터미널의 pane id이고
+    /// `url`은 trailing punctuation을 정리한 후의 URL 문자열이다.
+    OpenUrlInBrowserTab { pane: PaneId, url: String },
     /// Switch the active pane-local surface tab.
     ActivateSurface { pane: PaneId, surface: SurfaceId },
     /// Close a pane-local surface tab.

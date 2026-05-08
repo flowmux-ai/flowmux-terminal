@@ -143,6 +143,10 @@ pub struct PaneCallbacks {
     /// 계산하기 위해 PaneRegistry::surface_tabs의 위치를 빌려 본다.
     pub position_of_surface_in_pane:
         Rc<dyn Fn(PaneId, SurfaceId) -> Option<usize>>,
+    /// 터미널 안에서 Ctrl+클릭으로 URL이 선택되면 호출된다. 호출 측은
+    /// 같은 pane에 새 탭브라우저를 url과 함께 연다(GtkCommand::OpenUrlInBrowserTab).
+    /// url은 trailing punctuation이 정리된 상태로 전달된다.
+    pub on_open_url: Rc<RefCell<dyn FnMut(PaneId, String)>>,
 }
 
 impl TerminalPane {
@@ -176,6 +180,13 @@ impl TerminalPane {
                 (cb.borrow_mut())(id);
             });
         }
+
+        // URL 인식 (Ctrl+클릭으로 내부 탭브라우저에서 열기).
+        // 터미널에 출력된 URL을 PCRE2 regex로 매치 등록 → hover 시
+        // pointer 커서로 바뀌고, 사용자가 Ctrl을 누른 채 좌클릭하면
+        // 같은 pane에 새 탭브라우저를 그 URL로 띄운다. 일반 클릭은
+        // 평소처럼 VTE의 텍스트 선택으로 흘러간다.
+        install_url_link_handling(&term, id, callbacks.on_open_url.clone());
 
         // Process exit.
         {
@@ -310,5 +321,160 @@ impl TerminalPane {
 
     pub fn feed(&self, bytes: &[u8]) {
         self.widget.feed_child(bytes);
+    }
+}
+
+// ---- URL link handling --------------------------------------------------
+
+/// PCRE2 패턴: http(s) / ftp / file URL을 공백/꺽쇠/따옴표/백틱 전까지
+/// 매치한다. (?i)로 schema는 대소문자 무관. 매치된 문자열에 끝쪽
+/// 구두점이 붙을 수 있어 dispatch 직전에 trim_url_trailing()로 정리한다.
+const URL_REGEX_PATTERN: &str = r#"(?i)(?:https?|ftp|file)://[^\s<>"'`]+"#;
+
+/// PCRE2_MULTILINE — 멀티라인 매치(터미널의 wrap된 출력에서 매치가
+/// 줄을 넘어가도 깨지지 않도록). 다른 플래그는 사용하지 않는다.
+const PCRE2_MULTILINE: u32 = 0x0000_0400;
+
+/// Trailing punctuation을 잘라낸 URL을 돌려준다. `.`, `,`, `;`, `:`,
+/// `!`, `?`, 닫는 괄호류, 따옴표 — 문장 끝에 자연스럽게 붙기 쉬운
+/// 문자들. URL path/query에 의도적으로 들어 있을 수도 있지만, 사용자
+/// 시나리오에서 "마지막에 `.`이 붙은 URL을 그대로 열어 404"보다는
+/// "마지막 `.`을 떼서 정상 URL을 여는" 쪽이 거의 항상 옳다.
+fn trim_url_trailing(s: &str) -> String {
+    s.trim_end_matches(|c: char| {
+        matches!(
+            c,
+            '.' | ','
+                | ';'
+                | ':'
+                | '!'
+                | '?'
+                | ')'
+                | ']'
+                | '}'
+                | '\''
+                | '"'
+                | '`'
+        )
+    })
+    .to_string()
+}
+
+fn install_url_link_handling(
+    term: &vte::Terminal,
+    pane_id: PaneId,
+    on_open_url: Rc<RefCell<dyn FnMut(PaneId, String)>>,
+) {
+    // 1) Regex 컴파일 + 등록. 실패하면(매우 드묾 — 보통 PCRE2 빌드
+    //    이슈) 조용히 fall through — 링크 인식만 비활성화되고 터미널
+    //    자체는 정상 동작한다.
+    let regex = match vte::Regex::for_match(URL_REGEX_PATTERN, PCRE2_MULTILINE) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to compile URL regex; link clicking disabled");
+            return;
+        }
+    };
+    let tag = term.match_add_regex(&regex, 0);
+    // hover 시 pointer 커서로 바뀌게 함. Ctrl 없이도 pointer가 보이지만
+    // 실제 클릭은 Ctrl이 눌린 경우에만 동작 — gnome-terminal과 동일한
+    // UX 패턴이다 (시각적 hint는 항상, action은 modifier로 제한).
+    term.match_set_cursor_name(tag, "pointer");
+
+    // 2) 좌클릭 gesture. capture phase에서 modifier_state를 확인하고
+    //    Ctrl이 들어 있을 때만 동작 — 일반 클릭은 그대로 VTE의 텍스트
+    //    selection으로 흘러간다.
+    let click = gtk::GestureClick::new();
+    click.set_button(gtk::gdk::BUTTON_PRIMARY);
+    // Capture phase로 바꿔서 VTE 자신의 click 처리보다 먼저 들어보고,
+    // URL을 잡았을 때만 Claimed로 바꿔 셀렉션이 시작되지 않도록 한다.
+    click.set_propagation_phase(gtk::PropagationPhase::Capture);
+
+    let term_widget = term.clone();
+    click.connect_pressed(move |gesture, _n_press, x, y| {
+        let modifiers = gesture
+            .current_event()
+            .map(|e| e.modifier_state())
+            .unwrap_or_else(gtk::gdk::ModifierType::empty);
+        if !modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK) {
+            return;
+        }
+
+        // 우선 OSC 8 hyperlink (escape sequence로 URL 첨부된 텍스트)부터
+        // 보고, 없으면 regex 매치로 폴백한다. OSC 8을 지원하는 ls / git
+        // / 일부 빌드 도구가 만드는 링크가 우선순위가 높다.
+        let url_raw: Option<String> = term_widget
+            .check_hyperlink_at(x, y)
+            .map(|g| g.to_string())
+            .or_else(|| {
+                let (m, _tag) = term_widget.check_match_at(x, y);
+                m.map(|g| g.to_string())
+            });
+
+        let Some(raw) = url_raw else {
+            return;
+        };
+        let url = trim_url_trailing(&raw);
+        if url.is_empty() {
+            return;
+        }
+        tracing::debug!(%pane_id, %url, "Ctrl+click on terminal URL → open in browser tab");
+        (on_open_url.borrow_mut())(pane_id, url);
+        // 매치를 처리했으니 sequence를 우리 쪽이 가져가서 VTE가
+        // 텍스트 selection을 시작하지 못하도록 막는다.
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+    });
+    term.add_controller(click);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trim_url_trailing_strips_common_sentence_punctuation() {
+        assert_eq!(
+            trim_url_trailing("https://example.com/page."),
+            "https://example.com/page"
+        );
+        assert_eq!(
+            trim_url_trailing("https://example.com/page),"),
+            "https://example.com/page"
+        );
+        assert_eq!(
+            trim_url_trailing("https://example.com/path?q=1!"),
+            "https://example.com/path?q=1"
+        );
+        assert_eq!(
+            trim_url_trailing("https://example.com/'\"`"),
+            "https://example.com/"
+        );
+    }
+
+    #[test]
+    fn trim_url_trailing_preserves_internal_punctuation() {
+        // path 내부의 `.`이나 `,`은 보존해야 한다 — trim은 끝부터만 한다.
+        assert_eq!(
+            trim_url_trailing("https://example.com/a.b/c"),
+            "https://example.com/a.b/c"
+        );
+        assert_eq!(
+            trim_url_trailing("https://example.com/path?a=1,2,3"),
+            "https://example.com/path?a=1,2,3"
+        );
+    }
+
+    #[test]
+    fn trim_url_trailing_handles_clean_url() {
+        assert_eq!(
+            trim_url_trailing("https://example.com/"),
+            "https://example.com/"
+        );
+    }
+
+    #[test]
+    fn trim_url_trailing_handles_empty() {
+        assert_eq!(trim_url_trailing(""), "");
+        assert_eq!(trim_url_trailing("...,,;"), "");
     }
 }
