@@ -65,7 +65,13 @@ impl BrowserPane {
         let network_session = build_network_session(&profile);
         let web_view = webkit6::WebView::builder()
             .network_session(&network_session)
+            // WebView가 GtkWindow의 muted 상태를 상속해 일부 환경에서
+            // 기본 muted=true로 시작해 동영상 소리가 안 나오는 회귀가
+            // 보고됨. 빌더에서 false를 명시하고, 빌드 직후 한 번 더
+            // set_is_muted(false)로 보장한다.
+            .is_muted(false)
             .build();
+        webkit6::prelude::WebViewExt::set_is_muted(&web_view, false);
         web_view.set_hexpand(true);
         web_view.set_vexpand(true);
 
