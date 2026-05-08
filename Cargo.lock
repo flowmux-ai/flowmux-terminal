@@ -530,216 +530,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "flowmux-app"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "async-channel",
- "chrono",
- "flowmux-browser",
- "flowmux-config",
- "flowmux-cookies",
- "flowmux-core",
- "flowmux-daemon",
- "flowmux-ipc",
- "flowmux-notify",
- "flowmux-state",
- "flowmux-terminal",
- "flowmux-vcs",
- "gtk4",
- "libadwaita",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "vte4",
- "webkit6",
-]
-
-[[package]]
-name = "flowmux-browser"
-version = "0.0.1"
-dependencies = [
- "async-trait",
- "dirs",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
-]
-
-[[package]]
-name = "flowmux-cli"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "clap",
- "flowmux-config",
- "flowmux-cookies",
- "flowmux-core",
- "flowmux-ipc",
- "flowmux-notify",
- "dirs",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "flowmux-config"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "dirs",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "flowmux-cookies"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "chrono",
- "dirs",
- "rusqlite",
- "serde",
- "tempfile",
- "thiserror 1.0.69",
- "tracing",
-]
-
-[[package]]
-name = "flowmux-core"
-version = "0.0.1"
-dependencies = [
- "chrono",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "uuid",
-]
-
-[[package]]
-name = "flowmux-daemon"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "flowmux-config",
- "flowmux-core",
- "flowmux-ipc",
- "flowmux-notify",
- "flowmux-procmon",
- "flowmux-ssh",
- "flowmux-state",
- "flowmux-vcs",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "flowmux-ipc"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "flowmux-config",
- "flowmux-core",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "flowmux-notify"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "chrono",
- "flowmux-core",
- "serde",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "zbus",
-]
-
-[[package]]
-name = "flowmux-procmon"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "thiserror 1.0.69",
- "tracing",
-]
-
-[[package]]
-name = "flowmux-ssh"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "async-trait",
- "flowmux-core",
- "russh",
- "russh-keys",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "flowmux-state"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "chrono",
- "flowmux-config",
- "flowmux-core",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tracing",
-]
-
-[[package]]
-name = "flowmux-terminal"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "flowmux-core",
- "gtk4",
- "thiserror 1.0.69",
- "tracing",
- "vte4",
-]
-
-[[package]]
-name = "flowmux-vcs"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "flowmux-core",
- "gix",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1167,6 +957,216 @@ checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
 dependencies = [
  "crc32fast",
  "miniz_oxide",
+]
+
+[[package]]
+name = "flowmux-app"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "async-channel",
+ "chrono",
+ "flowmux-browser",
+ "flowmux-config",
+ "flowmux-cookies",
+ "flowmux-core",
+ "flowmux-daemon",
+ "flowmux-ipc",
+ "flowmux-notify",
+ "flowmux-state",
+ "flowmux-terminal",
+ "flowmux-vcs",
+ "gtk4",
+ "libadwaita",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "vte4",
+ "webkit6",
+]
+
+[[package]]
+name = "flowmux-browser"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "dirs",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
+name = "flowmux-cli"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "dirs",
+ "flowmux-config",
+ "flowmux-cookies",
+ "flowmux-core",
+ "flowmux-ipc",
+ "flowmux-notify",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "flowmux-config"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "flowmux-cookies"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "dirs",
+ "rusqlite",
+ "serde",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
+name = "flowmux-core"
+version = "0.0.1"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "uuid",
+]
+
+[[package]]
+name = "flowmux-daemon"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "flowmux-config",
+ "flowmux-core",
+ "flowmux-ipc",
+ "flowmux-notify",
+ "flowmux-procmon",
+ "flowmux-ssh",
+ "flowmux-state",
+ "flowmux-vcs",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "flowmux-ipc"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "flowmux-config",
+ "flowmux-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "flowmux-notify"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "flowmux-core",
+ "serde",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "zbus",
+]
+
+[[package]]
+name = "flowmux-procmon"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
+name = "flowmux-ssh"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "flowmux-core",
+ "russh",
+ "russh-keys",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "flowmux-state"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "flowmux-config",
+ "flowmux-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
+name = "flowmux-terminal"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "flowmux-core",
+ "gtk4",
+ "thiserror 1.0.69",
+ "tracing",
+ "vte4",
+]
+
+[[package]]
+name = "flowmux-vcs"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "flowmux-core",
+ "gix",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
