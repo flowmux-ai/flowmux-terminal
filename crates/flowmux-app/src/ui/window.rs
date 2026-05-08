@@ -224,6 +224,129 @@ impl WindowController {
         }
     }
 
+    /// Remove a pane from the live widget tree by re-parenting its
+    /// surviving sibling into the slot the parent `gtk::Paned`
+    /// occupied. Every other pane's widget instance — and therefore
+    /// every running PTY shell + browser navigation state — is
+    /// preserved.
+    ///
+    /// Falls back to [`Self::rerender_workspace`] when the GTK tree
+    /// shape is not the simple "frame inside Paned" case (e.g. the
+    /// removed pane was the workspace root). The fallback resets
+    /// PTYs, but `close_pane` returning `WorkspaceRemoved` already
+    /// goes down a different path, so the fallback is rarely hit.
+    pub async fn apply_close_pane_incremental_or_rerender(
+        &self,
+        ws_id: WorkspaceId,
+        removed: PaneId,
+    ) {
+        let frame = {
+            let r = self.pane_registry.borrow();
+            r.pane_frame(removed)
+        };
+        let Some(frame) = frame else {
+            if let Some(ws) = self.store.get_workspace(ws_id).await {
+                self.rerender_workspace(&ws);
+            }
+            return;
+        };
+
+        let Some(parent) = frame.parent() else {
+            if let Some(ws) = self.store.get_workspace(ws_id).await {
+                self.rerender_workspace(&ws);
+            }
+            return;
+        };
+
+        let Some(paned) = parent.downcast::<gtk::Paned>().ok() else {
+            // Removed pane wasn't inside a `gtk::Paned` — nothing to
+            // collapse incrementally. Defensive fallback.
+            if let Some(ws) = self.store.get_workspace(ws_id).await {
+                self.rerender_workspace(&ws);
+            }
+            return;
+        };
+
+        // Pick the sibling: the child of `paned` that isn't `frame`.
+        let sibling = if paned
+            .start_child()
+            .map(|w| w == frame)
+            .unwrap_or(false)
+        {
+            paned.end_child()
+        } else {
+            paned.start_child()
+        };
+        let Some(sibling) = sibling else {
+            if let Some(ws) = self.store.get_workspace(ws_id).await {
+                self.rerender_workspace(&ws);
+            }
+            return;
+        };
+
+        // Detach both children from `paned`. After this `paned` has
+        // no children and `frame` / `sibling` have no parent; re-
+        // parenting `sibling` lower preserves its widget instance.
+        sibling.unparent();
+        frame.unparent();
+
+        // Re-parent `sibling` into the slot `paned` occupied.
+        let grand = paned.parent();
+        paned.unparent();
+
+        let Some(grand) = grand else {
+            // `paned` had no parent — nothing to put `sibling` into.
+            if let Some(ws) = self.store.get_workspace(ws_id).await {
+                self.rerender_workspace(&ws);
+            }
+            return;
+        };
+
+        if let Some(grand_paned) = grand.downcast_ref::<gtk::Paned>() {
+            // `paned` was inside another `gtk::Paned`. After we
+            // un-parented it, exactly one of grand_paned's slots is
+            // empty — fill it with `sibling`.
+            if grand_paned.start_child().is_none() {
+                grand_paned.set_start_child(Some(&sibling));
+            } else if grand_paned.end_child().is_none() {
+                grand_paned.set_end_child(Some(&sibling));
+            } else {
+                tracing::warn!(
+                    "apply_close_pane_incremental: parent paned has no empty slot; falling back"
+                );
+                if let Some(ws) = self.store.get_workspace(ws_id).await {
+                    self.rerender_workspace(&ws);
+                }
+                return;
+            }
+        } else if let Some(stack) = grand.downcast_ref::<gtk::Stack>() {
+            // `paned` was the workspace's top-level child of the
+            // workspace stack. Re-add `sibling` under the same name
+            // and update the surfaces map so workspace switches use
+            // the new top-level widget.
+            let name = ws_id.to_string();
+            stack.add_named(&sibling, Some(&name));
+            self.surfaces.borrow_mut().insert(ws_id, sibling.clone());
+            stack.set_visible_child_name(&name);
+        } else if let Some(b) = grand.downcast_ref::<gtk::Box>() {
+            b.append(&sibling);
+        } else {
+            tracing::warn!(
+                kind = ?grand.type_(),
+                "apply_close_pane_incremental: unexpected grand parent kind; falling back"
+            );
+            if let Some(ws) = self.store.get_workspace(ws_id).await {
+                self.rerender_workspace(&ws);
+            }
+            return;
+        }
+
+        // Drop registry entries for the removed pane only — every
+        // other pane's TerminalPane / BrowserPane stays alive in the
+        // registry and continues to render.
+        self.pane_registry.borrow_mut().forget_pane(removed);
+    }
+
     pub fn rerender_workspace(&self, ws: &Workspace) {
         self.sidebar.upsert(ws);
         let name = ws.id.to_string();
@@ -772,8 +895,22 @@ impl WindowController {
                 None => {
                     let _ = ack.send(Err(format!("pane not found: {pane}")));
                 }
-                Some(flowmux_daemon::CloseOutcome::PaneRemoved { workspace })
-                | Some(flowmux_daemon::CloseOutcome::SurfaceRemoved { workspace }) => {
+                Some(flowmux_daemon::CloseOutcome::PaneRemoved { workspace }) => {
+                    // Incremental collapse: keep every other pane's
+                    // widget instance (and therefore every running
+                    // PTY shell + browser nav state) intact. This
+                    // path replaces the prior `rerender_workspace`
+                    // that destroyed claude/codex sessions on close.
+                    self.apply_close_pane_incremental_or_rerender(workspace, pane)
+                        .await;
+                    let _ = ack.send(Ok(()));
+                }
+                Some(flowmux_daemon::CloseOutcome::SurfaceRemoved { workspace }) => {
+                    // close_pane removed the entire surface (workspace-
+                    // level tab) but the workspace still has at least
+                    // one other surface. Drop the registry pane entry
+                    // and rerender — surface switching is rare and
+                    // not in the user's reset complaint scope.
                     if let Some(ws) = self.store.get_workspace(workspace).await {
                         self.rerender_workspace(&ws);
                     }
@@ -889,13 +1026,12 @@ impl WindowController {
                         let _ = ack.send(Ok(()));
                     }
                     Some(flowmux_daemon::CloseOutcome::PaneRemoved { workspace }) => {
-                        // An entire pane disappeared. The split tree changed, so
-                        // incremental handling is more complex. A single closed
-                        // pane can rebuild other panes in the same workspace, but
-                        // at least other workspaces are unaffected.
-                        if let Some(ws) = self.store.get_workspace(workspace).await {
-                            self.rerender_workspace(&ws);
-                        }
+                        // Incremental collapse — see
+                        // `apply_close_pane_incremental_or_rerender`
+                        // for the details. Keeps every other pane's
+                        // widget alive across the close.
+                        self.apply_close_pane_incremental_or_rerender(workspace, pane)
+                            .await;
                         let _ = ack.send(Ok(()));
                     }
                 }
@@ -1483,10 +1619,20 @@ impl WindowController {
                         .add_browser_surface_to_pane(reuse_target, url.clone())
                         .await
                     {
-                        Some((workspace, _surface)) => {
-                            if let Some(ws) = self.store.get_workspace(workspace).await {
-                                self.rerender_workspace(&ws);
-                            }
+                        Some((workspace, surface_id)) => {
+                            // Incremental attach: only the right-sibling
+                            // browser pane gets a new tab. Other panes —
+                            // including the terminal that called us — keep
+                            // their PTY child and browser navigation
+                            // state. Falling back to rerender_workspace
+                            // here would kill claude/codex running in the
+                            // caller's terminal (regression #pane-reset).
+                            self.attach_or_rerender_surface(
+                                workspace,
+                                reuse_target,
+                                surface_id,
+                            )
+                            .await;
                             let _ = ack.send(Ok(BrowserOpenOutcome {
                                 pane: reuse_target,
                                 placement_strategy:
@@ -1515,9 +1661,16 @@ impl WindowController {
                         let _ = ack.send(Err(format!("pane not found: {target}")));
                     }
                     Some((workspace, new_pane)) => {
-                        if let Some(ws) = self.store.get_workspace(workspace).await {
-                            self.rerender_workspace(&ws);
-                        }
+                        // Incremental split: reparent the source pane's
+                        // existing frame into a fresh Paned and put a new
+                        // BrowserPane in the sibling slot. Other panes
+                        // (including the terminal we are called from)
+                        // keep their state. Same regression as above
+                        // applied to the split path.
+                        self.apply_split_incremental_or_rerender(
+                            workspace, target, new_pane, direction,
+                        )
+                        .await;
                         let _ = ack.send(Ok(BrowserOpenOutcome {
                             pane: new_pane,
                             placement_strategy: PlacementStrategy::SplitRight,

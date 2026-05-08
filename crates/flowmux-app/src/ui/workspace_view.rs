@@ -267,6 +267,31 @@ impl PaneRegistry {
         }
     }
 
+    /// Drop every registry entry that belongs to `pane` and the
+    /// surfaces inside it. Used by the incremental `close_pane` path
+    /// — the GTK widgets themselves are re-parented (or unparented)
+    /// by the caller, so this method only cleans up the in-memory
+    /// indexes and never touches widgets directly.
+    pub fn forget_pane(&mut self, pane: PaneId) {
+        let surfaces: Vec<SurfaceId> = self
+            .surface_tabs
+            .get(&pane)
+            .map(|tabs| tabs.iter().map(|(id, _)| *id).collect())
+            .unwrap_or_default();
+        for s in surfaces {
+            self.terminals.remove(&s);
+            self.browsers.remove(&s);
+            self.surface_tab_labels.remove(&s);
+            self.surface_workspace.remove(&s);
+        }
+        self.surface_tabs.remove(&pane);
+        self.surface_stacks.remove(&pane);
+        self.pane_frames.remove(&pane);
+        self.pane_tab_containers.remove(&pane);
+        self.active_terminal_by_pane.remove(&pane);
+        self.active_browser_by_pane.remove(&pane);
+    }
+
     /// Detach only one surface tab/panel from the same pane's widget tree.
     /// Other panes in the same workspace are untouched, preserving shell
     /// sessions and browser navigation state. Only call after close_surface
