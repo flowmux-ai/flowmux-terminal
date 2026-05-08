@@ -103,9 +103,17 @@ impl BrowserPane {
             settings.set_enable_developer_extras(true);
             settings.set_enable_fullscreen(true);
             settings.set_enable_javascript(true);
+            // enable-media는 WebKitGTK 6.0에서 audio/video element 자체의
+            // 미디어 파이프라인을 켜는 마스터 스위치다. 이 값이 false면
+            // GStreamer audio sink 자체가 attach되지 않아 동영상은 보이는데
+            // 소리가 안 나는 회귀가 보고됨.
+            settings.set_enable_media(true);
             settings.set_enable_mediasource(true);
             settings.set_enable_encrypted_media(true);
             settings.set_enable_webaudio(true);
+            // HTML5 storage — 기본 true이지만 사이트 호환성을 위해 명시.
+            settings.set_enable_html5_local_storage(true);
+            settings.set_enable_html5_database(true);
             // Always로 전 페이지 GPU 가속을 유지. 종료 시
             // `eglDestroySync` 부재 / `corrupted size vs. prev_size`
             // race는 main.rs의 `WEBKIT_DISABLE_DMABUF_RENDERER=1`로
