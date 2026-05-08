@@ -366,29 +366,25 @@ impl WindowController {
             if let Err(e) = controller.store.save_now_blocking() {
                 tracing::warn!(error = %e, "state save on close failed");
             }
-            // 모든 WebView를 명시적으로 정리해 종료 race를 줄인다.
-            //   1. stop_loading() — 진행 중인 fetch / navigation을 취소.
-            //      WebProcess의 internallyFailedLoadTimerFired ERROR는
-            //      종료 시점에 미완성 load가 남아 NetworkSession이
-            //      정리될 때 internal load timer가 dangling되어 찍힌다
-            //      (fatal abort가 아니라 stderr cosmetic 경고).
-            //   2. load_uri("about:blank") — 진행 중인 request 자체를
-            //      빈 페이지로 갈아끼워 NetworkProcess 측 리퀘스트를
-            //      취소시킨다. stop_loading만으로는 일부 in-flight
-            //      fetch가 그대로 남는 케이스가 있다.
-            //   3. try_close() — page-level cleanup + beforeunload.
+            // 모든 WebView의 진행 중인 load를 stop_loading으로만 취소한다.
+            // 이전 시도였던 `load_uri("about:blank")`는 그 자체가 새 load를
+            // 시작하기 때문에 곧이어 destroy 순간 in-flight loader가
+            // internally cancel되며 `internallyFailedLoadTimerFired` ERROR
+            // 두 줄이 stderr에 찍힌다. `try_close()`도 beforeunload 디스패치를
+            // 유발해 같은 race를 만들 수 있어 호출하지 않는다.
+            //
+            // destroy 자체는 두 번의 idle 사이클을 미뤄, 첫 idle에서 GTK가
+            // webview 위젯의 unrealize를 진행하고 두 번째 idle에서 윈도우를
+            // 떨군다. polling-timer 회귀 방지 가드 때문에 timeout은 쓰지
+            // 않는다.
             for browser in controller.pane_registry.borrow().browsers.values() {
                 browser.web_view.stop_loading();
-                browser.web_view.load_uri("about:blank");
-                browser.web_view.try_close();
             }
-            // 한 main-loop 사이클을 확보해 about:blank 전환이 NetworkProcess
-            // 까지 닿도록 비동기 윈도우 destroy로 미룬다 (즉시 destroy하면
-            // GTK가 child를 unparent하면서 NetworkProcess가 미처 응답을
-            // 정리하지 못한 채 통신이 끊긴다). Stop으로 close_request를
-            // 한 번 가로채고, idle 사이클 직후 강제 destroy.
             let window = controller.window.clone();
-            glib::idle_add_local_once(move || window.destroy());
+            glib::idle_add_local_once(move || {
+                let window = window.clone();
+                glib::idle_add_local_once(move || window.destroy());
+            });
             glib::Propagation::Stop
         });
     }

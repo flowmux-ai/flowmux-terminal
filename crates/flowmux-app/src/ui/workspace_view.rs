@@ -291,6 +291,37 @@ impl PaneRegistry {
     }
 }
 
+/// `gtk::Paned`의 ratio를 첫 allocation 직후에 적용한다.
+///
+/// `connect_realize` 시점에는 widget이 아직 allocate되지 않아
+/// `paned.width() / height()`가 0이고 그 상태로 `set_position`을 부르면
+/// 의미 없는 위치가 잡혀 다음 실행 때 사이즈가 살아나지 않는다. 그래서
+/// realize 직후 `idle_add_local`로 한 프레임 미루고, total이 0이면 다음
+/// idle에서 다시 시도한다. 최대 60번(약 1초) 재시도한 뒤 포기 — 비활성
+/// 워크스페이스라 끝까지 mapping 되지 않는 경우 무한 루프를 막는다.
+fn apply_ratio_when_sized(paned: &gtk::Paned, ratio: f32) {
+    let weak = paned.downgrade();
+    let mut attempts: u32 = 0;
+    gtk::glib::idle_add_local(move || {
+        let Some(p) = weak.upgrade() else {
+            return gtk::glib::ControlFlow::Break;
+        };
+        let total = match p.orientation() {
+            gtk::Orientation::Horizontal => p.width(),
+            _ => p.height(),
+        };
+        if total > 0 {
+            p.set_position((total as f32 * ratio) as i32);
+            return gtk::glib::ControlFlow::Break;
+        }
+        attempts += 1;
+        if attempts > 60 {
+            return gtk::glib::ControlFlow::Break;
+        }
+        gtk::glib::ControlFlow::Continue
+    });
+}
+
 /// [`split_pane_incremental`]의 결과.
 pub enum IncrementalSplitOutcome {
     /// 성공. target이 이미 다른 split 안에 있었으므로 stack 자식은 그대로다.
@@ -393,15 +424,10 @@ pub fn split_pane_incremental(
     paned.set_resize_end_child(true);
     paned.set_shrink_start_child(false);
     paned.set_shrink_end_child(false);
-    paned.connect_realize(move |p| {
-        let total = match p.orientation() {
-            gtk::Orientation::Horizontal => p.width(),
-            _ => p.height(),
-        };
-        if total > 0 {
-            p.set_position((total as f32 * ratio) as i32);
-        }
-    });
+    {
+        let p = paned.clone();
+        paned.connect_realize(move |_| apply_ratio_when_sized(&p, ratio));
+    }
 
     registry
         .borrow_mut()
@@ -498,15 +524,10 @@ fn build_pane(
             paned.set_shrink_start_child(false);
             paned.set_shrink_end_child(false);
             let r = *ratio;
-            paned.connect_realize(move |p| {
-                let total = match p.orientation() {
-                    gtk::Orientation::Horizontal => p.width(),
-                    _ => p.height(),
-                };
-                if total > 0 {
-                    p.set_position((total as f32 * r) as i32);
-                }
-            });
+            {
+                let p = paned.clone();
+                paned.connect_realize(move |_| apply_ratio_when_sized(&p, r));
+            }
             registry
                 .borrow_mut()
                 .register_split(*split_id, workspace, paned.clone());
