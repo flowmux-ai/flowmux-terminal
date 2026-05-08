@@ -2678,4 +2678,86 @@ mod tests {
             Some("bravo-poll-cwd")
         );
     }
+
+    /// 회귀 방지: vi/claude 같은 외부 프로그램이 띄운 OSC 0/2 타이틀이
+    /// 1초 cwd polling fallback에 의해 폴더명으로 되돌아가지 않아야
+    /// 한다. poll_terminal_cwds는 같은 cwd를 매 tick마다 전달하므로,
+    /// 그 경로에서 `surface.title`을 절대 건드리지 않아야 한다는 것이
+    /// 핵심.
+    #[gtk::test]
+    async fn program_title_persists_across_cwd_polling() {
+        adw::init().expect("libadwaita should initialize in GTK test");
+        let cwd = std::env::temp_dir().join("flowmux-program-title-poll");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("ui".into()), cwd.clone())
+            .await;
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        let pane = ws.surfaces[0].root_pane.first_leaf_id().unwrap();
+        let surface = ws.surfaces[0].root_pane.active_surface_id(pane).unwrap();
+
+        let (bridge, _rx) = Bridge::new();
+        let app = adw::Application::builder()
+            .application_id("com.flowmux.App.UiTest.ProgramTitlePoll")
+            .build();
+        app.register(None::<&gtk::gio::Cancellable>).unwrap();
+        let controller = WindowController::new(
+            &app,
+            store.clone(),
+            Arc::new(ResolvedTheme::load()),
+            bridge,
+            gtk::CssProvider::new(),
+        );
+        controller.render_workspace(&ws);
+        controller.focused_pane.set(Some(pane));
+        controller.dispatch(GtkCommand::RefreshWindowTitle).await;
+
+        // 외부 프로그램(claude) 진입 — OSC 2가 "Claude Code" 발행.
+        controller
+            .dispatch(GtkCommand::TerminalTitleChanged {
+                pane,
+                surface,
+                title: "Claude Code".into(),
+            })
+            .await;
+        assert_eq!(
+            store.surface_title(pane, surface).await.as_deref(),
+            Some("Claude Code")
+        );
+        assert_eq!(
+            controller.window.title().map(|s| s.to_string()).as_deref(),
+            Some("flowmux - Claude Code")
+        );
+
+        // 이 시점에서 polling이 fire — 같은 cwd를 또 보고. 프로그램이 cd하지
+        // 않았으므로 cwd는 동일. 두 번 연속으로 polling을 돌려도 타이틀이
+        // 흔들리지 않아야 한다.
+        controller.poll_terminal_cwds().await;
+        controller.poll_terminal_cwds().await;
+        assert_eq!(
+            store.surface_title(pane, surface).await.as_deref(),
+            Some("Claude Code"),
+            "프로그램 타이틀이 cwd polling에 의해 폴더명으로 되돌아가면 안 된다",
+        );
+        assert_eq!(
+            controller.window.title().map(|s| s.to_string()).as_deref(),
+            Some("flowmux - Claude Code")
+        );
+
+        // claude 종료 후 사용자가 다른 폴더로 이동하면 폴더명 라벨로 자연스럽게 복귀.
+        let next = std::env::temp_dir().join("flowmux-program-title-after");
+        std::fs::create_dir_all(&next).unwrap();
+        controller
+            .dispatch(GtkCommand::TerminalCwdChanged {
+                pane,
+                surface,
+                cwd: next.clone(),
+            })
+            .await;
+        assert_eq!(
+            store.surface_title(pane, surface).await.as_deref(),
+            Some("flowmux-program-t...")
+        );
+    }
 }

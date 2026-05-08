@@ -583,21 +583,23 @@ impl Pane {
                         surfaces.iter_mut().find(|surface| surface.id == surface_id)
                     {
                         if let SurfaceKind::Terminal { cwd, .. } = &mut surface.kind {
-                            let cwd_changed = cwd.as_ref() != Some(&new_cwd);
-                            let next_title = (!surface.title_locked)
-                                .then(|| terminal_tab_title_for_cwd(Some(&new_cwd)));
-                            let title_changed = next_title
-                                .as_ref()
-                                .is_some_and(|title| surface.title != *title);
-                            if cwd_changed {
-                                *cwd = Some(new_cwd);
+                            // cwd가 실제로 바뀔 때만 폴더-기반 라벨로 갱신.
+                            // cwd가 같다면 OSC 0/2로 들어와 있는 외부 프로그램
+                            // 타이틀(예: "Claude Code", "vi …")을 polling이
+                            // 매 tick마다 덮어 쓰지 않도록 surface.title을
+                            // 건드리지 않는다.
+                            if cwd.as_ref() == Some(&new_cwd) {
+                                return false;
                             }
-                            if let Some(title) = next_title {
-                                if title_changed {
-                                    surface.title = title;
+                            *cwd = Some(new_cwd);
+                            if !surface.title_locked {
+                                let next_title =
+                                    terminal_tab_title_for_cwd(cwd.as_deref());
+                                if surface.title != next_title {
+                                    surface.title = next_title;
                                 }
                             }
-                            return cwd_changed || title_changed;
+                            return true;
                         }
                     }
                     false
@@ -1297,6 +1299,38 @@ mod tests {
         assert!(pane.rename_surface(pane_id, surface_id, "fixed".into()));
         assert!(pane.set_surface_cwd(pane_id, surface_id, "/tmp/another".into()));
         assert_eq!(pane.surface_title(pane_id, surface_id), Some("fixed"));
+    }
+
+    #[test]
+    fn set_surface_cwd_preserves_program_title_when_cwd_unchanged() {
+        // 회귀 방지: vi/claude 같은 외부 프로그램이 OSC 0/2로 set한 타이틀이
+        // 1초 cwd polling에 의해 폴더명으로 되돌아가지 않아야 한다.
+        // poll_terminal_cwds는 cwd가 그대로면 같은 cwd로 set_surface_cwd를
+        // 호출하므로, 이 케이스에서 surface.title은 절대 건드리지 않아야 한다.
+        let pane_id = PaneId::new();
+        let mut pane = Pane::Leaf {
+            id: pane_id,
+            content: PaneContent::tabbed_terminal("os", Some("/tmp/work".into())),
+        };
+        let surface_id = pane.active_surface_id(pane_id).unwrap();
+
+        // 외부 프로그램 진입: set_surface_title_auto로 "Claude Code" 진입.
+        assert!(pane.set_surface_title_auto(
+            pane_id,
+            surface_id,
+            "Claude Code".into(),
+        ));
+        assert_eq!(pane.surface_title(pane_id, surface_id), Some("Claude Code"));
+
+        // polling이 같은 cwd를 또 보고 — no-op이어야 하고, 타이틀은
+        // "Claude Code" 그대로.
+        assert!(!pane.set_surface_cwd(pane_id, surface_id, "/tmp/work".into()));
+        assert_eq!(pane.surface_title(pane_id, surface_id), Some("Claude Code"));
+
+        // 사용자가 cd로 cwd를 실제로 바꾸면 그제서야 폴더명 라벨로 복귀.
+        // (외부 프로그램에서 빠져나온 자연스러운 흐름과 동치.)
+        assert!(pane.set_surface_cwd(pane_id, surface_id, "/tmp/another".into()));
+        assert_eq!(pane.surface_title(pane_id, surface_id), Some("another"));
 
         let Pane::Leaf {
             content: PaneContent::Tabs { surfaces, .. },
