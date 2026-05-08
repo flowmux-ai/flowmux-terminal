@@ -331,9 +331,15 @@ impl TerminalPane {
 /// 구두점이 붙을 수 있어 dispatch 직전에 trim_url_trailing()로 정리한다.
 const URL_REGEX_PATTERN: &str = r#"(?i)(?:https?|ftp|file)://[^\s<>"'`]+"#;
 
-/// PCRE2_MULTILINE — 멀티라인 매치(터미널의 wrap된 출력에서 매치가
-/// 줄을 넘어가도 깨지지 않도록). 다른 플래그는 사용하지 않는다.
-const PCRE2_MULTILINE: u32 = 0x0000_0400;
+/// PCRE2 컴파일 플래그.
+///   * PCRE2_MULTILINE (0x400): 줄을 넘기는 wrap된 터미널 출력에서도
+///     매치가 깨지지 않도록 한다.
+///   * PCRE2_UTF (0x80000): VTE는 매치 엔진에 UTF-8 텍스트를 넘기므로
+///     이 플래그가 빠지면 PCRE2가 입력을 raw byte로 다뤄 hover 감지 /
+///     커서 변경이 동작하지 않는다 (gnome-terminal과 동일 조합).
+///   * PCRE2_NO_UTF_CHECK (0x4000_0000): VTE 내부에서 이미 UTF-8을
+///     검증하므로 PCRE2의 추가 검증을 끄고 매치마다의 오버헤드를 줄인다.
+const URL_REGEX_COMPILE_FLAGS: u32 = 0x0000_0400 | 0x0008_0000 | 0x4000_0000;
 
 /// Trailing punctuation을 잘라낸 URL을 돌려준다. `.`, `,`, `;`, `:`,
 /// `!`, `?`, 닫는 괄호류, 따옴표 — 문장 끝에 자연스럽게 붙기 쉬운
@@ -368,7 +374,7 @@ fn install_url_link_handling(
     // 1) Regex 컴파일 + 등록. 실패하면(매우 드묾 — 보통 PCRE2 빌드
     //    이슈) 조용히 fall through — 링크 인식만 비활성화되고 터미널
     //    자체는 정상 동작한다.
-    let regex = match vte::Regex::for_match(URL_REGEX_PATTERN, PCRE2_MULTILINE) {
+    let regex = match vte::Regex::for_match(URL_REGEX_PATTERN, URL_REGEX_COMPILE_FLAGS) {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(error = %e, "failed to compile URL regex; link clicking disabled");
@@ -380,14 +386,23 @@ fn install_url_link_handling(
     // 실제 클릭은 Ctrl이 눌린 경우에만 동작 — gnome-terminal과 동일한
     // UX 패턴이다 (시각적 hint는 항상, action은 modifier로 제한).
     term.match_set_cursor_name(tag, "pointer");
+    tracing::debug!(%pane_id, tag, "URL match registered on terminal");
 
-    // 2) 좌클릭 gesture. capture phase에서 modifier_state를 확인하고
-    //    Ctrl이 들어 있을 때만 동작 — 일반 클릭은 그대로 VTE의 텍스트
-    //    selection으로 흘러간다.
+    // 2) 좌클릭 gesture. Capture phase에서 button-press를 먼저 보고
+    //    Ctrl 여부를 판단한다.
+    //
+    //    여기서 핵심 함정: GtkGestureSingle은 button-press 시점에
+    //    자기 sequence를 자동으로 Claimed로 가져가 버린다. 즉 우리가
+    //    아무 것도 안 해도 같은 button-press 이벤트는 다른 controller
+    //    (VTE의 selection drag)로 전달되지 않아 텍스트 선택이 막힌다.
+    //    "선택도 안 된다"의 직접 원인이 이거다.
+    //
+    //    해결: Ctrl이 안 눌렸으면 명시적으로 set_state(Denied)로
+    //    sequence를 우리 손에서 풀어 준다 — VTE의 selection gesture가
+    //    그 sequence를 잡을 수 있다. Ctrl이 눌린 경우에만 Claimed로
+    //    유지해 selection이 시작되지 않게 한다.
     let click = gtk::GestureClick::new();
     click.set_button(gtk::gdk::BUTTON_PRIMARY);
-    // Capture phase로 바꿔서 VTE 자신의 click 처리보다 먼저 들어보고,
-    // URL을 잡았을 때만 Claimed로 바꿔 셀렉션이 시작되지 않도록 한다.
     click.set_propagation_phase(gtk::PropagationPhase::Capture);
 
     let term_widget = term.clone();
@@ -397,6 +412,10 @@ fn install_url_link_handling(
             .map(|e| e.modifier_state())
             .unwrap_or_else(gtk::gdk::ModifierType::empty);
         if !modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK) {
+            // VTE의 selection drag가 같은 button-press를 처리할 수 있도록
+            // 우리 sequence를 풀어 준다. 이거 없으면 GestureSingle의 자동
+            // Claim 때문에 selection이 영구히 막힌다.
+            gesture.set_state(gtk::EventSequenceState::Denied);
             return;
         }
 
@@ -412,16 +431,21 @@ fn install_url_link_handling(
             });
 
         let Some(raw) = url_raw else {
+            // Ctrl을 누른 채로 클릭했지만 URL 위가 아니다. selection 시도로
+            // 보고 sequence를 풀어 준다 — Ctrl+드래그로 block selection
+            // 같은 VTE 자체 기능을 막지 않기 위해.
+            gesture.set_state(gtk::EventSequenceState::Denied);
             return;
         };
         let url = trim_url_trailing(&raw);
         if url.is_empty() {
+            gesture.set_state(gtk::EventSequenceState::Denied);
             return;
         }
-        tracing::debug!(%pane_id, %url, "Ctrl+click on terminal URL → open in browser tab");
+        tracing::info!(%pane_id, %url, "Ctrl+click on terminal URL → open in browser tab");
         (on_open_url.borrow_mut())(pane_id, url);
-        // 매치를 처리했으니 sequence를 우리 쪽이 가져가서 VTE가
-        // 텍스트 selection을 시작하지 못하도록 막는다.
+        // URL을 처리했으니 sequence를 가져가서 VTE의 selection이
+        // 시작되지 않게 한다.
         gesture.set_state(gtk::EventSequenceState::Claimed);
     });
     term.add_controller(click);
