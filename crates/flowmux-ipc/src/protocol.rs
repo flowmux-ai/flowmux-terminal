@@ -140,6 +140,50 @@ pub enum Request {
         name: String,
     },
 
+    // ---- Phase 5 P0 action gap: cmux-equivalent verbs that round
+    // out the agent-browser surface. Selectors come from the most
+    // recent `BrowserSnapshot` (resolved via the daemon's RefStore).
+    BrowserDblClick {
+        pane: PaneId,
+        target: String,
+    },
+    BrowserHover {
+        pane: PaneId,
+        target: String,
+    },
+    BrowserFocus {
+        pane: PaneId,
+        target: String,
+    },
+    BrowserBlur {
+        pane: PaneId,
+        target: String,
+    },
+    BrowserCheck {
+        pane: PaneId,
+        target: String,
+    },
+    BrowserUncheck {
+        pane: PaneId,
+        target: String,
+    },
+    BrowserIsVisible {
+        pane: PaneId,
+        target: String,
+    },
+    BrowserIsEnabled {
+        pane: PaneId,
+        target: String,
+    },
+    BrowserIsChecked {
+        pane: PaneId,
+        target: String,
+    },
+    BrowserCount {
+        pane: PaneId,
+        selector: String,
+    },
+
     /// `flowmux claude-teams [--count N] [-- args...]` — spin up a
     /// workspace with N panes, each running the `claude` CLI with the
     /// given args. Mirrors cmux's documented "claude-teams" launcher.

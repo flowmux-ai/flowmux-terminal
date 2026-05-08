@@ -46,6 +46,18 @@ pub enum BrowserOp {
     Text { target: String },
     Value { target: String },
     Attr { target: String, name: String },
+
+    // ---- Phase 5 P0 action gap ----
+    DblClick { target: String },
+    Hover { target: String },
+    Focus { target: String },
+    Blur { target: String },
+    Check { target: String },
+    Uncheck { target: String },
+    IsVisible { target: String },
+    IsEnabled { target: String },
+    IsChecked { target: String },
+    Count { selector: String },
 }
 
 /// Result shape returned by [`BrowserOp`] dispatch.

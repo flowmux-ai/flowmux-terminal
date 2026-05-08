@@ -292,6 +292,155 @@ pub fn type_keys(text: &str) -> String {
     )
 }
 
+/// Double-click the element matched by `selector`.
+pub fn dblclick_by_selector(selector: &str) -> String {
+    format!(
+        r#"(function() {{
+            const el = document.querySelector("{s}");
+            if (!el) return "error: not found";
+            el.dispatchEvent(new MouseEvent('dblclick', {{ bubbles: true, cancelable: true }}));
+            return "ok";
+        }})()"#,
+        s = js_string(selector)
+    )
+}
+
+/// Hover (mouseenter + mouseover) over the element matched by `selector`.
+pub fn hover_by_selector(selector: &str) -> String {
+    format!(
+        r#"(function() {{
+            const el = document.querySelector("{s}");
+            if (!el) return "error: not found";
+            el.dispatchEvent(new MouseEvent('mouseenter', {{ bubbles: false }}));
+            el.dispatchEvent(new MouseEvent('mouseover', {{ bubbles: true }}));
+            return "ok";
+        }})()"#,
+        s = js_string(selector)
+    )
+}
+
+/// Focus the element matched by `selector` (uses `HTMLElement.focus()`).
+pub fn focus_by_selector(selector: &str) -> String {
+    format!(
+        r#"(function() {{
+            const el = document.querySelector("{s}");
+            if (!el) return "error: not found";
+            if (typeof el.focus !== 'function') return "error: not focusable";
+            el.focus();
+            return "ok";
+        }})()"#,
+        s = js_string(selector)
+    )
+}
+
+/// Blur the element matched by `selector` (uses `HTMLElement.blur()`).
+pub fn blur_by_selector(selector: &str) -> String {
+    format!(
+        r#"(function() {{
+            const el = document.querySelector("{s}");
+            if (!el) return "error: not found";
+            if (typeof el.blur !== 'function') return "error: not blurrable";
+            el.blur();
+            return "ok";
+        }})()"#,
+        s = js_string(selector)
+    )
+}
+
+/// Set a checkbox / radio's `checked` to true and dispatch `change`.
+pub fn check_by_selector(selector: &str) -> String {
+    format!(
+        r#"(function() {{
+            const el = document.querySelector("{s}");
+            if (!el) return "error: not found";
+            if (el.type !== 'checkbox' && el.type !== 'radio') return "error: not checkable";
+            if (!el.checked) {{
+                el.checked = true;
+                el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+            }}
+            return "ok";
+        }})()"#,
+        s = js_string(selector)
+    )
+}
+
+/// Set a checkbox's `checked` to false and dispatch `change`.
+/// (Radio buttons can only be deselected by selecting another radio in
+/// the same group, so this is a no-op for `<input type="radio">`.)
+pub fn uncheck_by_selector(selector: &str) -> String {
+    format!(
+        r#"(function() {{
+            const el = document.querySelector("{s}");
+            if (!el) return "error: not found";
+            if (el.type !== 'checkbox') return "error: not a checkbox";
+            if (el.checked) {{
+                el.checked = false;
+                el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+            }}
+            return "ok";
+        }})()"#,
+        s = js_string(selector)
+    )
+}
+
+/// Return `"true"` / `"false"` depending on whether the element matched
+/// by `selector` is visible (size > 0, not display:none / visibility:
+/// hidden / opacity:0). Returns `"error: not found"` when the selector
+/// matches nothing.
+pub fn is_visible_selector(selector: &str) -> String {
+    format!(
+        r#"(function() {{
+            const el = document.querySelector("{s}");
+            if (!el) return "error: not found";
+            const r = el.getBoundingClientRect();
+            if (r.width < 1 || r.height < 1) return "false";
+            const cs = window.getComputedStyle(el);
+            if (cs.visibility === 'hidden' || cs.display === 'none') return "false";
+            if (Number(cs.opacity) === 0) return "false";
+            return "true";
+        }})()"#,
+        s = js_string(selector)
+    )
+}
+
+/// Return `"true"` / `"false"` depending on whether the element matched
+/// by `selector` is *not* `disabled`.
+pub fn is_enabled_selector(selector: &str) -> String {
+    format!(
+        r#"(function() {{
+            const el = document.querySelector("{s}");
+            if (!el) return "error: not found";
+            return (el.disabled === true) ? "false" : "true";
+        }})()"#,
+        s = js_string(selector)
+    )
+}
+
+/// Return `"true"` / `"false"` depending on whether the element matched
+/// by `selector` (a checkbox or radio) is checked.
+pub fn is_checked_selector(selector: &str) -> String {
+    format!(
+        r#"(function() {{
+            const el = document.querySelector("{s}");
+            if (!el) return "error: not found";
+            return (el.checked === true) ? "true" : "false";
+        }})()"#,
+        s = js_string(selector)
+    )
+}
+
+/// Return the integer count of elements matching `selector`. The CLI
+/// stringifies the result (e.g. `"3"`) so a single string ack channel
+/// can carry both int and bool results uniformly.
+pub fn count_selector(selector: &str) -> String {
+    format!(
+        r#"(function() {{
+            return String(document.querySelectorAll("{s}").length);
+        }})()"#,
+        s = js_string(selector)
+    )
+}
+
 /// Send a single named key (`Enter`, `Tab`, `ArrowDown`, …) as a
 /// `keydown`+`keyup` pair to the active element.
 pub fn press_key(key: &str) -> String {
@@ -495,5 +644,93 @@ mod tests {
         // U+2028 / U+2029 break JS string literals if not escaped.
         assert_eq!(js_string("\u{2028}"), "\\u2028");
         assert_eq!(js_string("\u{2029}"), "\\u2029");
+    }
+
+    // ----- Phase 5 P0 actions ----------------------------------------
+
+    #[test]
+    fn dblclick_dispatches_dblclick_event() {
+        let s = dblclick_by_selector("button.go");
+        assert!(s.contains("'dblclick'"));
+        assert!(s.contains("MouseEvent"));
+        assert_balanced(&s);
+    }
+
+    #[test]
+    fn hover_dispatches_mouseenter_and_mouseover() {
+        let s = hover_by_selector("a.menu");
+        assert!(s.contains("'mouseenter'"));
+        assert!(s.contains("'mouseover'"));
+        assert_balanced(&s);
+    }
+
+    #[test]
+    fn focus_calls_dom_focus() {
+        let s = focus_by_selector("input");
+        assert!(s.contains("el.focus()"));
+        // Guard against non-focusable elements — keeps the action's
+        // soft-failure shape consistent with the rest of the family.
+        assert!(s.contains("not focusable"));
+        assert_balanced(&s);
+    }
+
+    #[test]
+    fn blur_calls_dom_blur() {
+        let s = blur_by_selector("input");
+        assert!(s.contains("el.blur()"));
+        assert_balanced(&s);
+    }
+
+    #[test]
+    fn check_dispatches_change_only_when_state_flips() {
+        let s = check_by_selector("input.agree");
+        // Avoid a redundant `change` event — frameworks (Vue/React)
+        // hate unnecessary noise. The action only mutates + dispatches
+        // when the element is currently unchecked.
+        assert!(s.contains("if (!el.checked)"));
+        assert!(s.contains("'change'"));
+        assert!(s.contains("el.checked = true"));
+        assert_balanced(&s);
+    }
+
+    #[test]
+    fn uncheck_rejects_radios() {
+        let s = uncheck_by_selector("input.agree");
+        // Radios cannot be unchecked individually — must select
+        // another radio in the same group. The script returns
+        // "error: not a checkbox" rather than silently accepting.
+        assert!(s.contains("not a checkbox"));
+        assert_balanced(&s);
+    }
+
+    #[test]
+    fn is_visible_short_circuits_on_zero_size() {
+        let s = is_visible_selector(".thing");
+        assert!(s.contains("getBoundingClientRect"));
+        assert!(s.contains("'hidden'"));
+        assert!(s.contains("'none'"));
+        assert_balanced(&s);
+    }
+
+    #[test]
+    fn is_enabled_inverts_disabled_attr() {
+        let s = is_enabled_selector("button");
+        assert!(s.contains("el.disabled === true"));
+        assert_balanced(&s);
+    }
+
+    #[test]
+    fn is_checked_returns_bool_string() {
+        let s = is_checked_selector("input.agree");
+        assert!(s.contains("el.checked === true"));
+        assert_balanced(&s);
+    }
+
+    #[test]
+    fn count_returns_querySelectorAll_length_as_string() {
+        let s = count_selector("a");
+        assert!(s.contains("querySelectorAll"));
+        assert!(s.contains("String("));
+        assert_balanced(&s);
     }
 }

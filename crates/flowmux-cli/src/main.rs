@@ -187,6 +187,29 @@ enum Cmd {
         name: String,
     },
 
+    // ---- Phase 5 P0 action gap ------------------------
+    /// Double-click an element by its ref id.
+    BrowserDblClick { pane: PaneId, target: String },
+    /// Hover over an element (mouseenter + mouseover).
+    BrowserHover { pane: PaneId, target: String },
+    /// Focus an element (`HTMLElement.focus()`).
+    BrowserFocus { pane: PaneId, target: String },
+    /// Blur an element (`HTMLElement.blur()`).
+    BrowserBlur { pane: PaneId, target: String },
+    /// Check a checkbox or radio (no-op when already checked).
+    BrowserCheck { pane: PaneId, target: String },
+    /// Uncheck a checkbox (radios cannot be unchecked individually).
+    BrowserUncheck { pane: PaneId, target: String },
+    /// Print `true` / `false` for whether an element is currently
+    /// rendered (size > 0, not display:none, opacity > 0).
+    BrowserIsVisible { pane: PaneId, target: String },
+    /// Print `true` / `false` for whether `el.disabled === false`.
+    BrowserIsEnabled { pane: PaneId, target: String },
+    /// Print `true` / `false` for `el.checked` of a checkbox/radio.
+    BrowserIsChecked { pane: PaneId, target: String },
+    /// Print the number of elements matching a CSS selector.
+    BrowserCount { pane: PaneId, selector: String },
+
     /// Import cookies from a host browser into the in-app browser jar.
     ImportCookies {
         /// Browser slug: firefox, chrome, chromium, brave, edge, arc.
@@ -408,6 +431,18 @@ fn build_request(cmd: Cmd) -> anyhow::Result<Request> {
         Cmd::BrowserText { pane, target } => Request::BrowserText { pane, target },
         Cmd::BrowserValue { pane, target } => Request::BrowserValue { pane, target },
         Cmd::BrowserAttr { pane, target, name } => Request::BrowserAttr { pane, target, name },
+
+        Cmd::BrowserDblClick { pane, target } => Request::BrowserDblClick { pane, target },
+        Cmd::BrowserHover { pane, target } => Request::BrowserHover { pane, target },
+        Cmd::BrowserFocus { pane, target } => Request::BrowserFocus { pane, target },
+        Cmd::BrowserBlur { pane, target } => Request::BrowserBlur { pane, target },
+        Cmd::BrowserCheck { pane, target } => Request::BrowserCheck { pane, target },
+        Cmd::BrowserUncheck { pane, target } => Request::BrowserUncheck { pane, target },
+        Cmd::BrowserIsVisible { pane, target } => Request::BrowserIsVisible { pane, target },
+        Cmd::BrowserIsEnabled { pane, target } => Request::BrowserIsEnabled { pane, target },
+        Cmd::BrowserIsChecked { pane, target } => Request::BrowserIsChecked { pane, target },
+        Cmd::BrowserCount { pane, selector } => Request::BrowserCount { pane, selector },
+
         Cmd::ImportCookies { from, domain } => Request::ImportCookies {
             source: from,
             domain,

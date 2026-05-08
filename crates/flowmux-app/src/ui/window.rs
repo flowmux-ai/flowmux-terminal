@@ -1282,6 +1282,115 @@ impl WindowController {
                             let _ = ack.send(Err(e));
                         }
                     },
+
+                    // ---- Phase 5 P0 action gap ------------------------
+                    BrowserOp::DblClick { target } => match resolve_ref(&browser, &target) {
+                        Ok(sel) => run_browser_js(
+                            &browser,
+                            &flowmux_browser::scripts::dblclick_by_selector(&sel),
+                            ack,
+                            true,
+                        ),
+                        Err(e) => {
+                            let _ = ack.send(Err(e));
+                        }
+                    },
+                    BrowserOp::Hover { target } => match resolve_ref(&browser, &target) {
+                        Ok(sel) => run_browser_js(
+                            &browser,
+                            &flowmux_browser::scripts::hover_by_selector(&sel),
+                            ack,
+                            true,
+                        ),
+                        Err(e) => {
+                            let _ = ack.send(Err(e));
+                        }
+                    },
+                    BrowserOp::Focus { target } => match resolve_ref(&browser, &target) {
+                        Ok(sel) => run_browser_js(
+                            &browser,
+                            &flowmux_browser::scripts::focus_by_selector(&sel),
+                            ack,
+                            true,
+                        ),
+                        Err(e) => {
+                            let _ = ack.send(Err(e));
+                        }
+                    },
+                    BrowserOp::Blur { target } => match resolve_ref(&browser, &target) {
+                        Ok(sel) => run_browser_js(
+                            &browser,
+                            &flowmux_browser::scripts::blur_by_selector(&sel),
+                            ack,
+                            true,
+                        ),
+                        Err(e) => {
+                            let _ = ack.send(Err(e));
+                        }
+                    },
+                    BrowserOp::Check { target } => match resolve_ref(&browser, &target) {
+                        Ok(sel) => run_browser_js(
+                            &browser,
+                            &flowmux_browser::scripts::check_by_selector(&sel),
+                            ack,
+                            true,
+                        ),
+                        Err(e) => {
+                            let _ = ack.send(Err(e));
+                        }
+                    },
+                    BrowserOp::Uncheck { target } => match resolve_ref(&browser, &target) {
+                        Ok(sel) => run_browser_js(
+                            &browser,
+                            &flowmux_browser::scripts::uncheck_by_selector(&sel),
+                            ack,
+                            true,
+                        ),
+                        Err(e) => {
+                            let _ = ack.send(Err(e));
+                        }
+                    },
+                    BrowserOp::IsVisible { target } => match resolve_ref(&browser, &target) {
+                        Ok(sel) => run_browser_js_bool(
+                            &browser,
+                            &flowmux_browser::scripts::is_visible_selector(&sel),
+                            ack,
+                        ),
+                        Err(e) => {
+                            let _ = ack.send(Err(e));
+                        }
+                    },
+                    BrowserOp::IsEnabled { target } => match resolve_ref(&browser, &target) {
+                        Ok(sel) => run_browser_js_bool(
+                            &browser,
+                            &flowmux_browser::scripts::is_enabled_selector(&sel),
+                            ack,
+                        ),
+                        Err(e) => {
+                            let _ = ack.send(Err(e));
+                        }
+                    },
+                    BrowserOp::IsChecked { target } => match resolve_ref(&browser, &target) {
+                        Ok(sel) => run_browser_js_bool(
+                            &browser,
+                            &flowmux_browser::scripts::is_checked_selector(&sel),
+                            ack,
+                        ),
+                        Err(e) => {
+                            let _ = ack.send(Err(e));
+                        }
+                    },
+                    BrowserOp::Count { selector } => {
+                        // Count takes a raw selector (not a ref) — the
+                        // agent might want to know how many `.row`
+                        // elements exist before navigating into them.
+                        run_browser_js(
+                            &browser,
+                            &flowmux_browser::scripts::count_selector(&selector),
+                            ack,
+                            false,
+                        );
+                    }
                 }
             }
             GtkCommand::BrowserOpenSplit {
@@ -1998,6 +2107,29 @@ fn update_ref_store_from_snapshot(
     for (token, meta) in snap.refs {
         store.insert(scope, token, meta.selector);
     }
+}
+
+/// Like [`run_browser_js`] but expects the page to evaluate to
+/// the literal `"true"` or `"false"`, mapping them to
+/// `BrowserActionResult::Bool`. Anything else surfaces as an error
+/// (e.g. `"error: not found"` keeps its message).
+fn run_browser_js_bool(
+    browser: &crate::ui::browser_pane::BrowserPane,
+    js: &str,
+    ack: tokio::sync::oneshot::Sender<Result<BrowserActionResult, String>>,
+) {
+    let cell = std::cell::Cell::new(Some(ack));
+    browser.evaluate_js(js, move |result| {
+        if let Some(ack) = cell.take() {
+            let mapped = match result {
+                Ok(s) if s == "true" => Ok(BrowserActionResult::Bool(true)),
+                Ok(s) if s == "false" => Ok(BrowserActionResult::Bool(false)),
+                Ok(other) => Err(other),
+                Err(e) => Err(e),
+            };
+            let _ = ack.send(mapped);
+        }
+    });
 }
 
 fn run_browser_js(

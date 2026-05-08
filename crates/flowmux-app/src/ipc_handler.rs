@@ -183,6 +183,39 @@ impl Handler for GuiHandler {
                 Request::BrowserAttr { pane, target, name } => {
                     browser_action(&self.bridge, pane, BrowserOp::Attr { target, name }).await
                 }
+
+                // ---- Phase 5 P0 action gap ------------------------
+                Request::BrowserDblClick { pane, target } => {
+                    browser_action(&self.bridge, pane, BrowserOp::DblClick { target }).await
+                }
+                Request::BrowserHover { pane, target } => {
+                    browser_action(&self.bridge, pane, BrowserOp::Hover { target }).await
+                }
+                Request::BrowserFocus { pane, target } => {
+                    browser_action(&self.bridge, pane, BrowserOp::Focus { target }).await
+                }
+                Request::BrowserBlur { pane, target } => {
+                    browser_action(&self.bridge, pane, BrowserOp::Blur { target }).await
+                }
+                Request::BrowserCheck { pane, target } => {
+                    browser_action(&self.bridge, pane, BrowserOp::Check { target }).await
+                }
+                Request::BrowserUncheck { pane, target } => {
+                    browser_action(&self.bridge, pane, BrowserOp::Uncheck { target }).await
+                }
+                Request::BrowserIsVisible { pane, target } => {
+                    browser_action(&self.bridge, pane, BrowserOp::IsVisible { target }).await
+                }
+                Request::BrowserIsEnabled { pane, target } => {
+                    browser_action(&self.bridge, pane, BrowserOp::IsEnabled { target }).await
+                }
+                Request::BrowserIsChecked { pane, target } => {
+                    browser_action(&self.bridge, pane, BrowserOp::IsChecked { target }).await
+                }
+                Request::BrowserCount { pane, selector } => {
+                    browser_action(&self.bridge, pane, BrowserOp::Count { selector }).await
+                }
+
                 Request::ClaudeTeams { count, args, root } => {
                     let count = count.max(1).min(8);
                     let store = self.inner.store();
