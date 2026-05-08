@@ -100,6 +100,12 @@ impl BrowserPane {
             settings.set_enable_mediasource(true);
             settings.set_enable_encrypted_media(true);
             settings.set_enable_webaudio(true);
+            // Always로 전 페이지 GPU 가속을 유지. 종료 시
+            // `eglDestroySync` 부재 / `corrupted size vs. prev_size`
+            // race는 main.rs의 `WEBKIT_DISABLE_DMABUF_RENDERER=1`로
+            // DMA-BUF renderer를 꺼서 차단한다 — webkit6 0.4 바인딩
+            // 에는 ON_DEMAND가 없고 Always / Never 둘만 노출되므로
+            // Never로 가면 동영상 가속까지 잃는다.
             settings.set_hardware_acceleration_policy(
                 webkit6::HardwareAccelerationPolicy::Always,
             );

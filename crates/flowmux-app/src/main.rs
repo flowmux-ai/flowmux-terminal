@@ -42,6 +42,16 @@ fn main() -> anyhow::Result<()> {
         std::env::set_var("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS", "1");
     }
 
+    // WebKitGTK 6.0의 새 DMA-BUF renderer는 Mesa Wayland 환경에서 종료
+    // 시 `eglDestroySync` 부재 + 후속 `corrupted size vs. prev_size`
+    // glibc abort를 일으키는 race가 알려져 있다 (libepoxy가 EGL 1.5
+    // 또는 EGL_KHR_fence_sync를 못 찾을 때 NULL deref). 사용자가 별도로
+    // 값을 지정하지 않은 경우 DMA-BUF renderer를 끄는 게 가장 안전한
+    // 기본값이다 — 그래픽 품질 손실 없이 종료 cleanup만 단순해진다.
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+
     let socket = paths::runtime_socket();
     info!(?socket, "flowmux-app starting");
 
