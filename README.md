@@ -2,9 +2,12 @@
 
 **Agent Workflow Multiplexer** — *Go with the agents' flow.*
 
-<img width="1518" height="837" alt="image" src="https://github.com/user-attachments/assets/ccc5992e-4b6c-44a5-b4b1-ea3cc4c7c42c" />
+<img width="1429" height="929" alt="Screenshot from 2026-05-08 23-14-40" src="https://github.com/user-attachments/assets/9d35cbea-327d-4558-a4bc-a4853fcfb22d" />
 
-A cmux-inspired terminal for AI agent workflows, browser control, and task signals.
+
+
+
+### A cmux-inspired terminal for AI agent workflows, browser control, and task signals.
 
 flowmux is a Linux/GTK4 terminal with vertical tabs and notifications for AI coding agents.
 
