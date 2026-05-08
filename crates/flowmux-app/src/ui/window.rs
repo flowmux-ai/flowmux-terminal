@@ -501,8 +501,10 @@ impl WindowController {
         let registry = self.pane_registry.clone();
         glib::idle_add_local_once(move || {
             let r = registry.borrow();
-            if let Some(pane) = r.active_terminal(leaf_id) {
-                pane.widget.grab_focus();
+            if let Some(term) = r.active_terminal(leaf_id) {
+                term.widget.grab_focus();
+            } else if let Some(browser) = r.active_browser(leaf_id) {
+                browser.web_view.grab_focus();
             }
         });
     }
@@ -589,12 +591,16 @@ impl WindowController {
                         )
                         .await;
                         // 새 pane으로 키보드 포커스를 옮긴다 — incremental
-                        // 경로든 rerender 폴백 경로든 동일하게 동작.
+                        // 경로든 rerender 폴백 경로든 동일하게 동작. split이
+                        // 탭브라우저로 만들어진 경우(BrowserOpenSplit 경로)
+                        // 에도 web_view에 포커스가 가도록 양쪽 모두 처리.
                         let registry = self.pane_registry.clone();
                         glib::idle_add_local_once(move || {
                             let r = registry.borrow();
-                            if let Some(pane) = r.active_terminal(new_pane) {
-                                pane.widget.grab_focus();
+                            if let Some(term) = r.active_terminal(new_pane) {
+                                term.widget.grab_focus();
+                            } else if let Some(browser) = r.active_browser(new_pane) {
+                                browser.web_view.grab_focus();
                             }
                         });
                         let _ = ack.send(Ok(new_pane));
@@ -909,7 +915,15 @@ impl WindowController {
             }
             GtkCommand::ShowRenameDialog { id } => {
                 if let Some(ws) = self.store.get_workspace(id).await {
-                    show_rename_dialog(&self.window, id, &ws.name, self.bridge.clone());
+                    // 프리필은 cmux와 동일 — custom_title이 있으면 그 값으로
+                    // 시작해 사용자가 부분 수정할 수 있게 하고, 없으면
+                    // 현재 표시 중인 자동 이름(`name`)을 보여 준다.
+                    let prefill = ws
+                        .custom_title
+                        .as_deref()
+                        .unwrap_or(&ws.name)
+                        .to_string();
+                    show_rename_dialog(&self.window, id, &prefill, self.bridge.clone());
                 }
             }
             GtkCommand::ShowColorDialog { id } => {
@@ -1180,8 +1194,15 @@ impl WindowController {
         }
         let _ = Rect::new(0.0, 0.0, 0.0, 0.0); // ensure import used in non-tests path
         if let Some((id, _)) = best {
-            if let Some(pane) = registry.active_terminal(id) {
-                pane.widget.grab_focus();
+            // 타깃 pane의 활성 탭이 탭브라우저인 경우 web_view로 포커스를
+            // 옮긴다. 이전에는 active_terminal만 시도해 탭브라우저 pane은
+            // Alt+화살표로 이동이 안 됐다.
+            if let Some(term) = registry.active_terminal(id) {
+                term.widget.grab_focus();
+            } else if let Some(browser) = registry.active_browser(id) {
+                browser.web_view.grab_focus();
+            } else {
+                tracing::debug!(target_pane = %id, "no active surface to focus");
             }
         } else {
             tracing::debug!(?dir, "no pane in that direction");
@@ -1508,7 +1529,12 @@ fn register_workspace_actions(
                 let Some(window) = window_weak.upgrade() else {
                     return;
                 };
-                show_rename_dialog(&window, id, &ws.name, bridge);
+                let prefill = ws
+                    .custom_title
+                    .as_deref()
+                    .unwrap_or(&ws.name)
+                    .to_string();
+                show_rename_dialog(&window, id, &prefill, bridge);
             });
         })
         .build();
@@ -1574,7 +1600,10 @@ fn show_rename_dialog(
     current_name: &str,
     bridge: Bridge,
 ) {
-    let dialog = adw::AlertDialog::new(Some("Rename Tab"), None);
+    let dialog = adw::AlertDialog::new(
+        Some("Rename Tab"),
+        Some("비어 있는 채로 OK 하면 자동 모드로 되돌아갑니다."),
+    );
     let entry = gtk::Entry::new();
     entry.set_text(current_name);
     entry.set_activates_default(true);
@@ -1589,21 +1618,23 @@ fn show_rename_dialog(
     let entry_for_resp = entry.clone();
     dialog.connect_response(None, move |dialog, response| {
         if response == "ok" {
+            // cmux와 동일 — 빈 입력 / 공백만 있는 입력도 그대로 daemon에
+            // 전달해 custom_title을 None으로 되돌리는 신호로 쓴다.
+            // daemon::rename_workspace가 trim 후 의미 없는 입력을 자동
+            // 모드 복귀로 해석한다.
             let new_name = entry_for_resp.text().to_string();
-            if !new_name.trim().is_empty() {
-                let bridge = bridge.clone();
-                glib::MainContext::default().spawn_local(async move {
-                    let (tx, _rx) = oneshot::channel();
-                    let _ = bridge
-                        .tx
-                        .send(GtkCommand::RenameWorkspace {
-                            id,
-                            name: new_name,
-                            ack: tx,
-                        })
-                        .await;
-                });
-            }
+            let bridge = bridge.clone();
+            glib::MainContext::default().spawn_local(async move {
+                let (tx, _rx) = oneshot::channel();
+                let _ = bridge
+                    .tx
+                    .send(GtkCommand::RenameWorkspace {
+                        id,
+                        name: new_name,
+                        ack: tx,
+                    })
+                    .await;
+            });
         }
         dialog.close();
     });

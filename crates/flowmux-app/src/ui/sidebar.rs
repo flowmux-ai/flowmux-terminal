@@ -652,12 +652,12 @@ fn color_bar(color: &str) -> gtk::Widget {
 
 fn build_meta_column(ws: &Workspace) -> gtk::Box {
     // Two-line layout:
-    //   line 1: workspace name (bold heading)
+    //   line 1: workspace display title (custom_title 있으면 그것, 없으면 name)
     //   line 2: last folder name [+ " / branch" if a git repo]  (dim caption)
     // Optional 3rd line: linked PR badge / listening ports if present.
     let v = gtk::Box::new(gtk::Orientation::Vertical, 1);
 
-    let title = gtk::Label::new(Some(&ws.name));
+    let title = gtk::Label::new(Some(ws.display_title()));
     title.set_halign(gtk::Align::Start);
     title.set_ellipsize(gtk::pango::EllipsizeMode::End);
     title.set_xalign(0.0);

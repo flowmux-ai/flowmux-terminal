@@ -122,7 +122,18 @@ pub use id::{NotificationId, PaneId, SurfaceId, WorkspaceId};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workspace {
     pub id: WorkspaceId,
+    /// 자동 결정되는 워크스페이스 네임. 워크스페이스 생성 시 root_dir의
+    /// 마지막 폴더 이름으로 시작하고, daemon 측 자동 갱신 신호
+    /// (예: PTY OSC, cwd 변경)로 갱신될 수 있다. cmux의 `processTitle`에
+    /// 대응 — 사용자 의도가 아니라 시스템이 마지막으로 관찰한 값이다.
     pub name: String,
+    /// 사용자가 우클릭 메뉴 → "Change tab name"으로 직접 입력한 이름.
+    /// `None`이면 자동 모드(즉, `name`을 표시)이고, 빈 문자열로 다시 저장
+    /// 요청하면 `None`으로 되돌아가 자동 모드로 복귀한다 (cmux의
+    /// `customTitle: String?`과 동일 시맨틱). 사이드 패널에 표시되는 최종
+    /// 이름은 [`Workspace::display_title`]가 계산.
+    #[serde(default)]
+    pub custom_title: Option<String>,
     pub root_dir: PathBuf,
     /// Resolved when the workspace's root_dir is a git checkout.
     pub git: Option<GitInfo>,
@@ -136,6 +147,18 @@ pub struct Workspace {
     /// the daemon assigns a default on creation.
     #[serde(default)]
     pub color: Option<String>,
+}
+
+impl Workspace {
+    /// 사이드 패널 / 윈도우 타이틀에 표시할 최종 이름. 사용자가 직접
+    /// 지정한 [`Workspace::custom_title`]이 있으면 그 값, 없으면 자동
+    /// 결정된 [`Workspace::name`]을 그대로 돌려준다.
+    pub fn display_title(&self) -> &str {
+        self.custom_title
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&self.name)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1866,6 +1889,7 @@ mod tests {
         let ws = Workspace {
             id: WorkspaceId::new(),
             name: "demo".into(),
+            custom_title: None,
             root_dir: PathBuf::from("/tmp/demo"),
             git: None,
             listening_ports: vec![3000, 5173],
@@ -1886,5 +1910,74 @@ mod tests {
         let s = serde_json::to_string(&ws).unwrap();
         let back: Workspace = serde_json::from_str(&s).unwrap();
         assert_eq!(back.name, ws.name);
+        assert_eq!(back.custom_title, None);
+    }
+
+    #[test]
+    fn display_title_falls_back_to_name_when_custom_unset() {
+        let ws = Workspace {
+            id: WorkspaceId::new(),
+            name: "auto".into(),
+            custom_title: None,
+            root_dir: PathBuf::from("/tmp/auto"),
+            git: None,
+            listening_ports: vec![],
+            surfaces: vec![],
+            color: None,
+        };
+        assert_eq!(ws.display_title(), "auto");
+    }
+
+    #[test]
+    fn display_title_prefers_custom_title_when_set() {
+        let mut ws = Workspace {
+            id: WorkspaceId::new(),
+            name: "auto".into(),
+            custom_title: Some("My Project".into()),
+            root_dir: PathBuf::from("/tmp/auto"),
+            git: None,
+            listening_ports: vec![],
+            surfaces: vec![],
+            color: None,
+        };
+        assert_eq!(ws.display_title(), "My Project");
+
+        // 자동 갱신으로 name이 바뀌어도 custom_title이 우선.
+        ws.name = "updated-auto".into();
+        assert_eq!(ws.display_title(), "My Project");
+    }
+
+    #[test]
+    fn display_title_treats_empty_custom_as_unset() {
+        // 방어: 어떤 경로로 빈 문자열이 저장되더라도 표시는 자동 모드.
+        let ws = Workspace {
+            id: WorkspaceId::new(),
+            name: "auto".into(),
+            custom_title: Some("".into()),
+            root_dir: PathBuf::from("/tmp/auto"),
+            git: None,
+            listening_ports: vec![],
+            surfaces: vec![],
+            color: None,
+        };
+        assert_eq!(ws.display_title(), "auto");
+    }
+
+    #[test]
+    fn workspace_loads_legacy_state_without_custom_title() {
+        // 이전 버전 state.json은 custom_title 필드가 없다.
+        // #[serde(default)] 덕에 None으로 로드되어야 한다.
+        let json = r#"{
+            "id": "00000000-0000-0000-0000-000000000001",
+            "name": "old-project",
+            "root_dir": "/tmp/old",
+            "git": null,
+            "surfaces": [],
+            "color": null
+        }"#;
+        let ws: Workspace = serde_json::from_str(json).unwrap();
+        assert_eq!(ws.name, "old-project");
+        assert_eq!(ws.custom_title, None);
+        assert_eq!(ws.display_title(), "old-project");
     }
 }

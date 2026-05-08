@@ -104,14 +104,19 @@ impl StateStore {
         let surface_id = SurfaceId::new();
         let pane_id = PaneId::new();
         let tab_title = terminal_tab_title_for_cwd(Some(&root));
+        // 호출자가 명시한 name이 있어도 그것은 자동 결정값(name)으로 둔다.
+        // cmux 시맨틱: customTitle은 사용자가 직접 rename 했을 때만 채워지고,
+        // 새로 만들 때는 항상 None으로 시작해 자동 모드를 유지한다.
+        let auto_name = name.unwrap_or_else(|| {
+            root.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("workspace")
+                .to_string()
+        });
         let ws = Workspace {
             id,
-            name: name.unwrap_or_else(|| {
-                root.file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("workspace")
-                    .to_string()
-            }),
+            name: auto_name,
+            custom_title: None,
             root_dir: root.clone(),
             git: None,
             listening_ports: vec![],
@@ -313,19 +318,34 @@ impl StateStore {
         updated
     }
 
-    /// Rename a workspace. Returns true on success.
-    pub async fn rename_workspace(&self, id: WorkspaceId, name: String) -> bool {
+    /// 사용자가 우클릭 메뉴 → "Change tab name" 다이얼로그에서 입력한
+    /// 값을 워크스페이스에 적용한다. cmux의 `setCustomTitle`과 동일하게
+    /// 동작한다:
+    ///   * 입력을 양 끝 공백 기준 trim 한 결과가 비어 있으면
+    ///     `custom_title = None`으로 되돌려 자동 모드 (= `name`을 표시)
+    ///     로 복귀한다.
+    ///   * 비어 있지 않으면 `custom_title = Some(trimmed)`로 저장한다.
+    /// 자동 결정값인 `name`은 어떤 경우에도 직접 건드리지 않는다 — 자동
+    /// 갱신 신호(folder rename, OSC, …)가 따로 갱신할 수 있도록.
+    /// 매칭되는 워크스페이스가 없거나 변경이 없으면 `false` 반환.
+    pub async fn rename_workspace(&self, id: WorkspaceId, raw_input: String) -> bool {
+        let trimmed = raw_input.trim();
+        let new_custom = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
         let mut s = self.inner.lock().await;
-        let mut renamed = false;
-        if let Some(w) = s.workspaces.iter_mut().find(|w| w.id == id) {
-            w.name = name;
-            renamed = true;
+        let Some(w) = s.workspaces.iter_mut().find(|w| w.id == id) else {
+            return false;
+        };
+        if w.custom_title == new_custom {
+            return false;
         }
+        w.custom_title = new_custom;
         drop(s);
-        if renamed {
-            self.mark_dirty();
-        }
-        renamed
+        self.mark_dirty();
+        true
     }
 
     pub async fn surface_title(&self, pane: PaneId, surface_id: SurfaceId) -> Option<String> {
@@ -946,6 +966,7 @@ mod tests {
             .await;
         let missing = WorkspaceId::new();
 
+        // rename은 cmux 시맨틱 — name은 자동값으로 그대로 두고 custom_title만 갱신.
         assert!(store.rename_workspace(ws_id, "new".into()).await);
         assert!(store.set_workspace_color(ws_id, "#112233".into()).await);
         assert!(!store.rename_workspace(missing, "missing".into()).await);
@@ -953,9 +974,67 @@ mod tests {
         store.set_active_workspace(Some(missing)).await;
 
         let ws = store.get_workspace(ws_id).await.unwrap();
-        assert_eq!(ws.name, "new");
+        assert_eq!(ws.name, "old");
+        assert_eq!(ws.custom_title.as_deref(), Some("new"));
+        assert_eq!(ws.display_title(), "new");
         assert_eq!(ws.color.as_deref(), Some("#112233"));
         assert_eq!(store.snapshot().await.active_workspace, Some(ws_id));
+    }
+
+    #[tokio::test]
+    async fn rename_workspace_clears_custom_title_on_empty_input() {
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("auto".into()), std::path::PathBuf::from("/tmp/auto"))
+            .await;
+
+        // 사용자 rename → custom_title 채워짐.
+        assert!(store.rename_workspace(ws_id, "MyName".into()).await);
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        assert_eq!(ws.custom_title.as_deref(), Some("MyName"));
+        assert_eq!(ws.display_title(), "MyName");
+
+        // 빈 입력 → 자동 모드 복귀 (custom_title = None).
+        assert!(store.rename_workspace(ws_id, "".into()).await);
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        assert_eq!(ws.custom_title, None);
+        assert_eq!(ws.display_title(), "auto");
+        assert_eq!(ws.name, "auto");
+
+        // 공백만 있는 입력도 같은 의미.
+        assert!(store.rename_workspace(ws_id, "Custom Again".into()).await);
+        assert!(store.rename_workspace(ws_id, "   \t\n".into()).await);
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        assert_eq!(ws.custom_title, None);
+    }
+
+    #[tokio::test]
+    async fn rename_workspace_trims_whitespace_around_input() {
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("auto".into()), std::path::PathBuf::from("/tmp/auto"))
+            .await;
+        assert!(store
+            .rename_workspace(ws_id, "  Spaced Name  ".into())
+            .await);
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        assert_eq!(ws.custom_title.as_deref(), Some("Spaced Name"));
+    }
+
+    #[tokio::test]
+    async fn rename_workspace_idempotent_for_same_value() {
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("auto".into()), std::path::PathBuf::from("/tmp/auto"))
+            .await;
+        assert!(store.rename_workspace(ws_id, "Same".into()).await);
+        // 같은 값 재입력 → false (변경 없음).
+        assert!(!store.rename_workspace(ws_id, "Same".into()).await);
+        // trim 결과가 같으면 false.
+        assert!(!store.rename_workspace(ws_id, "  Same  ".into()).await);
+        // 빈 입력 두 번도 두 번째는 false.
+        assert!(store.rename_workspace(ws_id, "".into()).await);
+        assert!(!store.rename_workspace(ws_id, "".into()).await);
     }
 
     #[tokio::test]
@@ -967,6 +1046,7 @@ mod tests {
         state.workspaces.push(Workspace {
             id: ws_id,
             name: "legacy".into(),
+            custom_title: None,
             root_dir: "/tmp/legacy".into(),
             git: None,
             listening_ports: vec![],
@@ -1027,6 +1107,7 @@ mod tests {
         state.workspaces.push(Workspace {
             id: ws_id,
             name: "legacy".into(),
+            custom_title: None,
             root_dir: "/tmp/legacy".into(),
             git: None,
             listening_ports: vec![],
@@ -1071,6 +1152,7 @@ mod tests {
         state.workspaces.push(Workspace {
             id: ws_id,
             name: "legacy".into(),
+            custom_title: None,
             root_dir: "/tmp/legacy".into(),
             git: None,
             listening_ports: vec![],

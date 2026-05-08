@@ -128,6 +128,7 @@ mod tests {
         Workspace {
             id: WorkspaceId::new(),
             name: "demo".into(),
+            custom_title: None,
             root_dir: PathBuf::from("/tmp/demo"),
             git: None,
             listening_ports: vec![],
