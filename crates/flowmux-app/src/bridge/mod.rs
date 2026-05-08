@@ -228,6 +228,11 @@ pub enum GtkCommand {
     /// Jump straight to the N-th workspace (1-indexed; clamped to
     /// what currently exists).
     FocusWorkspaceAt { idx: u8 },
+    /// 사이드 패널에서 특정 워크스페이스 행을 클릭(=row-activated)했을 때.
+    /// dispatcher가 activate_workspace로 라우팅해 GtkStack 가시성 + store
+    /// active_workspace + 첫 leaf grab_focus까지 한 흐름으로 처리한다 —
+    /// click과 Alt+숫자/Ctrl+Tab의 워크스페이스 전환 경로를 통일.
+    ActivateWorkspace { id: WorkspaceId },
     /// A notification was raised on a pane (from VTE OSC signal). Update
     /// the pane border / sidebar badge.
     #[allow(dead_code)]

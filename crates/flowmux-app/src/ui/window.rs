@@ -66,17 +66,18 @@ impl WindowController {
 
         let surfaces: Rc<RefCell<HashMap<WorkspaceId, gtk::Widget>>> =
             Rc::new(RefCell::new(HashMap::new()));
-        let surfaces_for_select = surfaces.clone();
-        let stack_for_select = stack.clone();
-        let store_for_select = store.clone();
 
+        // 사이드 패널 행 클릭(row-activated) 핸들러. Alt+숫자/Ctrl+Tab의
+        // 워크스페이스 전환과 동일한 activate_workspace 경로를 타도록
+        // bridge::ActivateWorkspace로 위임 — focused_pane이 이전 워크스페이스의
+        // pane을 그대로 가리켜서 Alt+화살표가 다른 워크스페이스의 pane으로
+        // 새어 나가던 회귀를 막는다. dispatcher가 GtkStack 가시성 + active
+        // workspace + first-leaf grab_focus까지 한 흐름으로 처리.
+        let bridge_for_select = bridge.clone();
         let on_select = move |id: WorkspaceId| {
-            if surfaces_for_select.borrow().contains_key(&id) {
-                stack_for_select.set_visible_child_name(&id.to_string());
-            }
-            let store = store_for_select.clone();
+            let bridge = bridge_for_select.clone();
             glib::MainContext::default().spawn_local(async move {
-                store.set_active_workspace(Some(id)).await;
+                let _ = bridge.tx.send(GtkCommand::ActivateWorkspace { id }).await;
             });
         };
         let bridge_for_close = bridge.clone();
@@ -1074,6 +1075,9 @@ impl WindowController {
                 if let Some(id) = snap.workspace_order.get(target_idx).copied() {
                     self.activate_workspace(id).await;
                 }
+            }
+            GtkCommand::ActivateWorkspace { id } => {
+                self.activate_workspace(id).await;
             }
             GtkCommand::PaneSendKeys { pane, keys, ack } => {
                 let registry = self.pane_registry.borrow();
@@ -2902,5 +2906,83 @@ mod tests {
             Some(first_leaf),
             "focused_pane이 활성 워크스페이스의 첫 leaf로 잡혀야 한다",
         );
+    }
+
+    /// 회귀 방지: 워크스페이스가 두 개 이상 있을 때 사이드 패널에서 두번째
+    /// 워크스페이스를 클릭하고 Alt+화살표를 누르면, 첫번째 워크스페이스에
+    /// 있는 pane에 포커스가 가서 거기서 이동이 시작되던 회귀.
+    ///
+    /// 사이드 패널 클릭(row-activated)은 GtkCommand::ActivateWorkspace로
+    /// 디스패치되어 dispatcher가 activate_workspace를 호출한다. 그 안에서
+    /// focus_first_leaf_of가 idle로 새 워크스페이스의 첫 leaf에 grab_focus
+    /// 하고, 그 grab_focus가 on_focus 콜백을 통해 focused_pane을 새
+    /// 워크스페이스의 pane으로 갱신한다. 이 흐름이 끊기면 focused_pane이
+    /// 이전 워크스페이스의 pane을 가리켜 Alt+화살표가 엉뚱한 곳에서 시작.
+    #[gtk::test]
+    async fn clicking_second_workspace_moves_focus_into_it_so_alt_arrow_stays_there() {
+        adw::init().expect("libadwaita should initialize in GTK test");
+        let root_a = std::env::temp_dir().join("flowmux-ws-click-a");
+        let root_b = std::env::temp_dir().join("flowmux-ws-click-b");
+        std::fs::create_dir_all(&root_a).unwrap();
+        std::fs::create_dir_all(&root_b).unwrap();
+        let store = StateStore::new_lazy(State::default());
+        let ws_a_id = store.create_workspace(Some("a".into()), root_a).await;
+        let ws_b_id = store.create_workspace(Some("b".into()), root_b).await;
+        let ws_a = store.get_workspace(ws_a_id).await.unwrap();
+        let ws_b = store.get_workspace(ws_b_id).await.unwrap();
+        let pane_a = ws_a.surfaces[0].root_pane.first_leaf_id().unwrap();
+        let pane_b = ws_b.surfaces[0].root_pane.first_leaf_id().unwrap();
+
+        let (bridge, _rx) = Bridge::new();
+        let app = adw::Application::builder()
+            .application_id("com.flowmux.App.UiTest.WsClickFocus")
+            .build();
+        app.register(None::<&gtk::gio::Cancellable>).unwrap();
+        let controller = WindowController::new(
+            &app,
+            store.clone(),
+            Arc::new(ResolvedTheme::load()),
+            bridge,
+            gtk::CssProvider::new(),
+        );
+        controller.render_workspace(&ws_a);
+        controller.render_workspace(&ws_b);
+        // 사용자가 처음에 ws_a에서 작업하던 상태 — focused_pane이 ws_a의 pane.
+        controller.focused_pane.set(Some(pane_a));
+        store.set_active_workspace(Some(ws_a_id)).await;
+
+        // 사이드 패널에서 ws_b 행 클릭 → on_select가 GtkCommand::ActivateWorkspace
+        // 를 디스패치한다. 같은 흐름을 직접 디스패치로 흉내.
+        controller
+            .dispatch(GtkCommand::ActivateWorkspace { id: ws_b_id })
+            .await;
+        // activate_workspace의 focus_first_leaf_of가 큐잉한 idle을 비우기
+        // 위해 oneshot으로 idle 한 번을 통과시킨다.
+        let (idle_tx, idle_rx) = oneshot::channel();
+        glib::idle_add_local_once(move || {
+            let _ = idle_tx.send(());
+        });
+        let _ = idle_rx.await;
+
+        assert_eq!(
+            controller.focused_pane.get(),
+            Some(pane_b),
+            "사이드 패널에서 ws_b를 클릭하면 focused_pane이 ws_b의 첫 leaf로 잡혀야 한다 — 이게 안 되면 Alt+화살표가 ws_a로 새어 나간다",
+        );
+
+        // 이 시점에서 Alt+화살표를 눌러도 focus_in_direction의 source가
+        // ws_b의 pane이고, 직전 fix가 후보를 같은 워크스페이스로 좁히므로
+        // ws_a로 새어 나갈 수 없다. 즉 source의 워크스페이스가 ws_b임을
+        // 직접 확인.
+        let r = controller.pane_registry.borrow();
+        assert_eq!(
+            r.workspace_of_pane(controller.focused_pane.get().unwrap()),
+            Some(ws_b_id),
+            "Alt+화살표가 시작할 source pane은 ws_b 소속이어야 한다",
+        );
+        let in_b: std::collections::HashSet<_> =
+            r.pane_ids_in_workspace(ws_b_id).collect();
+        assert!(in_b.contains(&pane_b));
+        assert!(!in_b.contains(&pane_a));
     }
 }
