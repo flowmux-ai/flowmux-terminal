@@ -290,12 +290,17 @@ impl WindowController {
         sibling.unparent();
         frame.unparent();
 
-        // Re-parent `sibling` into the slot `paned` occupied.
-        let grand = paned.parent();
-        paned.unparent();
-
-        let Some(grand) = grand else {
-            // `paned` had no parent — nothing to put `sibling` into.
+        // Re-parent `sibling` into the slot `paned` occupied. Each
+        // grand-parent kind needs its own removal API: a plain
+        // `paned.unparent()` works for `gtk::Paned`, but a
+        // `gtk::Stack` keeps a `GtkStackPage` registered to the
+        // child name. If we unparent the paned without going through
+        // `Stack::remove`, the page entry survives, the subsequent
+        // `add_named` with the same name silently no-ops, and the
+        // workspace renders blank — which the user reported as "the
+        // right X-close drops every pane".
+        let Some(grand) = paned.parent() else {
+            paned.unparent();
             if let Some(ws) = self.store.get_workspace(ws_id).await {
                 self.rerender_workspace(&ws);
             }
@@ -303,9 +308,9 @@ impl WindowController {
         };
 
         if let Some(grand_paned) = grand.downcast_ref::<gtk::Paned>() {
-            // `paned` was inside another `gtk::Paned`. After we
-            // un-parented it, exactly one of grand_paned's slots is
-            // empty — fill it with `sibling`.
+            // Nested split: pop `paned` out of the outer paned and
+            // fill that slot with `sibling`.
+            paned.unparent();
             if grand_paned.start_child().is_none() {
                 grand_paned.set_start_child(Some(&sibling));
             } else if grand_paned.end_child().is_none() {
@@ -320,21 +325,24 @@ impl WindowController {
                 return;
             }
         } else if let Some(stack) = grand.downcast_ref::<gtk::Stack>() {
-            // `paned` was the workspace's top-level child of the
-            // workspace stack. Re-add `sibling` under the same name
-            // and update the surfaces map so workspace switches use
-            // the new top-level widget.
+            // Top-level workspace child of the GtkStack. Use
+            // `Stack::remove` so the GtkStackPage for the old
+            // paned-as-name is freed before we register `sibling`
+            // under the same name.
             let name = ws_id.to_string();
+            stack.remove(&paned);
             stack.add_named(&sibling, Some(&name));
             self.surfaces.borrow_mut().insert(ws_id, sibling.clone());
             stack.set_visible_child_name(&name);
         } else if let Some(b) = grand.downcast_ref::<gtk::Box>() {
+            b.remove(&paned);
             b.append(&sibling);
         } else {
             tracing::warn!(
                 kind = ?grand.type_(),
                 "apply_close_pane_incremental: unexpected grand parent kind; falling back"
             );
+            paned.unparent();
             if let Some(ws) = self.store.get_workspace(ws_id).await {
                 self.rerender_workspace(&ws);
             }
@@ -4088,5 +4096,121 @@ mod tests {
         // The remaining two lines still come from other leaves' terminal cwd.
         assert_eq!(subs[1], ".../flowmux-scn/dev/projectD", "MRU[1] = pane_c");
         assert_eq!(subs[2], ".../flowmux-scn/dev/projectC", "MRU[2] = pane_b");
+    }
+
+    /// Regression: closing the right pane of a side-by-side split (the
+    /// X-button on the right pane's tab) must collapse only that pane
+    /// and leave the surviving left pane visible. The earlier
+    /// implementation called `paned.unparent()` while the workspace
+    /// stack still kept the paned's `GtkStackPage` registered to the
+    /// workspace name, so the subsequent `add_named` of the sibling
+    /// silently no-op'd and the workspace went blank — the user
+    /// reported it as "every pane closed".
+    #[gtk::test]
+    async fn close_right_pane_in_side_by_side_split_keeps_left_pane_visible() {
+        adw::init().expect("libadwaita should initialize in GTK test");
+        let root = std::env::temp_dir().join("flowmux-ui-close-right-pane");
+        std::fs::create_dir_all(&root).unwrap();
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("ui".into()), root.clone())
+            .await;
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        let left = ws.surfaces[0].root_pane.first_leaf_id().unwrap();
+
+        let (bridge, _rx) = Bridge::new();
+        let app = adw::Application::builder()
+            .application_id("com.flowmux.App.UiTest.CloseRightPane")
+            .build();
+        app.register(None::<&gtk::gio::Cancellable>).unwrap();
+        let controller = WindowController::new(
+            &app,
+            store.clone(),
+            Arc::new(ResolvedTheme::load()),
+            bridge,
+            gtk::CssProvider::new(),
+        );
+        controller.render_workspace(&ws);
+
+        // Split the original pane to the right. The new pane is the
+        // right one; `left` keeps its identity / widget instance.
+        let (split_ws, right) = store
+            .split_pane(left, SplitDirection::Vertical)
+            .await
+            .expect("split should succeed");
+        assert_eq!(split_ws, ws_id);
+
+        // Drive the GTK side through the same command path the
+        // SplitFocused keybinding uses, so the workspace ends up with
+        // a real `gtk::Paned` whose two children are the left and
+        // right pane frames — exactly the shape the X-close needs to
+        // collapse.
+        controller
+            .apply_split_incremental_or_rerender(ws_id, left, right, SplitDirection::Vertical)
+            .await;
+
+        {
+            let r = controller.pane_registry.borrow();
+            assert!(r.pane_frame(left).is_some(), "left pane registered");
+            assert!(r.pane_frame(right).is_some(), "right pane registered");
+        }
+
+        // X-button on the right pane → CloseFocused dispatches
+        // close_pane → PaneRemoved → apply_close_pane_incremental_or_rerender.
+        let (ack_tx, ack_rx) = oneshot::channel();
+        controller
+            .dispatch(GtkCommand::CloseFocused {
+                pane: right,
+                ack: ack_tx,
+            })
+            .await;
+        ack_rx.await.unwrap().unwrap();
+
+        // The left pane must still be rendered and the workspace
+        // stack must still have a visible child for this workspace —
+        // the regression manifested as both being absent.
+        {
+            let r = controller.pane_registry.borrow();
+            assert!(
+                r.pane_frame(left).is_some(),
+                "regression: left pane disappeared after closing the right pane"
+            );
+            assert!(
+                r.pane_frame(right).is_none(),
+                "right pane should have been forgotten by PaneRegistry"
+            );
+        }
+
+        let visible = controller.stack.visible_child_name();
+        assert_eq!(
+            visible.map(|n| n.to_string()),
+            Some(ws_id.to_string()),
+            "regression: workspace stack lost its visible child after right-pane close"
+        );
+
+        // The workspace's top-level widget should now be the surviving
+        // left pane's frame, not the old paned (the old paned was
+        // unparented). `surfaces` map carries that pointer.
+        let surfaces = controller.surfaces.borrow();
+        let top = surfaces.get(&ws_id).expect("surfaces map has workspace widget");
+        let left_frame = controller
+            .pane_registry
+            .borrow()
+            .pane_frame(left)
+            .expect("left frame still in registry");
+        assert_eq!(
+            top, &left_frame,
+            "the workspace stack child should be the surviving left pane's frame",
+        );
+
+        // And the daemon-side state agrees: the workspace tree is now
+        // a single leaf rooted at `left`, with no split node above it.
+        let ws_after = store.get_workspace(ws_id).await.unwrap();
+        let leaf_count = {
+            let mut leaves = Vec::new();
+            ws_after.surfaces[0].root_pane.for_each_leaf(|id| leaves.push(id));
+            leaves
+        };
+        assert_eq!(leaf_count, vec![left], "store collapsed the split correctly");
     }
 }
