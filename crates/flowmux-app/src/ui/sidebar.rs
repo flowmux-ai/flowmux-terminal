@@ -369,6 +369,7 @@ fn notification_row(
 ) -> gtk::Widget {
     let row = gtk::ListBoxRow::new();
     row.set_activatable(true);
+    row.set_selectable(false);
 
     let v = gtk::Box::new(gtk::Orientation::Vertical, 2);
     v.set_margin_top(8);
@@ -403,13 +404,42 @@ fn notification_row(
     v.append(&when);
     row.set_child(Some(&v));
 
-    // `row-activated` (rather than a click gesture) so keyboard Enter
-    // on a focused row routes the same way as a mouse click.
     let entry_id = entry.id;
+
+    // A GestureClick on the row's primary button is the only path that
+    // fires regardless of the ListBox's SelectionMode. With
+    // `SelectionMode::None` the ListBox's `row-activated` and the row's
+    // `activate` signals are suppressed, so a previous `connect_activate`
+    // handler never ran and clicks looked dead.
+    let click = gtk::GestureClick::new();
+    click.set_button(gtk::gdk::BUTTON_PRIMARY);
+    let bridge_for_click = bridge.clone();
     let popover_for_click = popover.clone();
-    row.connect_activate(move |_| {
-        let bridge = bridge.clone();
+    click.connect_released(move |gesture, _n_press, _x, _y| {
+        tracing::debug!(%entry_id, "notification row clicked");
+        let bridge = bridge_for_click.clone();
         let popover = popover_for_click.clone();
+        gtk::glib::MainContext::default().spawn_local(async move {
+            if let Err(e) = bridge
+                .tx
+                .send(GtkCommand::OpenNotification { id: entry_id })
+                .await
+            {
+                tracing::warn!(error = %e, "OpenNotification dispatch failed");
+            }
+        });
+        popover.popdown();
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+    });
+    row.add_controller(click);
+
+    // Keyboard parity: Space/Enter on a focused row also routes.
+    let bridge_for_key = bridge.clone();
+    let popover_for_key = popover.clone();
+    row.connect_activate(move |_| {
+        tracing::debug!(%entry_id, "notification row activated by keyboard");
+        let bridge = bridge_for_key.clone();
+        let popover = popover_for_key.clone();
         gtk::glib::MainContext::default().spawn_local(async move {
             let _ = bridge
                 .tx
