@@ -10,35 +10,14 @@
 
 </div>
 
-### A cmux-inspired terminal for AI agent workflows, browser control, and task signals.
+### A terminal for AI agent workflows, browser control, and task signals.
 
 flowmux is a Linux/GTK4 terminal with vertical tabs and notifications for AI coding agents.
 
-flowmux is an unofficial GPL-3.0-or-later Linux reimplementation inspired by
-[cmux](https://github.com/manaflow-ai/cmux), a macOS/AppKit app. It is not
-affiliated with or endorsed by Manaflow. The macOS-specific layers (AppKit,
-Sparkle, WebKit, UserNotifications) are replaced with Linux desktop
-counterparts (GTK4/libadwaita, libnotify/D-Bus, WebKitGTK, vte4 first with
-libghostty planned).
+> A cmux-inspired terminal for AI agent workflows, browser control, and task signals.
+> flowmux is a Linux/GTK4 terminal with tabs and notifications for AI coding agents.
+> flowmux is an unofficial GPL-3.0-or-later Linux reimplementation inspired by cmux, a macOS/AppKit app. It is not affiliated with.
 
-> **Status**: pre-alpha. Workspaces, recursive pane splits, vte4 terminals,
-> WebKitGTK browser tabs, OSC 9/99/777 notifications, the `flowmuxctl` CLI,
-> and claude/codex/opencode lifecycle hooks are working end-to-end. SSH
-> workspaces, libghostty rendering, and remaining cmux features land
-> incrementally.
-
-## Why a separate project
-
-cmux is macOS-only and tightly coupled to AppKit, libghostty's macOS
-embedding, Sparkle, and macOS UserNotifications. A single-codebase port
-across these layers is not realistic, so flowmux ships as its own crate
-workspace that mirrors cmux's domain model and IPC surface so that:
-
-- existing `cmux.json` configs and `cmux <subcommand>` shell scripts
-  largely work unchanged on Linux;
-- each subsystem (terminal, notifications, IPC, browser, config) is an
-  independent crate that can be re-implemented or swapped without
-  touching the rest of the app.
 
 ## Control internal browser
 
