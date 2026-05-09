@@ -76,6 +76,230 @@ pub struct HookInstallReport {
     pub touched_paths: Vec<PathBuf>,
 }
 
+/// Read-only introspection result for `flowmux doctor`. Mirrors the
+/// installer outcomes so the doctor view can report what `flowmux fix`
+/// will (or won't) change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HookCheckStatus {
+    /// Agent home dir is absent. `flowmux fix` will skip this target.
+    NoAgentHome,
+    /// Agent home is present but no flowmux hook entry was found.
+    Missing,
+    /// flowmux hook entries are present and look correct.
+    Installed,
+    /// flowmux hook entries are partially present or stale (e.g.
+    /// a previous install left the marker on disk but the matching
+    /// settings entry is gone). `flowmux fix` re-syncs.
+    Drift,
+    /// Could not read the agent's config (parse error, permission, …).
+    Error(String),
+}
+
+impl HookCheckStatus {
+    pub fn label(&self) -> &'static str {
+        match self {
+            HookCheckStatus::NoAgentHome => "no-agent",
+            HookCheckStatus::Missing => "missing",
+            HookCheckStatus::Installed => "ok",
+            HookCheckStatus::Drift => "drift",
+            HookCheckStatus::Error(_) => "error",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct HookCheckEntry {
+    pub target: HookTarget,
+    pub status: HookCheckStatus,
+    /// Files we inspected — useful for the doctor output and for
+    /// telling the user where `flowmux fix` will write.
+    pub paths: Vec<PathBuf>,
+}
+
+/// Inspect every supported target without touching any file. Safe to
+/// call from `flowmux doctor`.
+pub fn check_all() -> Vec<HookCheckEntry> {
+    HookTarget::ALL.iter().map(|t| check(*t)).collect()
+}
+
+/// Inspect a single target.
+pub fn check(target: HookTarget) -> HookCheckEntry {
+    match target {
+        HookTarget::Claude => check_claude(),
+        HookTarget::Codex => check_codex(),
+        HookTarget::OpenCode => check_opencode(),
+    }
+}
+
+fn check_claude() -> HookCheckEntry {
+    let path = match claude_settings_path() {
+        Some(p) => p,
+        None => return entry(HookTarget::Claude, HookCheckStatus::NoAgentHome, vec![]),
+    };
+    let agent_home_present = path.parent().map(|p| p.exists()).unwrap_or(false);
+    if !agent_home_present {
+        return entry(HookTarget::Claude, HookCheckStatus::NoAgentHome, vec![path]);
+    }
+    if !path.exists() {
+        return entry(HookTarget::Claude, HookCheckStatus::Missing, vec![path]);
+    }
+    let root: Value = match read_json_or_empty_object(&path) {
+        Ok(v) => v,
+        Err(e) => {
+            return entry(
+                HookTarget::Claude,
+                HookCheckStatus::Error(e.to_string()),
+                vec![path],
+            )
+        }
+    };
+    let hooks = root.get("hooks").and_then(|h| h.as_object());
+    let mut owned_events = 0usize;
+    for event in CLAUDE_EVENTS {
+        let arr = hooks
+            .and_then(|h| h.get(event.name))
+            .and_then(|v| v.as_array());
+        if let Some(arr) = arr {
+            if arr.iter().any(claude_entry_is_flowmux_owned) {
+                owned_events += 1;
+            }
+        }
+    }
+    let status = match owned_events {
+        0 => HookCheckStatus::Missing,
+        n if n == CLAUDE_EVENTS.len() => HookCheckStatus::Installed,
+        _ => HookCheckStatus::Drift,
+    };
+    entry(HookTarget::Claude, status, vec![path])
+}
+
+fn check_codex() -> HookCheckEntry {
+    let home = match codex_home() {
+        Some(h) => h,
+        None => return entry(HookTarget::Codex, HookCheckStatus::NoAgentHome, vec![]),
+    };
+    if !home.exists() {
+        return entry(
+            HookTarget::Codex,
+            HookCheckStatus::NoAgentHome,
+            vec![home.join("config.toml")],
+        );
+    }
+    let config_path = home.join("config.toml");
+    if !config_path.exists() {
+        return entry(HookTarget::Codex, HookCheckStatus::Missing, vec![config_path]);
+    }
+    let raw = match fs::read_to_string(&config_path) {
+        Ok(s) => s,
+        Err(e) => {
+            return entry(
+                HookTarget::Codex,
+                HookCheckStatus::Error(e.to_string()),
+                vec![config_path],
+            )
+        }
+    };
+    let doc: toml_edit::DocumentMut = match raw.parse() {
+        Ok(d) => d,
+        Err(e) => {
+            return entry(
+                HookTarget::Codex,
+                HookCheckStatus::Error(e.to_string()),
+                vec![config_path],
+            )
+        }
+    };
+    let notify = doc.get("notify").and_then(|v| v.as_array());
+    let status = match notify {
+        None => HookCheckStatus::Missing,
+        Some(arr) => {
+            let strs: Vec<String> = arr
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+            // Canonical install: ["<bin>", "hooks", "codex", "stop"].
+            // We only require that flowmux's verb chain is in the array
+            // — the bin path may differ between installs.
+            let has_flowmux = strs.iter().any(|s| s.contains("flowmux"));
+            let has_verbs = strs.windows(3).any(|w| {
+                w == ["hooks", "codex", "stop"] || w == ["hooks", "codex", "notification"]
+            });
+            if has_flowmux && has_verbs {
+                HookCheckStatus::Installed
+            } else if has_flowmux || has_verbs {
+                HookCheckStatus::Drift
+            } else {
+                HookCheckStatus::Missing
+            }
+        }
+    };
+    entry(HookTarget::Codex, status, vec![config_path])
+}
+
+fn check_opencode() -> HookCheckEntry {
+    let home = match opencode_home() {
+        Some(h) => h,
+        None => return entry(HookTarget::OpenCode, HookCheckStatus::NoAgentHome, vec![]),
+    };
+    if !home.exists() {
+        return entry(
+            HookTarget::OpenCode,
+            HookCheckStatus::NoAgentHome,
+            vec![home.join("opencode.json")],
+        );
+    }
+    let plugin_path = home.join("plugins").join("flowmux-session.mjs");
+    let opencode_json = home.join("opencode.json");
+    let plugin_ok = plugin_path
+        .exists()
+        .then(|| fs::read_to_string(&plugin_path).ok())
+        .flatten()
+        .map(|s| s.contains(FLOWMUX_OPENCODE_PLUGIN_MARKER))
+        .unwrap_or(false);
+    let registered = if opencode_json.exists() {
+        match read_json_or_empty_object(&opencode_json) {
+            Ok(v) => v
+                .get("plugin")
+                .and_then(|p| p.as_array())
+                .map(|arr| {
+                    arr.iter().any(|p| {
+                        p.as_str()
+                            .map(|s| s.contains("flowmux-session"))
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false),
+            Err(e) => {
+                return entry(
+                    HookTarget::OpenCode,
+                    HookCheckStatus::Error(e.to_string()),
+                    vec![plugin_path, opencode_json],
+                )
+            }
+        }
+    } else {
+        false
+    };
+    let status = match (plugin_ok, registered) {
+        (true, true) => HookCheckStatus::Installed,
+        (false, false) => HookCheckStatus::Missing,
+        _ => HookCheckStatus::Drift,
+    };
+    entry(
+        HookTarget::OpenCode,
+        status,
+        vec![plugin_path, opencode_json],
+    )
+}
+
+fn entry(target: HookTarget, status: HookCheckStatus, paths: Vec<PathBuf>) -> HookCheckEntry {
+    HookCheckEntry {
+        target,
+        status,
+        paths,
+    }
+}
+
 /// Install hooks for a single target. Returns a report; errors are
 /// reserved for genuine I/O / parse failures, not "agent isn't here"
 /// (that maps to `Skipped`).

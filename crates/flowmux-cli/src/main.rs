@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 mod agent;
+mod doctor;
 mod hook_install;
 mod hooks;
 
@@ -237,6 +238,20 @@ enum Cmd {
         #[command(subcommand)]
         op: HooksOp,
     },
+
+    /// Audit every flowmux ↔ host integration in one place: AI-agent
+    /// SKILL files, AI-agent lifecycle hooks (Claude / Codex /
+    /// OpenCode), the in-app browser data dir, host browsers visible
+    /// to the cookie importer, and the daemon socket. Read-only — use
+    /// `flowmux fix` to repair the rows tagged `fix`.
+    Doctor,
+
+    /// Re-install / refresh every flowmux-managed integration the
+    /// `doctor` would flag. Idempotent: a row that's already correct
+    /// is a no-op. Skips agents whose home directory is missing, so
+    /// it's safe to re-run after installing Claude / Codex / OpenCode
+    /// for the first time.
+    Fix,
 }
 
 #[derive(Subcommand)]
@@ -418,6 +433,11 @@ async fn main() -> anyhow::Result<()> {
         // talk to the daemon themselves; `Hooks::Setup`, `Uninstall`,
         // and `Doctor` are pure file edits with no daemon round-trip.
         Cmd::Hooks { op } => return run_hooks_op(op, cli.socket.clone()).await,
+        // `Doctor` and `Fix` are top-level convenience commands that
+        // wrap the per-subsystem doctor/install paths. `Doctor` may
+        // ping the daemon; `Fix` never does.
+        Cmd::Doctor => return run_doctor(cli.socket.clone(), cli.json).await,
+        Cmd::Fix => return run_fix(cli.json),
         _ => {}
     }
 
@@ -596,6 +616,8 @@ fn build_request(cmd: Cmd) -> anyhow::Result<Request> {
         Cmd::Theme { .. } => unreachable!("handled before request build"),
         Cmd::Agent { .. } => unreachable!("handled before request build"),
         Cmd::Hooks { .. } => unreachable!("handled before request build"),
+        Cmd::Doctor => unreachable!("handled before request build"),
+        Cmd::Fix => unreachable!("handled before request build"),
     })
 }
 
@@ -849,6 +871,40 @@ fn run_agent_op(op: &AgentOp, json: bool) -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+/// `flowmux doctor` — render the unified report and exit non-zero
+/// if any row needs the user to do something.
+async fn run_doctor(socket: Option<PathBuf>, json: bool) -> anyhow::Result<()> {
+    let home = agent::resolved_home()?;
+    let codex_home = agent::resolved_codex_home();
+    let report = doctor::collect(&home, codex_home.as_deref(), socket).await;
+    if json {
+        println!("{}", doctor::render_json(&report)?);
+    } else {
+        print!("{}", doctor::render_text(&report));
+    }
+    if report.has_problems() {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// `flowmux fix` — re-install everything the doctor would flag.
+fn run_fix(json: bool) -> anyhow::Result<()> {
+    let home = agent::resolved_home()?;
+    let codex_home = agent::resolved_codex_home();
+    let bin = resolve_self_bin().unwrap_or_else(|| "flowmux".to_string());
+    let report = doctor::run_fix(&home, codex_home.as_deref(), &bin);
+    if json {
+        println!("{}", doctor::render_fix_json(&report)?);
+    } else {
+        print!("{}", doctor::render_fix_text(&report));
+    }
+    if report.has_problems() {
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 fn run_theme_op(op: &ThemeOp) -> anyhow::Result<()> {
