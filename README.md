@@ -41,6 +41,14 @@ workspace that mirrors cmux's domain model and IPC surface so that:
   independent crate that can be re-implemented or swapped without
   touching the rest of the app.
 
+## Control internal browser
+
+![video](resources/screenshot/video_control_browser.gif)
+
+## AI Agent notification(Claude, Codex, OpenCode)
+
+![video2](resources/screenshot/claude_notification.gif)
+
 ## Layout
 
 ```
