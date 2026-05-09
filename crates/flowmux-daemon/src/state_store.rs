@@ -785,6 +785,43 @@ impl StateStore {
         None
     }
 
+    /// Peek-only: how many leaf panes the workspace containing
+    /// `target` has, plus the workspace id. Used by the GUI to decide
+    /// whether closing `target` would also close the workspace, so it
+    /// can put up a confirmation dialog before the mutation runs.
+    pub async fn workspace_pane_count_for(
+        &self,
+        target: PaneId,
+    ) -> Option<(WorkspaceId, usize)> {
+        let s = self.inner.lock().await;
+        for ws in &s.workspaces {
+            let mut leaves = Vec::new();
+            for surf in &ws.surfaces {
+                surf.root_pane.for_each_leaf(|id| leaves.push(id));
+            }
+            if leaves.contains(&target) {
+                return Some((ws.id, leaves.len()));
+            }
+        }
+        None
+    }
+
+    /// Peek-only: number of tab surfaces inside `pane`. `None` when
+    /// the pane is unknown or it is a non-tabbed leaf. Used together
+    /// with `workspace_pane_count_for` to decide whether closing a
+    /// surface (tab) ends up closing the whole workspace.
+    pub async fn tab_count_in_pane(&self, pane: PaneId) -> Option<usize> {
+        let s = self.inner.lock().await;
+        for ws in &s.workspaces {
+            for surf in &ws.surfaces {
+                if let Some(count) = pane_tab_count(&surf.root_pane, pane) {
+                    return Some(count);
+                }
+            }
+        }
+        None
+    }
+
     pub async fn close_surface(&self, pane: PaneId, surface_id: SurfaceId) -> Option<CloseOutcome> {
         let mut s = self.inner.lock().await;
         for ws_idx in 0..s.workspaces.len() {
@@ -835,6 +872,22 @@ impl StateStore {
     pub fn save_now_blocking(&self) -> Result<(), flowmux_state::StateError> {
         let snap = self.inner.blocking_lock().clone();
         flowmux_state::save(&snap)
+    }
+}
+
+/// Count the tab surfaces inside the leaf identified by `target` in
+/// the given pane tree. Returns `None` when `target` is not a
+/// `PaneContent::Tabs` leaf (Terminal/Browser leaves with no tabs).
+fn pane_tab_count(tree: &Pane, target: PaneId) -> Option<usize> {
+    match tree {
+        Pane::Leaf { id, content } if *id == target => match content {
+            PaneContent::Tabs { surfaces, .. } => Some(surfaces.len()),
+            PaneContent::Terminal { .. } | PaneContent::Browser { .. } => None,
+        },
+        Pane::Leaf { .. } => None,
+        Pane::Split { first, second, .. } => {
+            pane_tab_count(first, target).or_else(|| pane_tab_count(second, target))
+        }
     }
 }
 

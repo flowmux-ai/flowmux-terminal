@@ -828,6 +828,42 @@ impl WindowController {
         }
     }
 
+    /// Show a modal "Are you sure you want to close this workspace?"
+    /// dialog and resolve to the user's choice. Used by every path that
+    /// can drop a workspace (sidebar X click, last-pane Ctrl+W,
+    /// last-tab close) so the user always confirms an irreversible
+    /// teardown of the workspace's running PTYs and browser state.
+    async fn confirm_close_workspace(&self, id: WorkspaceId) -> bool {
+        let title = match self.store.get_workspace(id).await {
+            Some(ws) => ws.display_title().to_string(),
+            None => return true, // Already gone — nothing to confirm.
+        };
+        let dialog = adw::AlertDialog::new(
+            Some("Close workspace?"),
+            Some(&format!(
+                "“{title}” will be closed and every terminal/browser tab inside it will be terminated. This cannot be undone."
+            )),
+        );
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("close", "Close");
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+        dialog.set_response_appearance("close", adw::ResponseAppearance::Destructive);
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+        let tx_cell: Rc<Cell<Option<tokio::sync::oneshot::Sender<bool>>>> =
+            Rc::new(Cell::new(Some(tx)));
+        let tx_for_resp = tx_cell.clone();
+        dialog.connect_response(None, move |dialog, response| {
+            if let Some(tx) = tx_for_resp.take() {
+                let _ = tx.send(response == "close");
+            }
+            dialog.close();
+        });
+        dialog.present(Some(&self.window));
+        rx.await.unwrap_or(false)
+    }
+
     async fn activate_active_or_show_empty(&self) {
         if let Some(id) = self.store.active_or_first().await {
             if self.surfaces.borrow().contains_key(&id) {
@@ -1030,7 +1066,17 @@ impl WindowController {
                     }
                 }
             }
-            GtkCommand::CloseFocused { pane, ack } => match self.store.close_pane(pane).await {
+            GtkCommand::CloseFocused { pane, ack } => {
+                // Peek before mutating: if this is the only pane in
+                // the workspace, closing it would also drop the
+                // workspace. Confirm with the user first.
+                if let Some((ws_id, count)) = self.store.workspace_pane_count_for(pane).await {
+                    if count == 1 && !self.confirm_close_workspace(ws_id).await {
+                        let _ = ack.send(Ok(()));
+                        return;
+                    }
+                }
+                match self.store.close_pane(pane).await {
                 None => {
                     let _ = ack.send(Err(format!("pane not found: {pane}")));
                 }
@@ -1061,7 +1107,8 @@ impl WindowController {
                     self.activate_active_or_show_empty().await;
                     let _ = ack.send(Ok(()));
                 }
-            },
+                }
+            }
             GtkCommand::FocusDirection { from, dir } => match from {
                 Some(p) => self.focus_in_direction(p, dir),
                 None => self.focus_first_leaf_of_active_workspace().await,
@@ -1131,6 +1178,21 @@ impl WindowController {
                 });
             }
             GtkCommand::CloseSurface { pane, surface, ack } => {
+                // Closing the only tab in a leaf falls through to
+                // close_pane(pane) inside the store; if that pane is
+                // also the workspace's only pane, the workspace dies.
+                // Confirm in that exact case so an accidental Ctrl+W
+                // on the last tab does not nuke the workspace.
+                let tabs = self.store.tab_count_in_pane(pane).await;
+                let panes = self.store.workspace_pane_count_for(pane).await;
+                if tabs == Some(1) {
+                    if let Some((ws_id, count)) = panes {
+                        if count == 1 && !self.confirm_close_workspace(ws_id).await {
+                            let _ = ack.send(Ok(()));
+                            return;
+                        }
+                    }
+                }
                 match self.store.close_surface(pane, surface).await {
                     None => {
                         let _ = ack.send(Err(format!("surface not found: {surface}")));
@@ -1318,6 +1380,10 @@ impl WindowController {
                 }
             }
             GtkCommand::RemoveWorkspace { id, ack } => {
+                if !self.confirm_close_workspace(id).await {
+                    let _ = ack.send(());
+                    return;
+                }
                 if self.store.remove_workspace(id).await {
                     self.drop_workspace(id);
                     self.activate_active_or_show_empty().await;
