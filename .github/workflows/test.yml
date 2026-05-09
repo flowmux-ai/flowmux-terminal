@@ -3,11 +3,11 @@
 name: Test
 
 on:
-  pull_request:
-  push:
-    branches:
-      - main
-      - master
+#  pull_request:
+#  push:
+#    branches:
+#      - main
+#      - master
   workflow_dispatch:
 
 jobs:
