@@ -2012,6 +2012,15 @@ impl WindowController {
         for ws in &snap.workspaces {
             self.render_workspace_with_activation(ws, false);
         }
+        // First-render the side-panel rows had no MRU yet, so their
+        // subtitle area was blank. Now that every workspace's pane
+        // tree is in the store, fill subtitles from the first leaf
+        // of each workspace (and refresh ws.name from that leaf's
+        // active surface). The user sees populated paths under each
+        // workspace name on launch instead of empty rows.
+        for ws_id in &snap.workspace_order {
+            self.sync_workspace_label(*ws_id).await;
+        }
         let active = snap
             .active_workspace
             .or_else(|| snap.workspace_order.first().copied());
