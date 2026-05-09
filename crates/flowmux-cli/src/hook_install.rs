@@ -42,11 +42,8 @@ pub enum HookTarget {
 }
 
 impl HookTarget {
-    pub const ALL: &'static [HookTarget] = &[
-        HookTarget::Claude,
-        HookTarget::Codex,
-        HookTarget::OpenCode,
-    ];
+    pub const ALL: &'static [HookTarget] =
+        &[HookTarget::Claude, HookTarget::Codex, HookTarget::OpenCode];
 
     pub fn slug(self) -> &'static str {
         match self {
@@ -111,11 +108,7 @@ fn install_claude(flowmux_bin: &str) -> Result<HookInstallReport> {
         Some(p) => p,
         None => return Ok(skipped(HookTarget::Claude)),
     };
-    if !path
-        .parent()
-        .map(|p| p.exists())
-        .unwrap_or(false)
-    {
+    if !path.parent().map(|p| p.exists()).unwrap_or(false) {
         return Ok(skipped(HookTarget::Claude));
     }
 
@@ -246,39 +239,77 @@ fn install_codex(flowmux_bin: &str) -> Result<HookInstallReport> {
         Some(h) if h.exists() => h,
         _ => return Ok(skipped(HookTarget::Codex)),
     };
-    let hooks_path = home.join("hooks.json");
     let config_path = home.join("config.toml");
 
-    // hooks.json — same nested shape as Claude.
-    let mut root: Value = read_json_or_empty_object(&hooks_path)?;
-    let obj = root
-        .as_object_mut()
-        .ok_or_else(|| anyhow!("{} is not a JSON object", hooks_path.display()))?;
-    let stop = obj.entry("Stop".to_string()).or_insert_with(|| json!([]));
-    if !stop.is_array() {
-        *stop = json!([]);
-    }
-    let arr = stop.as_array_mut().unwrap();
-    prune_flowmux_claude_entries(arr); // shape matches Claude entries
-    arr.push(codex_hook_entry(flowmux_bin));
-    write_json(&hooks_path, &root)?;
+    // Codex 0.130's nested `hooks.json` schema is unstable across
+    // releases; even when we wrote it the engine silently ignored
+    // `Stop` entries. The legacy `notify` config in `config.toml` is
+    // the documented and stable way to surface "agent-turn-complete"
+    // events to an external process — cmux's parity path uses it.
+    set_codex_notify(&config_path, flowmux_bin)?;
 
-    // config.toml — set `[features] codex_hooks = true` without touching
-    // unrelated keys.
-    enable_codex_hooks_feature(&config_path)?;
+    // We no longer write hooks.json. Clean up any flowmux entry from a
+    // previous setup so the file stays consistent with what we own.
+    let hooks_path = home.join("hooks.json");
+    if hooks_path.exists() {
+        let mut root: Value = read_json_or_empty_object(&hooks_path)?;
+        if let Some(stop) = root
+            .as_object_mut()
+            .and_then(|o| o.get_mut("Stop"))
+            .and_then(|v| v.as_array_mut())
+        {
+            prune_flowmux_claude_entries(stop);
+            // If this leaves the file empty, delete it; otherwise rewrite.
+            if stop.is_empty() {
+                if let Some(obj) = root.as_object_mut() {
+                    obj.remove("Stop");
+                }
+            }
+        }
+        let is_empty = root.as_object().map(|o| o.is_empty()).unwrap_or(false);
+        if is_empty {
+            let _ = fs::remove_file(&hooks_path);
+        } else {
+            write_json(&hooks_path, &root)?;
+        }
+    }
 
     Ok(HookInstallReport {
         target: HookTarget::Codex,
         status: HookInstallStatus::Installed,
-        touched_paths: vec![hooks_path, config_path],
+        touched_paths: vec![config_path],
     })
 }
 
 fn uninstall_codex() -> Result<HookInstallReport> {
+    use toml_edit::DocumentMut;
+
     let home = match codex_home() {
         Some(h) if h.exists() => h,
         _ => return Ok(skipped(HookTarget::Codex)),
     };
+    let config_path = home.join("config.toml");
+    if config_path.exists() {
+        let original = fs::read_to_string(&config_path)?;
+        let mut doc: DocumentMut = original.parse()?;
+        let was_flowmux = doc
+            .get("notify")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .any(|v| v.as_str().map(|s| s.contains("flowmux")).unwrap_or(false))
+            })
+            .unwrap_or(false);
+        if was_flowmux {
+            doc.as_table_mut().remove("notify");
+            let new_text = doc.to_string();
+            if new_text != original {
+                write_atomic(&config_path, new_text.as_bytes())?;
+            }
+        }
+    }
+
+    // Old hook artifacts from previous flowmux installs.
     let hooks_path = home.join("hooks.json");
     if hooks_path.exists() {
         let mut root: Value = read_json_or_empty_object(&hooks_path)?;
@@ -294,52 +325,50 @@ fn uninstall_codex() -> Result<HookInstallReport> {
     Ok(HookInstallReport {
         target: HookTarget::Codex,
         status: HookInstallStatus::Installed,
-        touched_paths: vec![hooks_path],
+        touched_paths: vec![config_path],
     })
 }
 
-fn codex_hook_entry(flowmux_bin: &str) -> Value {
-    // Codex shells the command via /bin/sh, so a guard chain prevents
-    // failures when the user disables flowmux temporarily.
-    let cmd = format!(
-        "[ -n \"$FLOWMUX_PANE_ID\" ] && [ \"$FLOWMUX_HOOKS_DISABLED\" != \"1\" ] && \
-         command -v {flowmux_bin} >/dev/null 2>&1 && \
-         {flowmux_bin} hooks codex stop || true  # {marker}",
-        marker = FLOWMUX_HOOK_MARKER
-    );
-    json!({
-        "matcher": "",
-        "hooks": [{
-            "type": "command",
-            "command": cmd,
-            "timeout": 5,
-        }]
-    })
-}
-
-fn enable_codex_hooks_feature(config_path: &Path) -> Result<()> {
-    use toml_edit::{value, DocumentMut, Item, Table};
+/// Set the top-level `notify = [...]` array in `~/.codex/config.toml`
+/// so Codex spawns flowmux's hook handler whenever the agent finishes
+/// a turn ("agent-turn-complete"). Preserves existing keys; removes
+/// the no-longer-needed `[features].hooks` / `codex_hooks` entries
+/// from earlier flowmux setups so a re-run quiets the warning.
+fn set_codex_notify(config_path: &Path, flowmux_bin: &str) -> Result<()> {
+    use toml_edit::{value, Array, DocumentMut};
 
     let original = match fs::read_to_string(config_path) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(anyhow::Error::from(e)).context(format!("read {}", config_path.display())),
+        Err(e) => {
+            return Err(anyhow::Error::from(e)).context(format!("read {}", config_path.display()))
+        }
     };
     let mut doc: DocumentMut = original
         .parse()
         .with_context(|| format!("parse {}", config_path.display()))?;
 
-    let features = doc
+    // notify = ["<flowmux-bin>", "hooks", "codex", "stop"]
+    let mut arr = Array::new();
+    arr.push(flowmux_bin);
+    arr.push("hooks");
+    arr.push("codex");
+    arr.push("stop");
+    doc["notify"] = value(arr);
+
+    // Roll back the old [features] flips — they're no-ops for Codex
+    // 0.130+ and the deprecated key triggers a startup warning.
+    if let Some(features) = doc
         .as_table_mut()
-        .entry("features")
-        .or_insert(Item::Table(Table::new()))
-        .as_table_mut()
-        .ok_or_else(|| anyhow!("[features] is not a TOML table in {}", config_path.display()))?;
-    features.set_implicit(false);
-    // Newer Codex CLI replaces the old `codex_hooks` key with `hooks`
-    // and warns if the old name is present. Migrate when we see it.
-    features.remove("codex_hooks");
-    features["hooks"] = value(true);
+        .get_mut("features")
+        .and_then(|i| i.as_table_mut())
+    {
+        features.remove("codex_hooks");
+        features.remove("hooks");
+        if features.is_empty() {
+            doc.as_table_mut().remove("features");
+        }
+    }
 
     let new_text = doc.to_string();
     if new_text != original {
@@ -360,8 +389,7 @@ fn install_opencode(flowmux_bin: &str) -> Result<HookInstallReport> {
         _ => return Ok(skipped(HookTarget::OpenCode)),
     };
     let plugin_dir = home.join("plugins");
-    fs::create_dir_all(&plugin_dir)
-        .with_context(|| format!("create {}", plugin_dir.display()))?;
+    fs::create_dir_all(&plugin_dir).with_context(|| format!("create {}", plugin_dir.display()))?;
     // Older flowmux installs wrote a CommonJS `.js` plugin; OpenCode
     // 1.14+ refuses to load it. Purge it so re-running setup is enough.
     let _ = fs::remove_file(plugin_dir.join("flowmux-session.js"));
@@ -374,7 +402,7 @@ fn install_opencode(flowmux_bin: &str) -> Result<HookInstallReport> {
     }
 
     let opencode_json = home.join("opencode.json");
-    register_opencode_plugin(&opencode_json, "flowmux-session")?;
+    register_opencode_plugin(&opencode_json, "flowmux-session", &plugin_path)?;
 
     Ok(HookInstallReport {
         target: HookTarget::OpenCode,
@@ -415,11 +443,12 @@ fn uninstall_opencode() -> Result<HookInstallReport> {
 }
 
 fn opencode_plugin_source(flowmux_bin: &str) -> String {
-    // OpenCode 1.14+ plugins are ESM modules exporting one factory per
-    // surface. The factory returns a `Hooks` object whose `event`
-    // callback receives every SSE-style lifecycle event; we just spawn
-    // the matching `flowmux hooks opencode <event>` command for the
-    // ones we care about.
+    // OpenCode 1.14+ plugins are ESM modules. Path-loaded plugins
+    // (`file:///…`) must export an `id` so OpenCode can name them; npm
+    // packages skip that because the package name is the id. The
+    // `server` factory returns a `Hooks` object whose `event` callback
+    // receives every lifecycle event — we spawn the matching
+    // `flowmux hooks opencode <event>` for the ones we care about.
     format!(
         r#"// {marker}
 // Auto-installed by `flowmux hooks setup`. Do not hand-edit; rerun the
@@ -436,10 +465,12 @@ function fireFlowmuxHook(event) {{
       stdio: "ignore",
       detached: true,
     }}).unref();
-  }} catch (e) {{
+  }} catch (_) {{
     // Hook failures must never crash OpenCode.
   }}
 }}
+
+export const id = "flowmux-session";
 
 export const server = async () => ({{
   event: async ({{ event }}) => {{
@@ -449,41 +480,45 @@ export const server = async () => ({{
   }},
 }});
 
-export default {{ server }};
+export default {{ id, server }};
 "#,
         marker = FLOWMUX_OPENCODE_PLUGIN_MARKER,
         bin_literal = serde_json::to_string(flowmux_bin).unwrap_or_else(|_| "\"flowmux\"".into()),
     )
 }
 
-fn register_opencode_plugin(path: &Path, plugin_name: &str) -> Result<()> {
+fn register_opencode_plugin(path: &Path, plugin_name: &str, plugin_path: &Path) -> Result<()> {
     let mut root: Value = read_json_or_empty_object(path)?;
     let obj = root
         .as_object_mut()
         .ok_or_else(|| anyhow!("{} is not a JSON object", path.display()))?;
-    let plugins = obj
-        .entry("plugin".to_string())
-        .or_insert_with(|| json!([]));
+    let plugins = obj.entry("plugin".to_string()).or_insert_with(|| json!([]));
     if !plugins.is_array() {
         *plugins = json!([]);
     }
     let arr = plugins.as_array_mut().unwrap();
-    // Drop any stale `.js` registration from a previous install before
-    // re-adding the canonical `.mjs` reference. OpenCode 1.14+ requires
-    // ESM, so the `.js` form is no longer loadable.
-    arr.retain(|v| {
-        v.as_str()
-            .map(|s| !(s.contains(plugin_name) && s.ends_with(".js")))
-            .unwrap_or(true)
-    });
-    let already = arr
-        .iter()
-        .any(|v| v.as_str().map(|s| s.contains(plugin_name)).unwrap_or(false));
-    if !already {
-        arr.push(Value::String(format!("file://./plugins/{plugin_name}.mjs")));
-    }
+    // OpenCode 1.14+ rejects `file://./...` (host = "." is invalid on
+    // Linux) and `.js` (no longer ESM). Strip every previously-written
+    // flowmux registration so we can replace it with the canonical
+    // absolute-path `.mjs` URL.
+    arr.retain(|v| v.as_str().map(|s| !s.contains(plugin_name)).unwrap_or(true));
+    let canonical_uri = canonical_file_uri(plugin_path);
+    arr.push(Value::String(canonical_uri));
     write_json(path, &root)?;
     Ok(())
+}
+
+/// Build a `file:///absolute/path` URL — the only form OpenCode 1.14+
+/// accepts on Linux (`file://./relative` fails with "File URL host
+/// must be 'localhost' or empty").
+fn canonical_file_uri(path: &Path) -> String {
+    let abs = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let s = abs.to_string_lossy();
+    if s.starts_with('/') {
+        format!("file://{s}")
+    } else {
+        format!("file:///{s}")
+    }
 }
 
 // ---- shared helpers -------------------------------------------------
@@ -498,8 +533,9 @@ fn skipped(target: HookTarget) -> HookInstallReport {
 
 fn read_json_or_empty_object(path: &Path) -> Result<Value> {
     match fs::read_to_string(path) {
-        Ok(s) if !s.trim().is_empty() => serde_json::from_str(&s)
-            .with_context(|| format!("parse JSON: {}", path.display())),
+        Ok(s) if !s.trim().is_empty() => {
+            serde_json::from_str(&s).with_context(|| format!("parse JSON: {}", path.display()))
+        }
         Ok(_) => Ok(json!({})),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(json!({})),
         Err(e) => Err(anyhow::Error::from(e)).context(format!("read {}", path.display())),
@@ -508,8 +544,7 @@ fn read_json_or_empty_object(path: &Path) -> Result<Value> {
 
 fn write_json(path: &Path, value: &Value) -> Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let body = serde_json::to_string_pretty(value)
         .with_context(|| format!("serialize {}", path.display()))?;
@@ -606,7 +641,10 @@ mod tests {
         // Exactly 2: the user's + flowmux's. No duplicate flowmux.
         assert_eq!(stop.len(), 2, "got: {stop:?}");
         // User entry is unchanged.
-        assert_eq!(stop[0]["hooks"][0]["command"], "/usr/local/bin/userscript.sh");
+        assert_eq!(
+            stop[0]["hooks"][0]["command"],
+            "/usr/local/bin/userscript.sh"
+        );
         // flowmux entry has the marker.
         let cmd = stop[1]["hooks"][0]["command"].as_str().unwrap();
         assert!(cmd.contains(FLOWMUX_HOOK_MARKER));
@@ -656,7 +694,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_config_toml_enables_feature_without_clobbering_other_keys() {
+    fn codex_set_notify_writes_array_without_clobbering_other_keys() {
         let dir = tmp();
         let path = dir.path().join("config.toml");
         fs::write(
@@ -668,43 +706,48 @@ trust_level = "trusted"
 "#,
         )
         .unwrap();
-        enable_codex_hooks_feature(&path).unwrap();
+        set_codex_notify(&path, "/usr/local/bin/flowmux").unwrap();
         let new = fs::read_to_string(&path).unwrap();
         // Original keys preserved.
         assert!(new.contains("model = \"gpt-x\""));
         assert!(new.contains("trust_level = \"trusted\""));
-        // Feature flipped on under the new key name.
-        assert!(new.contains("[features]"));
-        assert!(new.contains("hooks = true"));
-        // The deprecated key must not be left behind.
-        assert!(!new.contains("codex_hooks"));
+        // notify array present with our argv.
+        assert!(
+            new.contains(r#"notify = ["/usr/local/bin/flowmux", "hooks", "codex", "stop"]"#)
+                || new.contains("notify = [\"/usr/local/bin/flowmux\",")
+        );
+        assert!(new.contains("\"hooks\""));
+        assert!(new.contains("\"codex\""));
+        assert!(new.contains("\"stop\""));
     }
 
     #[test]
-    fn codex_config_toml_migrates_deprecated_codex_hooks_key() {
+    fn codex_set_notify_strips_deprecated_features_keys() {
         let dir = tmp();
         let path = dir.path().join("config.toml");
         fs::write(
             &path,
             r#"[features]
 codex_hooks = true
+hooks = true
 "#,
         )
         .unwrap();
-        enable_codex_hooks_feature(&path).unwrap();
+        set_codex_notify(&path, "flowmux").unwrap();
         let new = fs::read_to_string(&path).unwrap();
         assert!(!new.contains("codex_hooks"), "stale key remained: {new}");
-        assert!(new.contains("hooks = true"), "new key missing: {new}");
+        assert!(!new.contains("hooks = true"), "stale flag remained: {new}");
+        assert!(new.contains("notify = "));
     }
 
     #[test]
-    fn codex_config_toml_idempotent_no_op_on_second_call() {
+    fn codex_set_notify_idempotent_no_op_on_second_call() {
         let dir = tmp();
         let path = dir.path().join("config.toml");
         fs::write(&path, "").unwrap();
-        enable_codex_hooks_feature(&path).unwrap();
+        set_codex_notify(&path, "flowmux").unwrap();
         let after_first = fs::read_to_string(&path).unwrap();
-        enable_codex_hooks_feature(&path).unwrap();
+        set_codex_notify(&path, "flowmux").unwrap();
         let after_second = fs::read_to_string(&path).unwrap();
         assert_eq!(after_first, after_second);
     }
@@ -713,37 +756,65 @@ codex_hooks = true
     fn opencode_register_plugin_appends_unique_entry() {
         let dir = tmp();
         let path = dir.path().join("opencode.json");
-        register_opencode_plugin(&path, "flowmux-session").unwrap();
-        register_opencode_plugin(&path, "flowmux-session").unwrap(); // idempotent
+        let plugin_path = dir.path().join("plugins/flowmux-session.mjs");
+        fs::create_dir_all(plugin_path.parent().unwrap()).unwrap();
+        fs::write(&plugin_path, "// stub").unwrap();
+        register_opencode_plugin(&path, "flowmux-session", &plugin_path).unwrap();
+        register_opencode_plugin(&path, "flowmux-session", &plugin_path).unwrap(); // idempotent
         let v: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         let plugins = v["plugin"].as_array().unwrap();
         assert_eq!(plugins.len(), 1);
         let entry = plugins[0].as_str().unwrap();
         assert!(entry.contains("flowmux-session"));
         assert!(entry.ends_with(".mjs"), "must use ESM extension: {entry}");
+        // OpenCode 1.14+ requires file:// with empty host (`file:///abs`).
+        assert!(entry.starts_with("file:///"), "must be absolute: {entry}");
     }
 
     #[test]
-    fn opencode_register_plugin_replaces_stale_js_with_mjs() {
+    fn opencode_register_plugin_replaces_stale_relative_or_js_entries() {
         let dir = tmp();
         let path = dir.path().join("opencode.json");
-        // Simulate the previous flowmux install which used .js.
-        let initial = json!({ "plugin": ["file://./plugins/flowmux-session.js"] });
+        let plugin_path = dir.path().join("plugins/flowmux-session.mjs");
+        fs::create_dir_all(plugin_path.parent().unwrap()).unwrap();
+        fs::write(&plugin_path, "// stub").unwrap();
+        // Simulate a previous flowmux install which used `.js` and
+        // the invalid relative `file://./` URL.
+        let initial = json!({
+            "plugin": [
+                "file://./plugins/flowmux-session.js",
+                "file://./plugins/flowmux-session.mjs",
+                "@user/unrelated",
+            ]
+        });
         write_json(&path, &initial).unwrap();
-        register_opencode_plugin(&path, "flowmux-session").unwrap();
+        register_opencode_plugin(&path, "flowmux-session", &plugin_path).unwrap();
         let v: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         let plugins = v["plugin"].as_array().unwrap();
-        assert_eq!(plugins.len(), 1);
-        assert!(plugins[0].as_str().unwrap().ends_with(".mjs"));
+        // Stale flowmux-session entries replaced; user's unrelated plugin kept.
+        assert!(plugins
+            .iter()
+            .any(|p| p.as_str().unwrap() == "@user/unrelated"));
+        let flowmux_entries: Vec<&str> = plugins
+            .iter()
+            .filter_map(|v| v.as_str())
+            .filter(|s| s.contains("flowmux-session"))
+            .collect();
+        assert_eq!(flowmux_entries.len(), 1);
+        assert!(flowmux_entries[0].starts_with("file:///"));
+        assert!(flowmux_entries[0].ends_with(".mjs"));
     }
 
     #[test]
     fn opencode_register_preserves_existing_unrelated_plugins() {
         let dir = tmp();
         let path = dir.path().join("opencode.json");
+        let plugin_path = dir.path().join("plugins/flowmux-session.mjs");
+        fs::create_dir_all(plugin_path.parent().unwrap()).unwrap();
+        fs::write(&plugin_path, "// stub").unwrap();
         let initial = json!({ "plugin": ["@user/foo", "@user/bar"] });
         write_json(&path, &initial).unwrap();
-        register_opencode_plugin(&path, "flowmux-session").unwrap();
+        register_opencode_plugin(&path, "flowmux-session", &plugin_path).unwrap();
         let v: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         let plugins = v["plugin"].as_array().unwrap();
         assert_eq!(plugins.len(), 3);

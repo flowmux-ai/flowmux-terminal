@@ -11,6 +11,7 @@ use flowmux_core::{NotificationLevel, PaneId, SplitDirection};
 use flowmux_ipc::{client::Client, protocol::Request, protocol::Response};
 use std::io::Read;
 use std::path::PathBuf;
+use std::process::Command;
 use std::str::FromStr;
 
 mod agent;
@@ -49,7 +50,7 @@ struct Cli {
     json: bool,
 
     #[command(subcommand)]
-    cmd: Cmd,
+    cmd: Option<Cmd>,
 }
 
 #[derive(Subcommand)]
@@ -314,8 +315,10 @@ enum HooksOp {
         #[command(subcommand)]
         event: ClaudeHookEvent,
     },
-    /// Codex CLI lifecycle hook handler. Invoked by Codex via
-    /// `~/.codex/hooks.json`.
+    /// Codex CLI lifecycle hook handler. Invoked by Codex via the
+    /// `notify = [...]` config in `~/.codex/config.toml`. Codex
+    /// passes the JSON event payload as the LAST positional argument,
+    /// so we accept trailing args via `--` after the event name.
     Codex {
         #[command(subcommand)]
         event: AgentHookEvent,
@@ -347,12 +350,24 @@ enum ClaudeHookEvent {
 
 #[derive(Subcommand)]
 enum AgentHookEvent {
-    /// Generic "agent finished" event.
-    Stop,
-    /// Generic "agent needs attention" event.
-    Notification,
-    /// Generic "session started".
-    SessionStart,
+    /// Agent finished a turn. Trailing args carry an optional JSON
+    /// payload — Codex's `notify` config delivers the event JSON this
+    /// way; Claude/OpenCode use stdin and leave args empty.
+    Stop {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Agent needs attention (permission prompt, error). Trailing args
+    /// follow the same positional-or-stdin convention.
+    Notification {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Session started; flowmux currently no-ops on this event.
+    SessionStart {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -378,10 +393,13 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+    let Some(cmd) = cli.cmd else {
+        return exec_flowmux_app();
+    };
 
     // Local-only commands — handled before the daemon connect so they
-    // work without a running flowmux-app.
-    match &cli.cmd {
+    // work without a running flowmux GUI.
+    match &cmd {
         Cmd::Theme { op } => return run_theme_op(op),
         Cmd::ListBrowsers => {
             for s in flowmux_cookies::discover_sources() {
@@ -404,17 +422,40 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(paths::runtime_socket);
     let client = Client::connect(&socket)
         .await
-        .with_context(|| "is the flowmux daemon running? try: flowmux-app &")?;
+        .with_context(|| "is the flowmux daemon running? try: flowmux")?;
 
-    if let Cmd::NotifyStream { pane } = cli.cmd {
+    if let Cmd::NotifyStream { pane } = cmd {
         return notify_stream(&client, pane).await;
     }
 
     let json_mode = cli.json;
-    let req = build_request(cli.cmd)?;
+    let req = build_request(cmd)?;
     let resp = client.call(req).await?;
     print_response(&resp, json_mode)?;
     Ok(())
+}
+
+fn exec_flowmux_app() -> anyhow::Result<()> {
+    let sibling = std::env::current_exe()
+        .ok()
+        .map(|p| p.with_file_name("flowmux-app"))
+        .filter(|p| p.is_file());
+    let program = sibling.unwrap_or_else(|| PathBuf::from("flowmux-app"));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let err = Command::new(&program).exec();
+        Err::<(), _>(err).with_context(|| format!("launch {}", program.display()))
+    }
+
+    #[cfg(not(unix))]
+    {
+        let status = Command::new(&program)
+            .status()
+            .with_context(|| format!("launch {}", program.display()))?;
+        std::process::exit(status.code().unwrap_or(1));
+    }
 }
 
 async fn notify_stream(client: &Client, pane: Option<PaneId>) -> anyhow::Result<()> {
@@ -619,9 +660,7 @@ async fn run_hooks_op(op: &HooksOp, socket: Option<PathBuf>) -> anyhow::Result<(
             Ok(())
         }
         HooksOp::Claude { event } => run_claude_hook_event(event, socket).await,
-        HooksOp::Codex { event } => {
-            run_generic_agent_hook_event("Codex", event, socket).await
-        }
+        HooksOp::Codex { event } => run_generic_agent_hook_event("Codex", event, socket).await,
         HooksOp::Opencode { event } => {
             run_generic_agent_hook_event("OpenCode", event, socket).await
         }
@@ -706,18 +745,19 @@ async fn run_generic_agent_hook_event(
     socket: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     use hooks::*;
-    let input = read_claude_hook_input();
     let pane = pane_from_env();
     let req = match event {
-        AgentHookEvent::Stop => {
+        AgentHookEvent::Stop { args } => {
+            let input = read_codex_hook_input(args);
             let body = input.last_assistant_message.as_deref();
             build_stop_notify(agent, body, pane)
         }
-        AgentHookEvent::Notification => {
+        AgentHookEvent::Notification { args } => {
+            let input = read_codex_hook_input(args);
             let msg = input.message.as_deref();
             build_notification_notify(agent, msg, pane)
         }
-        AgentHookEvent::SessionStart => return Ok(()),
+        AgentHookEvent::SessionStart { .. } => return Ok(()),
     };
     if let Some(client) = hooks::connect_daemon(socket).await {
         hooks::send_best_effort(&client, req).await;
@@ -736,15 +776,17 @@ fn run_agent_op(op: &AgentOp, json: bool) -> anyhow::Result<()> {
             slugs
                 .iter()
                 .map(|s| {
-                    agent::Target::from_slug(s)
-                        .ok_or_else(|| anyhow::anyhow!("unknown agent: {s}"))
+                    agent::Target::from_slug(s).ok_or_else(|| anyhow::anyhow!("unknown agent: {s}"))
                 })
                 .collect()
         }
     };
 
     match op {
-        AgentOp::Install { agent: slugs, force } => {
+        AgentOp::Install {
+            agent: slugs,
+            force,
+        } => {
             let targets = parse_targets(slugs)?;
             let outcomes = agent::install_all(&targets, &home, codex_home.as_deref(), *force)?;
             if json {
@@ -838,7 +880,7 @@ fn run_theme_op(op: &ThemeOp) -> anyhow::Result<()> {
             let dest = flowmux_config::theme::import_from(src)
                 .with_context(|| format!("importing {}", src.display()))?;
             println!("imported  {} → {}", src.display(), dest.display());
-            println!("relaunch flowmux-app to apply.");
+            println!("relaunch flowmux to apply.");
             Ok(())
         }
     }

@@ -24,8 +24,11 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::str::FromStr;
 
-/// Subset of the Claude Code hook payload that flowmux cares about.
-/// Unknown fields are ignored so future Claude releases don't break us.
+/// Subset of an agent hook payload that flowmux cares about. Reused
+/// across Claude/Codex/OpenCode because their JSON shapes overlap on
+/// the fields we surface (event name, optional message, optional
+/// last assistant text). Unknown fields are ignored so a new agent
+/// release doesn't break us.
 #[derive(Debug, Default, Deserialize)]
 pub struct ClaudeHookInput {
     #[serde(default)]
@@ -39,16 +42,16 @@ pub struct ClaudeHookInput {
     /// Set when `Notification` fires for permission/info popups.
     #[serde(default)]
     pub message: Option<String>,
-    /// `Stop` payload sometimes carries the trailing assistant text.
-    /// Claude itself doesn't always populate this — kept best-effort.
-    #[serde(default)]
+    /// `Stop` payload sometimes carries the trailing assistant text
+    /// (Claude). Codex's `notify` payload calls the same thing
+    /// `last-assistant-message`. We accept both spellings.
+    #[serde(default, alias = "last-assistant-message")]
     pub last_assistant_message: Option<String>,
 }
 
-/// Read up to 1 MiB of JSON from stdin and parse as a Claude hook
-/// payload. Empty stdin / parse failures degrade to a default payload
-/// so the user still gets a "Claude ready" toast even when the hook
-/// glue is broken.
+/// Read up to 1 MiB of JSON from stdin and parse as a hook payload.
+/// Empty stdin / parse failures degrade to a default payload so the
+/// user still gets a generic toast even when the hook glue is broken.
 pub fn read_claude_hook_input() -> ClaudeHookInput {
     let mut buf = String::new();
     let _ = std::io::stdin()
@@ -59,6 +62,21 @@ pub fn read_claude_hook_input() -> ClaudeHookInput {
         return ClaudeHookInput::default();
     }
     serde_json::from_str(&buf).unwrap_or_default()
+}
+
+/// Codex's `notify` config spawns the program with the JSON event
+/// payload as the LAST positional argument (Claude's hook system uses
+/// stdin instead). Try the positional path first; fall back to stdin
+/// if `extra_args` is empty.
+pub fn read_codex_hook_input(extra_args: &[String]) -> ClaudeHookInput {
+    if let Some(payload) = extra_args.last() {
+        if !payload.trim().is_empty() {
+            if let Ok(parsed) = serde_json::from_str::<ClaudeHookInput>(payload) {
+                return parsed;
+            }
+        }
+    }
+    read_claude_hook_input()
 }
 
 /// Resolve `FLOWMUX_PANE_ID` from the env (set by `flowmux-app` at PTY
@@ -178,10 +196,7 @@ mod tests {
     fn build_stop_notify_falls_back_to_default_body() {
         match build_stop_notify("Claude", None, None) {
             Request::Notify {
-                title,
-                body,
-                level,
-                ..
+                title, body, level, ..
             } => {
                 assert!(title.contains("Claude"));
                 assert_eq!(body, "task complete");
@@ -210,7 +225,10 @@ mod tests {
     #[test]
     fn build_notification_notify_uses_attention_level() {
         let req = build_notification_notify("Claude", Some("permission to run rm"), None);
-        if let Request::Notify { title, body, level, .. } = req {
+        if let Request::Notify {
+            title, body, level, ..
+        } = req
+        {
             assert_eq!(level, NotificationLevel::AttentionNeeded);
             assert!(title.contains("Claude"));
             assert!(body.contains("permission"));
@@ -239,10 +257,7 @@ mod tests {
         }"#;
         let parsed: ClaudeHookInput = serde_json::from_str(raw).unwrap();
         assert_eq!(parsed.session_id.as_deref(), Some("abc"));
-        assert_eq!(
-            parsed.hook_event_name.as_deref(),
-            Some("Stop")
-        );
+        assert_eq!(parsed.hook_event_name.as_deref(), Some("Stop"));
         assert!(parsed.transcript_path.is_some());
     }
 
@@ -251,10 +266,7 @@ mod tests {
         // Future Claude versions may add fields; we must not error.
         let raw = r#"{ "future_field": 42, "hook_event_name": "Notification", "message": "hi" }"#;
         let parsed: ClaudeHookInput = serde_json::from_str(raw).unwrap();
-        assert_eq!(
-            parsed.hook_event_name.as_deref(),
-            Some("Notification")
-        );
+        assert_eq!(parsed.hook_event_name.as_deref(), Some("Notification"));
         assert_eq!(parsed.message.as_deref(), Some("hi"));
     }
 
