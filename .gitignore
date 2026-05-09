@@ -20,8 +20,7 @@ Thumbs.db
 *.rpm
 *.AppImage
 
-# Local upstream checkout (created by scripts/sync-upstream.sh)
+# Local-only upstream tracking (kept out of the published tree)
 /.upstream-cmux/
-
-# Local-only working notes (not for commit)
-/docs/upstream-mapping/_local/
+/scripts/sync-upstream.sh
+/docs/upstream-mapping/

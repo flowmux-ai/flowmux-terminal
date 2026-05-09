@@ -21,10 +21,11 @@ Sparkle, WebKit, UserNotifications) are replaced with Linux desktop
 counterparts (GTK4/libadwaita, libnotify/D-Bus, WebKitGTK, vte4 first with
 libghostty planned).
 
-> **Status**: skeleton. The workspace, IPC contract, OSC notification parser,
-> and CLI surface are scaffolded. Terminal rendering, browser pane, SSH
-> workspaces, and Claude Code Teams integration are tracked in
-> [`docs/upstream-mapping/`](docs/upstream-mapping/) and land incrementally.
+> **Status**: pre-alpha. Workspaces, recursive pane splits, vte4 terminals,
+> WebKitGTK browser tabs, OSC 9/99/777 notifications, the `flowmuxctl` CLI,
+> and claude/codex/opencode lifecycle hooks are working end-to-end. SSH
+> workspaces, libghostty rendering, and remaining cmux features land
+> incrementally.
 
 ## Why a separate project
 
@@ -35,8 +36,6 @@ workspace that mirrors cmux's domain model and IPC surface so that:
 
 - existing `cmux.json` configs and `cmux <subcommand>` shell scripts
   largely work unchanged on Linux;
-- new cmux features are picked up via a documented upstream-tracking
-  process (see [`docs/UPSTREAM.md`](docs/UPSTREAM.md));
 - each subsystem (terminal, notifications, IPC, browser, config) is an
   independent crate that can be re-implemented or swapped without
   touching the rest of the app.
@@ -56,20 +55,23 @@ flowmux/
 ├── crates/
 │   ├── flowmux-core/       Domain types: Workspace, Surface, Pane, Notification
 │   ├── flowmux-config/     cmux.json + ~/.config/ghostty/config readers
-│   ├── flowmux-terminal/   Terminal backend trait + vte4 backend (libghostty later)
+│   ├── flowmux-state/      Persistent workspace/session state on disk
+│   ├── flowmux-terminal/   Terminal backend trait + vte4 / libghostty backends
+│   ├── flowmux-browser/    WebKitGTK 6.0 browser surface + scriptable refs
+│   ├── flowmux-cookies/    Browser cookie/session import (libsecret + sqlite)
 │   ├── flowmux-notify/     OSC 9/99/777 parser + libnotify D-Bus sender
 │   ├── flowmux-ipc/        Unix-socket IPC (cmux socket-API compatible)
-│   ├── flowmux-cli/        private `flowmuxctl` helper for CLI subcommands
+│   ├── flowmux-daemon/     Background daemon orchestrating IPC and panes
+│   ├── flowmux-procmon/    PID-tree process / listening-port monitor
+│   ├── flowmux-ssh/        SSH workspaces via russh
+│   ├── flowmux-vcs/        Git/PR sidebar integration
+│   ├── flowmux-cli/        `flowmuxctl` helper for CLI subcommands
 │   └── flowmux/            GTK4 + libadwaita main app and public `flowmux` binary
-├── docs/
-│   ├── UPSTREAM.md       How we track cmux upstream
-│   └── upstream-mapping/ Per-feature spec (cmux behavior → flowmux impl)
-├── scripts/sync-upstream.sh
-├── packaging/debian/     .deb metadata stub
-├── resources/desktop/    .desktop file, icons
-├── LICENSE               GPL-3.0-or-later (verbatim from gnu.org)
+├── packaging/{debian,flatpak}/  Distro packaging metadata
+├── resources/             .desktop file, icons, screenshots, themes
+├── LICENSE                GPL-3.0-or-later (verbatim from gnu.org)
 ├── THIRD_PARTY_LICENSES.md  Third-party dependency license inventory
-└── NOTICE                Copyright + attribution
+└── NOTICE                 Copyright + attribution
 ```
 
 ## Build prerequisites (Ubuntu 24.04+)
