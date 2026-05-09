@@ -1270,7 +1270,11 @@ mod tests {
 
     #[test]
     fn pane_content_normalizes_legacy_terminal_to_surface_tab() {
-        let cwd = PathBuf::from("/tmp/flowmux-core-test");
+        // Folder name must fit within terminal_tab_title_for_cwd's truncation
+        // budget so this test asserts migration semantics, not truncation.
+        // The truncation contract itself is covered by
+        // terminal_tab_title_for_cwd_uses_folder_and_truncates below.
+        let cwd = PathBuf::from("/tmp/flowmux-core");
         let mut content = PaneContent::Terminal { pid: Some(123) };
 
         content.normalize_to_tabs(Some(cwd.clone()));
@@ -1280,7 +1284,7 @@ mod tests {
         };
         assert_eq!(surfaces.len(), 1);
         assert_eq!(surfaces[0].id, active);
-        assert_eq!(surfaces[0].title, "flowmux-core-test");
+        assert_eq!(surfaces[0].title, "flowmux-core");
         assert!(matches!(
             &surfaces[0].kind,
             SurfaceKind::Terminal { cwd: Some(got), .. } if got == &cwd

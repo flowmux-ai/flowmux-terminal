@@ -308,17 +308,25 @@ impl WindowController {
         };
 
         if let Some(grand_paned) = grand.downcast_ref::<gtk::Paned>() {
-            // Nested split: pop `paned` out of the outer paned and
-            // fill that slot with `sibling`.
-            paned.unparent();
-            if grand_paned.start_child().is_none() {
+            // Nested split: identify which slot of the outer paned holds
+            // `paned` and replace it with `sibling`. Calling `set_*_child`
+            // directly auto-unparents the previous occupant in one step,
+            // so we do NOT pre-call `paned.unparent()` here. With manual
+            // unparent followed by `is_none()` slot-pick, GTK4 can leave
+            // the parent slot still pointing at `paned` until the next
+            // event-loop flush, which triggered the rerender fallback —
+            // and that fallback rebuilt every other pane's VTE, killing
+            // any agent (claude/codex/shell) running in those panes.
+            let paned_widget: gtk::Widget = paned.clone().upcast();
+            if grand_paned.start_child().as_ref() == Some(&paned_widget) {
                 grand_paned.set_start_child(Some(&sibling));
-            } else if grand_paned.end_child().is_none() {
+            } else if grand_paned.end_child().as_ref() == Some(&paned_widget) {
                 grand_paned.set_end_child(Some(&sibling));
             } else {
                 tracing::warn!(
-                    "apply_close_pane_incremental: parent paned has no empty slot; falling back"
+                    "apply_close_pane_incremental: paned not found in grand_paned slots; falling back"
                 );
+                paned.unparent();
                 if let Some(ws) = self.store.get_workspace(ws_id).await {
                     self.rerender_workspace(&ws);
                 }
@@ -4212,5 +4220,311 @@ mod tests {
             leaves
         };
         assert_eq!(leaf_count, vec![left], "store collapsed the split correctly");
+    }
+
+    /// Regression: closing the split sibling must keep the surviving pane's
+    /// underlying VTE widget instance alive. Pane-level widgets (the
+    /// `gtk::Frame` and the `vte::Terminal` it wraps) own the live PTY child
+    /// process, so any path that swaps them out kills running programs like
+    /// claude / codex / shells. The earlier `rerender_workspace` fallback did
+    /// exactly that. This test pins the contract for the incremental path:
+    /// the same widget instance survives split, survives close-of-sibling,
+    /// and the pane's VTE terminal is reachable through the registry.
+    #[gtk::test]
+    async fn closing_split_sibling_preserves_surviving_pane_vte_widget_identity() {
+        adw::init().expect("libadwaita should initialize in GTK test");
+        let root = std::env::temp_dir().join("flowmux-ui-close-sibling-vte");
+        std::fs::create_dir_all(&root).unwrap();
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("ui".into()), root.clone())
+            .await;
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        let original = ws.surfaces[0].root_pane.first_leaf_id().unwrap();
+
+        let (bridge, _rx) = Bridge::new();
+        let app = adw::Application::builder()
+            .application_id("com.flowmux.App.UiTest.CloseSiblingVte")
+            .build();
+        app.register(None::<&gtk::gio::Cancellable>).unwrap();
+        let controller = WindowController::new(
+            &app,
+            store.clone(),
+            Arc::new(ResolvedTheme::load()),
+            bridge,
+            gtk::CssProvider::new(),
+        );
+        controller.render_workspace(&ws);
+
+        // Snapshot the original pane's VTE widget + frame BEFORE the split so we
+        // can compare object identity through every subsequent rebuild.
+        let original_vte_pre_split = {
+            let r = controller.pane_registry.borrow();
+            r.active_terminal(original)
+                .expect("rendered workspace should expose a terminal for the only pane")
+                .widget
+                .clone()
+        };
+        let original_frame_pre_split = controller
+            .pane_registry
+            .borrow()
+            .pane_frame(original)
+            .expect("frame should be registered for the only pane");
+
+        // 1. Split horizontally so the workspace becomes Paned(left=original, right=new).
+        //    apply_split_incremental_or_rerender must reuse `original`'s frame
+        //    inside the new gtk::Paned, not rebuild it.
+        let (split_ws, sibling) = store
+            .split_pane(original, SplitDirection::Vertical)
+            .await
+            .expect("split should succeed");
+        assert_eq!(split_ws, ws_id);
+        controller
+            .apply_split_incremental_or_rerender(ws_id, original, sibling, SplitDirection::Vertical)
+            .await;
+
+        let original_vte_after_split = controller
+            .pane_registry
+            .borrow()
+            .active_terminal(original)
+            .expect("original pane must still have an active terminal after split")
+            .widget
+            .clone();
+        let original_frame_after_split = controller
+            .pane_registry
+            .borrow()
+            .pane_frame(original)
+            .expect("original pane frame must still be registered after split");
+
+        assert!(
+            original_vte_pre_split == original_vte_after_split,
+            "split rebuilt the surviving pane's VTE widget — that would kill any running PTY child (claude/codex/shell)"
+        );
+        assert!(
+            original_frame_pre_split == original_frame_after_split,
+            "split rebuilt the surviving pane's gtk::Frame — incremental split must reuse the existing frame"
+        );
+
+        // 2. Close the new sibling. `apply_close_pane_incremental_or_rerender`
+        //    must collapse the Paned in place, leaving the original pane's
+        //    frame as the workspace's top-level child without rebuilding it.
+        let (ack_tx, ack_rx) = oneshot::channel();
+        controller
+            .dispatch(GtkCommand::CloseFocused {
+                pane: sibling,
+                ack: ack_tx,
+            })
+            .await;
+        ack_rx.await.unwrap().unwrap();
+
+        let original_vte_after_close = controller
+            .pane_registry
+            .borrow()
+            .active_terminal(original)
+            .expect(
+                "regression: closing the split sibling dropped the surviving pane's terminal entry — \
+                 a fresh VTE means the running shell / agent was killed",
+            )
+            .widget
+            .clone();
+        let original_frame_after_close = controller
+            .pane_registry
+            .borrow()
+            .pane_frame(original)
+            .expect("regression: surviving pane's frame should still be registered after close");
+
+        assert!(
+            original_vte_pre_split == original_vte_after_close,
+            "regression: closing the split sibling rebuilt the surviving pane's VTE — the running PTY child was killed and the user sees a fresh empty terminal instead of their claude/codex session"
+        );
+        assert!(
+            original_frame_pre_split == original_frame_after_close,
+            "regression: closing the split sibling replaced the surviving pane's gtk::Frame instance"
+        );
+
+        // The sibling's registry entries must have been forgotten, and the
+        // workspace stack must point at the surviving frame.
+        assert!(
+            controller
+                .pane_registry
+                .borrow()
+                .pane_frame(sibling)
+                .is_none(),
+            "closed sibling should no longer be in the registry"
+        );
+        let surfaces = controller.surfaces.borrow();
+        let top = surfaces
+            .get(&ws_id)
+            .expect("workspace stack must have a top-level widget after collapse");
+        assert!(
+            top == &original_frame_after_close,
+            "workspace stack child should now be the surviving pane's frame, not the old paned"
+        );
+    }
+
+    /// Regression: same VTE-identity contract across nested splits — the
+    /// scenario the user reported was a deeper split tree, not a flat
+    /// side-by-side. Build Pane A (claude) → split A right to get B → focus B
+    /// → split B down to get C, so the tree is Split{A, Split{B, C}} with two
+    /// levels of `gtk::Paned`. Closing C must collapse only the inner paned
+    /// and leave A and B's VTE widgets intact.
+    #[gtk::test]
+    async fn closing_inner_pane_in_two_level_split_preserves_other_panes() {
+        adw::init().expect("libadwaita should initialize in GTK test");
+        let root = std::env::temp_dir().join("flowmux-ui-close-nested");
+        std::fs::create_dir_all(&root).unwrap();
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("ui".into()), root.clone())
+            .await;
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        let pane_a = ws.surfaces[0].root_pane.first_leaf_id().unwrap();
+
+        let (bridge, _rx) = Bridge::new();
+        let app = adw::Application::builder()
+            .application_id("com.flowmux.App.UiTest.CloseNested")
+            .build();
+        app.register(None::<&gtk::gio::Cancellable>).unwrap();
+        let controller = WindowController::new(
+            &app,
+            store.clone(),
+            Arc::new(ResolvedTheme::load()),
+            bridge,
+            gtk::CssProvider::new(),
+        );
+        controller.render_workspace(&ws);
+
+        let a_vte_initial = controller
+            .pane_registry
+            .borrow()
+            .active_terminal(pane_a)
+            .expect("pane A terminal must be registered")
+            .widget
+            .clone();
+        let a_frame_initial = controller
+            .pane_registry
+            .borrow()
+            .pane_frame(pane_a)
+            .expect("pane A frame must be registered");
+
+        // First split: A | B (vertical split → side-by-side).
+        let (_, pane_b) = store
+            .split_pane(pane_a, SplitDirection::Vertical)
+            .await
+            .expect("first split should succeed");
+        controller
+            .apply_split_incremental_or_rerender(ws_id, pane_a, pane_b, SplitDirection::Vertical)
+            .await;
+
+        let b_vte_initial = controller
+            .pane_registry
+            .borrow()
+            .active_terminal(pane_b)
+            .expect("pane B terminal must be registered after first split")
+            .widget
+            .clone();
+
+        // Second split: split B horizontally → B (top) over C (bottom).
+        let (_, pane_c) = store
+            .split_pane(pane_b, SplitDirection::Horizontal)
+            .await
+            .expect("second split should succeed");
+        controller
+            .apply_split_incremental_or_rerender(ws_id, pane_b, pane_c, SplitDirection::Horizontal)
+            .await;
+
+        // Sanity: A and B widgets identity unchanged across both splits.
+        let a_vte_after_splits = controller
+            .pane_registry
+            .borrow()
+            .active_terminal(pane_a)
+            .expect("pane A terminal must survive both splits")
+            .widget
+            .clone();
+        let b_vte_after_splits = controller
+            .pane_registry
+            .borrow()
+            .active_terminal(pane_b)
+            .expect("pane B terminal must survive its own split")
+            .widget
+            .clone();
+        assert!(
+            a_vte_initial == a_vte_after_splits,
+            "pane A's VTE must be identical across nested splits"
+        );
+        assert!(
+            b_vte_initial == b_vte_after_splits,
+            "pane B's VTE must survive its own split"
+        );
+
+        // Close C (the deepest, newest pane). Tree should collapse to Split{A, B}.
+        let (ack_tx, ack_rx) = oneshot::channel();
+        controller
+            .dispatch(GtkCommand::CloseFocused {
+                pane: pane_c,
+                ack: ack_tx,
+            })
+            .await;
+        ack_rx.await.unwrap().unwrap();
+
+        let a_vte_after_close = controller
+            .pane_registry
+            .borrow()
+            .active_terminal(pane_a)
+            .expect(
+                "regression: pane A vanished from registry — the close fell back to a full \
+                 rerender and any agent running in A is now dead",
+            )
+            .widget
+            .clone();
+        let b_vte_after_close = controller
+            .pane_registry
+            .borrow()
+            .active_terminal(pane_b)
+            .expect(
+                "regression: pane B vanished from registry after closing inner sibling C",
+            )
+            .widget
+            .clone();
+        let a_frame_after_close = controller
+            .pane_registry
+            .borrow()
+            .pane_frame(pane_a)
+            .expect("pane A's frame must still be registered after closing inner pane C");
+
+        assert!(
+            a_vte_initial == a_vte_after_close,
+            "regression: closing inner pane C rebuilt pane A's VTE widget — claude/codex/shell killed"
+        );
+        assert!(
+            b_vte_initial == b_vte_after_close,
+            "regression: closing inner pane C rebuilt pane B's VTE widget"
+        );
+        assert!(
+            a_frame_initial == a_frame_after_close,
+            "regression: closing inner pane C rebuilt pane A's gtk::Frame"
+        );
+        assert!(
+            controller
+                .pane_registry
+                .borrow()
+                .pane_frame(pane_c)
+                .is_none(),
+            "pane C should be forgotten by the registry"
+        );
+
+        // Daemon-side state must agree: tree collapsed to two leaves [A, B].
+        let ws_after = store.get_workspace(ws_id).await.unwrap();
+        let mut leaves: std::collections::HashSet<PaneId> = std::collections::HashSet::new();
+        ws_after.surfaces[0]
+            .root_pane
+            .for_each_leaf(|id| {
+                leaves.insert(id);
+            });
+        let expected: std::collections::HashSet<PaneId> = [pane_a, pane_b].into_iter().collect();
+        assert_eq!(
+            leaves, expected,
+            "store should have collapsed the inner split to {{A, B}}"
+        );
     }
 }
