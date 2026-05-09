@@ -336,7 +336,10 @@ fn enable_codex_hooks_feature(config_path: &Path) -> Result<()> {
         .as_table_mut()
         .ok_or_else(|| anyhow!("[features] is not a TOML table in {}", config_path.display()))?;
     features.set_implicit(false);
-    features["codex_hooks"] = value(true);
+    // Newer Codex CLI replaces the old `codex_hooks` key with `hooks`
+    // and warns if the old name is present. Migrate when we see it.
+    features.remove("codex_hooks");
+    features["hooks"] = value(true);
 
     let new_text = doc.to_string();
     if new_text != original {
@@ -652,9 +655,28 @@ trust_level = "trusted"
         // Original keys preserved.
         assert!(new.contains("model = \"gpt-x\""));
         assert!(new.contains("trust_level = \"trusted\""));
-        // Feature flipped on.
+        // Feature flipped on under the new key name.
         assert!(new.contains("[features]"));
-        assert!(new.contains("codex_hooks = true"));
+        assert!(new.contains("hooks = true"));
+        // The deprecated key must not be left behind.
+        assert!(!new.contains("codex_hooks"));
+    }
+
+    #[test]
+    fn codex_config_toml_migrates_deprecated_codex_hooks_key() {
+        let dir = tmp();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            r#"[features]
+codex_hooks = true
+"#,
+        )
+        .unwrap();
+        enable_codex_hooks_feature(&path).unwrap();
+        let new = fs::read_to_string(&path).unwrap();
+        assert!(!new.contains("codex_hooks"), "stale key remained: {new}");
+        assert!(new.contains("hooks = true"), "new key missing: {new}");
     }
 
     #[test]
