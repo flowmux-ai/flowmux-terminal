@@ -1190,10 +1190,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn locks_legacy_custom_terminal_titles_during_normalization() {
+    async fn resets_stale_terminal_titles_during_normalization_on_load() {
+        // The persisted state captures whatever OSC 0/2 the program
+        // running inside the tab last set ("Claude Code", "codex …",
+        // "vim foo"). On the next launch that program is gone, so the
+        // tab title must reset to the cwd-derived form. This test
+        // pins the new behavior; a previous version of flowmux
+        // auto-locked the stale title and it survived restarts.
         let ws_id = WorkspaceId::new();
         let pane_id = PaneId::new();
-        let tab = PaneSurface::terminal("server", Some("/tmp/one".into()));
+        let tab = PaneSurface::terminal("Claude Code", Some("/tmp/one".into()));
         let tab_id = tab.id;
         let mut state = State::default();
         state.workspaces.push(Workspace {
@@ -1222,13 +1228,6 @@ mod tests {
         });
 
         let store = StateStore::new_lazy(state);
-        assert_eq!(
-            store
-                .update_surface_cwd(pane_id, tab_id, "/tmp/two".into())
-                .await,
-            Some(ws_id)
-        );
-
         let ws = store.get_workspace(ws_id).await.unwrap();
         let Pane::Leaf {
             content: PaneContent::Tabs { surfaces, .. },
@@ -1237,12 +1236,14 @@ mod tests {
         else {
             panic!("expected tabbed leaf")
         };
-        assert_eq!(surfaces[0].title, "server");
-        assert!(surfaces[0].title_locked);
-        assert!(matches!(
-            &surfaces[0].kind,
-            SurfaceKind::Terminal { cwd: Some(cwd), .. } if cwd == &std::path::PathBuf::from("/tmp/two")
-        ));
+        assert_eq!(
+            surfaces[0].title,
+            terminal_tab_title_for_cwd(Some(std::path::Path::new("/tmp/one")))
+        );
+        assert!(
+            !surfaces[0].title_locked,
+            "must not auto-lock; the title was never the user's intent"
+        );
     }
 
     #[tokio::test]

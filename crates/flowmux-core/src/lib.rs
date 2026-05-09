@@ -102,29 +102,20 @@ fn normalize_unlocked_terminal_title(surface: &mut PaneSurface) -> bool {
     let SurfaceKind::Terminal { cwd, .. } = &surface.kind else {
         return false;
     };
-
-    if looks_like_legacy_terminal_title(&surface.title) {
-        let Some(cwd) = cwd.as_deref() else {
-            return false;
-        };
-        let title = terminal_tab_title_for_cwd(Some(cwd));
-        if surface.title == title {
-            return false;
-        }
-        surface.title = title;
-        return true;
-    }
-
-    let title_matches_cwd = cwd
-        .as_deref()
-        .map(|cwd| terminal_tab_title_for_cwd(Some(cwd)))
-        .as_deref()
-        == Some(surface.title.as_str());
-    if title_matches_cwd {
+    // At state-load time the running process that emitted the
+    // last OSC 0/2 title is gone, so any unlocked title that
+    // doesn't match the cwd-derived form is stale (e.g. "Claude
+    // Code", "codex", "vim foo"). Reset it to the cwd-based title
+    // — and never auto-promote to locked, because the title was
+    // never the user's intent in the first place.
+    let next_title = match cwd.as_deref() {
+        Some(cwd) => terminal_tab_title_for_cwd(Some(cwd)),
+        None => FALLBACK_TERMINAL_TAB_TITLE.to_string(),
+    };
+    if surface.title == next_title {
         return false;
     }
-
-    surface.title_locked = true;
+    surface.title = next_title;
     true
 }
 
@@ -1326,7 +1317,13 @@ mod tests {
     }
 
     #[test]
-    fn pane_content_locks_non_legacy_terminal_titles_on_normalize() {
+    fn pane_content_resets_stale_terminal_titles_on_normalize() {
+        // Previously this test asserted the opposite — that an unlocked
+        // terminal whose title didn't match the cwd was AUTO-LOCKED.
+        // That kept stale OSC 0/2 titles ("Claude Code", "codex foo")
+        // alive across app restarts. The current behavior resets the
+        // title back to the cwd-derived form and stays unlocked, so the
+        // next process inside the tab can paint a fresh title.
         let custom = PaneSurface::terminal("server", Some("/tmp/project".into()));
         let custom_id = custom.id;
         let mut content = PaneContent::Tabs {
@@ -1339,8 +1336,11 @@ mod tests {
         let PaneContent::Tabs { surfaces, .. } = content else {
             panic!("expected tabbed content")
         };
-        assert_eq!(surfaces[0].title, "server");
-        assert!(surfaces[0].title_locked);
+        assert_eq!(
+            surfaces[0].title,
+            terminal_tab_title_for_cwd(Some(std::path::Path::new("/tmp/project")))
+        );
+        assert!(!surfaces[0].title_locked);
     }
 
     #[test]
@@ -2559,5 +2559,94 @@ mod tests {
         // Round-trip both variants.
         let back: PlacementStrategy = serde_json::from_str(r#""reuse_right_sibling""#).unwrap();
         assert_eq!(back, PlacementStrategy::ReuseRightSibling);
+    }
+
+    /// Stale OSC 0/2 titles ("Claude Code", "codex", "vim foo") that
+    /// were captured into the persisted state must NOT survive into
+    /// the next launch — the process that emitted them is gone, so
+    /// the tab should restart with a cwd-derived title.
+    #[test]
+    fn normalize_resets_unlocked_title_to_cwd_after_relaunch() {
+        let cwd = std::path::PathBuf::from("/home/u/dev/os/flowmux");
+        let mut surface = PaneSurface {
+            id: SurfaceId::new(),
+            title: "Claude Code".into(),
+            title_locked: false,
+            kind: SurfaceKind::Terminal {
+                shell: None,
+                cwd: Some(cwd.clone()),
+            },
+        };
+        let changed = normalize_unlocked_terminal_title(&mut surface);
+        assert!(changed, "stale OSC title should be reset");
+        assert_eq!(surface.title, terminal_tab_title_for_cwd(Some(&cwd)));
+        assert!(
+            !surface.title_locked,
+            "must not auto-lock — the title was never the user's intent"
+        );
+    }
+
+    #[test]
+    fn normalize_keeps_user_renamed_titles() {
+        let mut surface = PaneSurface {
+            id: SurfaceId::new(),
+            title: "my pinned shell".into(),
+            title_locked: true,
+            kind: SurfaceKind::Terminal {
+                shell: None,
+                cwd: Some("/tmp".into()),
+            },
+        };
+        let changed = normalize_unlocked_terminal_title(&mut surface);
+        assert!(!changed);
+        assert_eq!(surface.title, "my pinned shell");
+        assert!(surface.title_locked);
+    }
+
+    #[test]
+    fn normalize_keeps_already_cwd_matching_titles() {
+        let cwd = std::path::PathBuf::from("/home/u/dev/os/flowmux");
+        let derived = terminal_tab_title_for_cwd(Some(&cwd));
+        let mut surface = PaneSurface {
+            id: SurfaceId::new(),
+            title: derived.clone(),
+            title_locked: false,
+            kind: SurfaceKind::Terminal {
+                shell: None,
+                cwd: Some(cwd),
+            },
+        };
+        let changed = normalize_unlocked_terminal_title(&mut surface);
+        assert!(!changed, "no-op when title already matches cwd");
+        assert!(!surface.title_locked);
+    }
+
+    #[test]
+    fn normalize_skips_browser_surfaces() {
+        let mut surface = PaneSurface {
+            id: SurfaceId::new(),
+            title: "Page Title".into(),
+            title_locked: false,
+            kind: SurfaceKind::Browser { initial_url: None },
+        };
+        let changed = normalize_unlocked_terminal_title(&mut surface);
+        assert!(!changed);
+        assert_eq!(surface.title, "Page Title");
+    }
+
+    #[test]
+    fn normalize_falls_back_to_default_when_cwd_is_missing() {
+        let mut surface = PaneSurface {
+            id: SurfaceId::new(),
+            title: "claude".into(),
+            title_locked: false,
+            kind: SurfaceKind::Terminal {
+                shell: None,
+                cwd: None,
+            },
+        };
+        let changed = normalize_unlocked_terminal_title(&mut surface);
+        assert!(changed);
+        assert_eq!(surface.title, FALLBACK_TERMINAL_TAB_TITLE);
     }
 }
