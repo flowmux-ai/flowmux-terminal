@@ -19,7 +19,7 @@
 //! recolor / close).
 
 use crate::bridge::{Bridge, GtkCommand};
-use crate::notifications::{NotificationEntry, NotificationLog};
+use crate::notifications::{NotificationEntry, NotificationStore};
 use flowmux_core::{NotificationLevel, PrState, Workspace, WorkspaceId};
 use gtk::prelude::*;
 use std::cell::RefCell;
@@ -36,7 +36,7 @@ pub struct Sidebar {
     on_close: Rc<dyn Fn(WorkspaceId)>,
     bell_button: gtk::MenuButton,
     bell_popover: gtk::Popover,
-    notification_log: NotificationLog,
+    notifications: NotificationStore,
     attentions: Rc<RefCell<HashSet<WorkspaceId>>>,
     bridge: Bridge,
     /// Last computed subtitle lines per workspace, capped at 3 lines.
@@ -52,7 +52,7 @@ impl Sidebar {
         on_select: S,
         on_close: C,
         bridge: Bridge,
-        notification_log: NotificationLog,
+        notifications: NotificationStore,
     ) -> Self
     where
         S: Fn(WorkspaceId) + 'static,
@@ -126,16 +126,20 @@ impl Sidebar {
         bell_popover.set_size_request(320, -1);
         bell_button.set_popover(Some(&bell_popover));
 
-        let log_for_show = notification_log.clone();
+        let store_for_show = notifications.clone();
+        let bridge_for_rows = bridge.clone();
         let popover_for_show = bell_popover.clone();
         let bell_for_show = bell_button.clone();
         bell_popover.connect_show(move |_| {
-            // Render fresh contents on every open and mark all entries
-            // seen so subsequent opens dim the existing ones.
-            popover_for_show.set_child(Some(&render_notification_list(&log_for_show)));
-            for entry in log_for_show.borrow_mut().iter_mut() {
-                entry.seen = true;
-            }
+            // Render fresh contents on every open. Rows handle their own
+            // click → OpenNotification dispatch; opening the popover
+            // does NOT mark entries read so the routing target is still
+            // recognizable as fresh until the user actually clicks it.
+            popover_for_show.set_child(Some(&render_notification_list(
+                &store_for_show,
+                bridge_for_rows.clone(),
+                popover_for_show.clone(),
+            )));
             bell_for_show.remove_css_class("accent");
         });
         toolbar.append(&bell_button);
@@ -178,7 +182,7 @@ impl Sidebar {
             on_close,
             bell_button,
             bell_popover,
-            notification_log,
+            notifications,
             attentions,
             bridge,
             subtitle_cache: Rc::new(RefCell::new(HashMap::new())),
@@ -316,23 +320,27 @@ impl Sidebar {
         // the new entry shows immediately.
         if self.bell_popover.is_visible() {
             self.bell_popover
-                .set_child(Some(&render_notification_list(&self.notification_log)));
+                .set_child(Some(&render_notification_list(
+                    &self.notifications,
+                    self.bridge.clone(),
+                    self.bell_popover.clone(),
+                )));
         }
     }
 }
 
-fn render_notification_list(log: &NotificationLog) -> gtk::Widget {
+fn render_notification_list(
+    store: &NotificationStore,
+    bridge: Bridge,
+    popover: gtk::Popover,
+) -> gtk::Widget {
     let scroll = gtk::ScrolledWindow::new();
     scroll.set_hscrollbar_policy(gtk::PolicyType::Never);
     scroll.set_min_content_height(160);
     scroll.set_max_content_height(420);
     scroll.set_propagate_natural_height(true);
 
-    let list = gtk::ListBox::new();
-    list.set_selection_mode(gtk::SelectionMode::None);
-    list.add_css_class("boxed-list");
-
-    let entries = log.borrow();
+    let entries = store.entries();
     if entries.is_empty() {
         let empty = gtk::Label::new(Some("No notifications yet."));
         empty.set_margin_top(20);
@@ -342,15 +350,26 @@ fn render_notification_list(log: &NotificationLog) -> gtk::Widget {
         return scroll.upcast();
     }
 
+    let list = gtk::ListBox::new();
+    list.set_selection_mode(gtk::SelectionMode::None);
+    list.add_css_class("boxed-list");
+
     // Newest at top.
     for entry in entries.iter().rev() {
-        list.append(&notification_row(entry));
+        list.append(&notification_row(entry, bridge.clone(), popover.clone()));
     }
     scroll.set_child(Some(&list));
     scroll.upcast()
 }
 
-fn notification_row(entry: &NotificationEntry) -> gtk::Widget {
+fn notification_row(
+    entry: &NotificationEntry,
+    bridge: Bridge,
+    popover: gtk::Popover,
+) -> gtk::Widget {
+    let row = gtk::ListBoxRow::new();
+    row.set_activatable(true);
+
     let v = gtk::Box::new(gtk::Orientation::Vertical, 2);
     v.set_margin_top(8);
     v.set_margin_bottom(8);
@@ -369,7 +388,7 @@ fn notification_row(entry: &NotificationEntry) -> gtk::Widget {
     when.add_css_class("caption");
     when.add_css_class("dim-label");
 
-    if entry.seen {
+    if entry.read {
         v.set_opacity(0.55);
     }
     if matches!(
@@ -382,7 +401,25 @@ fn notification_row(entry: &NotificationEntry) -> gtk::Widget {
     v.append(&title);
     v.append(&body);
     v.append(&when);
-    v.upcast()
+    row.set_child(Some(&v));
+
+    // `row-activated` (rather than a click gesture) so keyboard Enter
+    // on a focused row routes the same way as a mouse click.
+    let entry_id = entry.id;
+    let popover_for_click = popover.clone();
+    row.connect_activate(move |_| {
+        let bridge = bridge.clone();
+        let popover = popover_for_click.clone();
+        gtk::glib::MainContext::default().spawn_local(async move {
+            let _ = bridge
+                .tx
+                .send(GtkCommand::OpenNotification { id: entry_id })
+                .await;
+        });
+        popover.popdown();
+    });
+
+    row.upcast()
 }
 
 fn format_time(ts: &chrono::DateTime<chrono::Utc>) -> String {

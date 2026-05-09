@@ -396,6 +396,14 @@ impl Handler for GuiHandler {
                     ref body,
                     level,
                 } => {
+                    // Pre-resolve the workspace here so the GTK side
+                    // can route the click without a second store
+                    // lookup (the dispatcher still falls back to a
+                    // late lookup if it sees `workspace = None`).
+                    let workspace = match pane {
+                        Some(p) => self.inner.store().workspace_for_pane(p).await,
+                        None => None,
+                    };
                     // Tee to the GUI's in-process notification log so
                     // the sidebar bell popover sees it. The desktop
                     // toast still goes out through DaemonHandler.
@@ -404,6 +412,7 @@ impl Handler for GuiHandler {
                         .tx
                         .send(GtkCommand::AddNotification {
                             pane,
+                            workspace,
                             title: title.clone(),
                             body: body.clone(),
                             level,

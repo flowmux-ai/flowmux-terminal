@@ -7,7 +7,7 @@ use crate::bridge::{
     Bridge, BrowserActionResult, BrowserOp, BrowserOpenOutcome, FocusDir, GtkCommand, WsNav,
 };
 use crate::keybindings::FocusedPane;
-use crate::notifications::{NotificationEntry, NotificationLog};
+use crate::notifications::NotificationStore;
 use crate::theme::ResolvedTheme;
 use crate::ui::sidebar::Sidebar;
 use crate::ui::terminal_pane::PaneCallbacks;
@@ -43,7 +43,7 @@ pub struct WindowController {
     store: StateStore,
     bridge: Bridge,
     theme: Arc<ResolvedTheme>,
-    notification_log: NotificationLog,
+    notifications: NotificationStore,
     options: Rc<RefCell<flowmux_config::options::Options>>,
     /// Global CssProvider. When the options dialog changes focus border color
     /// or opacity, reload CSS into this same instance so every pane updates immediately.
@@ -65,7 +65,7 @@ impl WindowController {
         css_provider: gtk::CssProvider,
     ) -> Self {
         let focused_pane: FocusedPane = Rc::new(Cell::new(None));
-        let notification_log = crate::notifications::new_log();
+        let notifications = NotificationStore::new();
         let stack = gtk::Stack::new();
         stack.set_transition_type(gtk::StackTransitionType::Crossfade);
         stack.set_hexpand(true);
@@ -103,7 +103,7 @@ impl WindowController {
             on_select,
             on_close,
             bridge.clone(),
-            notification_log.clone(),
+            notifications.clone(),
         );
 
         let pane_registry: Rc<RefCell<PaneRegistry>> =
@@ -176,7 +176,7 @@ impl WindowController {
             store,
             bridge,
             theme,
-            notification_log,
+            notifications,
             options,
             css_provider,
             focus_mru: Rc::new(RefCell::new(HashMap::new())),
@@ -841,6 +841,26 @@ impl WindowController {
         self.show_status_when_empty();
     }
 
+    /// Grab keyboard focus on `pane`. Deferred to the next idle so that
+    /// any in-flight workspace activation has finished swapping the
+    /// stack child before we ask GTK to focus a specific terminal /
+    /// browser leaf. No-op when `pane` is unknown to the registry —
+    /// e.g. when the source workspace was closed between the
+    /// notification firing and the user clicking it.
+    fn focus_pane(&self, pane: PaneId) {
+        let registry = self.pane_registry.clone();
+        glib::idle_add_local_once(move || {
+            let r = registry.borrow();
+            if let Some(term) = r.active_terminal(pane) {
+                term.widget.grab_focus();
+            } else if let Some(browser) = r.active_browser(pane) {
+                browser.web_view.grab_focus();
+            } else {
+                tracing::debug!(%pane, "focus_pane: no surface registered for pane");
+            }
+        });
+    }
+
     /// Find the first leaf in this workspace's first surface and
     /// grab keyboard focus on it. Deferred to the next idle so the
     /// widget tree is realized first.
@@ -1337,25 +1357,35 @@ impl WindowController {
             }
             GtkCommand::AddNotification {
                 pane,
+                workspace,
                 title,
                 body,
                 level,
             } => {
-                self.notification_log.borrow_mut().push(NotificationEntry {
-                    title,
-                    body,
-                    level,
-                    created_at: chrono::Utc::now(),
-                    seen: false,
-                });
+                self.notifications.push(title, body, level, pane, workspace);
                 self.sidebar.bump_notification_badge();
                 if matches!(level, flowmux_core::NotificationLevel::AttentionNeeded) {
-                    if let Some(pane) = pane {
-                        if let Some(ws_id) = self.store.workspace_for_pane(pane).await {
-                            self.sidebar.mark_attention(ws_id);
-                        }
+                    if let Some(ws_id) = workspace {
+                        self.sidebar.mark_attention(ws_id);
                     }
                 }
+            }
+            GtkCommand::OpenNotification { id } => {
+                let Some(entry) = self.notifications.find(id) else {
+                    tracing::debug!(%id, "open notification: id not found");
+                    return;
+                };
+                self.notifications.mark_read(id);
+                if let Some(ws_id) = entry.workspace {
+                    self.activate_workspace(ws_id).await;
+                }
+                if let Some(pane) = entry.pane {
+                    self.focus_pane(pane);
+                }
+                // Mirrors cmux's `bringToFront(window)` so the click on
+                // a desktop toast / popover row brings flowmux up even
+                // if it was minimized or behind another window.
+                self.window.present();
             }
             GtkCommand::FocusWorkspaceAt { idx } => {
                 let snap = self.store.snapshot().await;

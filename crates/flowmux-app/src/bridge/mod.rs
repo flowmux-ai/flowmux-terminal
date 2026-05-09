@@ -9,7 +9,8 @@
 //! window controller.
 
 use flowmux_core::{
-    NotificationLevel, PaneId, PlacementStrategy, SplitDirection, SurfaceId, WorkspaceId,
+    NotificationId, NotificationLevel, PaneId, PlacementStrategy, SplitDirection, SurfaceId,
+    WorkspaceId,
 };
 use std::path::PathBuf;
 use tokio::sync::oneshot;
@@ -243,11 +244,22 @@ pub enum GtkCommand {
     /// Append a notification to the in-process log shown in the
     /// sidebar's bell popover. flowmux-notify still delivers the real
     /// desktop notification through D-Bus; this is the GUI tee.
+    ///
+    /// `workspace` is resolved by the IPC handler from `pane` so the
+    /// later [`Self::OpenNotification`] route knows which side-panel
+    /// row to bring to the foreground without a second store lookup.
     AddNotification {
         pane: Option<PaneId>,
+        workspace: Option<WorkspaceId>,
         title: String,
         body: String,
         level: NotificationLevel,
+    },
+    /// User clicked a row in the bell popover. Mark the entry read,
+    /// activate its workspace (if known), and grab focus on the source
+    /// pane (if known). Mirrors cmux's `openNotification → focusTab`.
+    OpenNotification {
+        id: NotificationId,
     },
     /// Cycle to the previous / next workspace in sidebar order.
     FocusWorkspaceDir { dir: WsNav },
