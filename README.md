@@ -12,12 +12,10 @@
 
 ### A terminal for AI agent workflows, browser control, and task signals.
 
-flowmux is a Linux/GTK4 terminal with vertical tabs and notifications for AI coding agents.
+flowmux is a Linux/GTK4 terminal with tabs and notifications for AI coding agents.
 
-> This is a cmux-inspired terminal. flowmux is a Linux/GTK4 terminal with tabs and notifications for AI coding agents.
-> flowmux is an unofficial GPL-3.0-or-later Linux reimplementation inspired by cmux, a macOS/AppKit app. It is not affiliated with.
-
-
+> It is an unofficial GPL-3.0-or-later reimplementation inspired by [cmux](https://cmux.com/ko), a macOS/AppKit app, and is not affiliated with cmux.
+  
 ## Control internal browser
 
 flowmux ships a WebKitGTK 6.0 browser tab that lives next to terminal tabs in
