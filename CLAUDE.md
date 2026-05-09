@@ -28,19 +28,3 @@ Keep code identifiers in their existing English form.
 - In comments, use the terminology above for behavior descriptions and the
   exact identifier name when referring to a concrete type, field, or function.
 - Do not mix multiple terms for the same concept in one document or view.
-
-## Local Install After Commit And Push
-
-After creating commits and pushing to GitHub, also run the release build and
-local install.
-
-- Run the basic checks before pushing. If they fail, report the cause and
-  incomplete state.
-- After pushing, build with `cargo build --release -p flowmux -p flowmux-cli`.
-- If the build succeeds, install `target/release/flowmux` on PATH and
-  `target/release/flowmuxctl` under `~/.local/lib/flowmux/`.
-- For GUI launch support, also install
-  `resources/desktop/com.flowmux.App.desktop` to
-  `~/.local/share/applications/com.flowmux.App.desktop` and refresh the desktop
-  database when available.
-- If build or install fails, report the failing command and reason clearly.
