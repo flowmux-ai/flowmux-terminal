@@ -1053,7 +1053,11 @@ fn build_panel(
     match &surface.kind {
         SurfaceKind::Terminal { cwd, shell } => {
             let argv = shell.clone().map(|s| vec![s]).unwrap_or(argv);
-            let socket = flowmux_config::paths::runtime_socket();
+            // Match the per-PID socket that `flowmux::main` binds, so
+            // PTYs inside this GUI window route their notifications
+            // back to the SAME GUI even when multiple flowmux windows
+            // are running. Same process ⇒ same path.
+            let socket = flowmux_config::paths::runtime_socket_for_pid(std::process::id());
             let bundled_cli = std::env::current_exe()
                 .ok()
                 .and_then(|p| p.parent().map(|d| d.join("flowmux")))

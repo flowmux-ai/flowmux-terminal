@@ -67,7 +67,12 @@ fn main() -> anyhow::Result<()> {
         std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
     }
 
-    let socket = paths::runtime_socket();
+    // One socket per GUI process so several flowmux windows can run
+    // side-by-side without their notifications crossing over. The
+    // `FLOWMUX_SOCKET_PATH` env we inject into every PTY carries this
+    // exact path, so terminal-side hooks (Claude/Codex/OpenCode) talk
+    // back to the GUI that spawned them.
+    let socket = paths::runtime_socket_for_pid(std::process::id());
     info!(?socket, "flowmux starting");
 
     // Tokio runtime hosts the IPC server, the state store, and any
