@@ -8,7 +8,7 @@ publish = false
 description = "The `flowmux` command-line interface."
 
 [[bin]]
-name = "flowmux"
+name = "flowmuxctl"
 path = "src/main.rs"
 
 [dependencies]

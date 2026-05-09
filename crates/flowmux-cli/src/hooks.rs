@@ -14,7 +14,7 @@
 //! `Request::Notify`) and otherwise do minimal work.
 
 use anyhow::Context;
-use flowmux_core::{NotificationLevel, PaneId};
+use flowmux_core::{NotificationLevel, PaneId, SurfaceId};
 use flowmux_ipc::{
     client::Client,
     protocol::{Request, Response},
@@ -79,7 +79,7 @@ pub fn read_codex_hook_input(extra_args: &[String]) -> ClaudeHookInput {
     read_claude_hook_input()
 }
 
-/// Resolve `FLOWMUX_PANE_ID` from the env (set by `flowmux-app` at PTY
+/// Resolve `FLOWMUX_PANE_ID` from the env (set by `flowmux` at PTY
 /// spawn time). Mirrors `crate::pane_from_env` so the hooks module
 /// stays self-contained.
 pub fn pane_from_env() -> Option<PaneId> {
@@ -87,6 +87,17 @@ pub fn pane_from_env() -> Option<PaneId> {
         .ok()
         .as_deref()
         .and_then(|s| PaneId::from_str(s).ok())
+}
+
+/// Resolve `FLOWMUX_SURFACE_ID` (the specific tab inside the pane).
+/// Lets the GUI tell whether the user is currently on that tab — so
+/// it can suppress redundant toasts — and route a click to the right
+/// tab when they are not.
+pub fn surface_from_env() -> Option<SurfaceId> {
+    std::env::var("FLOWMUX_SURFACE_ID")
+        .ok()
+        .as_deref()
+        .and_then(|s| SurfaceId::from_str(s).ok())
 }
 
 /// Trim a body string down to a single notification-friendly line.
@@ -105,12 +116,18 @@ pub fn shorten_body(s: &str, max: usize) -> String {
 }
 
 /// Build a `Request::Notify` for an agent stop event.
-pub fn build_stop_notify(agent: &str, body: Option<&str>, pane: Option<PaneId>) -> Request {
+pub fn build_stop_notify(
+    agent: &str,
+    body: Option<&str>,
+    pane: Option<PaneId>,
+    surface: Option<SurfaceId>,
+) -> Request {
     let body_line = body
         .map(|s| shorten_body(s, 160))
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "task complete".to_string());
     Request::Notify {
+        surface,
         pane,
         title: format!("{agent} ready"),
         body: body_line,
@@ -124,6 +141,7 @@ pub fn build_notification_notify(
     agent: &str,
     message: Option<&str>,
     pane: Option<PaneId>,
+    surface: Option<SurfaceId>,
 ) -> Request {
     let body_line = message
         .map(|s| shorten_body(s, 160))
@@ -131,6 +149,7 @@ pub fn build_notification_notify(
         .unwrap_or_else(|| "needs your attention".to_string());
     Request::Notify {
         pane,
+        surface,
         title: format!("{agent} needs your input"),
         body: body_line,
         level: NotificationLevel::AttentionNeeded,
@@ -148,7 +167,7 @@ pub async fn send_best_effort(client: &Client, req: Request) {
 
 /// Connect to the daemon socket using the same fallback chain as
 /// `Cli::socket`. Returns `None` (with a debug log) when the daemon is
-/// unreachable so a hook on a host without flowmux-app running is a
+/// unreachable so a hook on a host without flowmux running is a
 /// silent no-op rather than a visible error.
 pub async fn connect_daemon(socket: Option<PathBuf>) -> Option<Client> {
     let socket = socket
@@ -194,7 +213,7 @@ mod tests {
 
     #[test]
     fn build_stop_notify_falls_back_to_default_body() {
-        match build_stop_notify("Claude", None, None) {
+        match build_stop_notify("Claude", None, None, None) {
             Request::Notify {
                 title, body, level, ..
             } => {
@@ -207,15 +226,18 @@ mod tests {
     }
 
     #[test]
-    fn build_stop_notify_carries_pane_and_uses_supplied_body() {
+    fn build_stop_notify_carries_pane_and_surface_for_click_routing() {
         let pane = PaneId::new();
-        match build_stop_notify("Codex", Some("wrote 3 files"), Some(pane)) {
+        let surface = SurfaceId::new();
+        match build_stop_notify("Codex", Some("wrote 3 files"), Some(pane), Some(surface)) {
             Request::Notify {
                 pane: got_pane,
+                surface: got_surface,
                 body,
                 ..
             } => {
                 assert_eq!(got_pane, Some(pane));
+                assert_eq!(got_surface, Some(surface));
                 assert_eq!(body, "wrote 3 files");
             }
             other => panic!("expected Notify, got {other:?}"),
@@ -224,7 +246,7 @@ mod tests {
 
     #[test]
     fn build_notification_notify_uses_attention_level() {
-        let req = build_notification_notify("Claude", Some("permission to run rm"), None);
+        let req = build_notification_notify("Claude", Some("permission to run rm"), None, None);
         if let Request::Notify {
             title, body, level, ..
         } = req
@@ -239,7 +261,7 @@ mod tests {
 
     #[test]
     fn build_notification_notify_falls_back_when_message_missing() {
-        let req = build_notification_notify("OpenCode", None, None);
+        let req = build_notification_notify("OpenCode", None, None, None);
         if let Request::Notify { body, .. } = req {
             assert_eq!(body, "needs your attention");
         } else {

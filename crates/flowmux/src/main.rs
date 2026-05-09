@@ -17,6 +17,9 @@ use bridge::Bridge;
 use flowmux_config::paths;
 use flowmux_daemon::{DaemonHandler, StateStore};
 use ipc_handler::GuiHandler;
+use std::ffi::OsString;
+use std::path::PathBuf;
+use std::process::Command;
 use std::sync::Arc;
 use tracing::info;
 use ui::{spawn_dispatch_loop, WindowController};
@@ -24,6 +27,10 @@ use ui::{spawn_dispatch_loop, WindowController};
 const APP_ID: &str = "com.flowmux.App";
 
 fn main() -> anyhow::Result<()> {
+    if delegate_to_cli_if_needed()? {
+        return Ok(());
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("FLOWMUX_LOG")
@@ -52,7 +59,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     let socket = paths::runtime_socket();
-    info!(?socket, "flowmux-app starting");
+    info!(?socket, "flowmux starting");
 
     // Tokio runtime hosts the IPC server, the state store, and any
     // async desktop-bus interactions.
@@ -147,4 +154,48 @@ fn main() -> anyhow::Result<()> {
     drop(rt);
     let _ = std::fs::remove_file(&socket);
     std::process::exit(exit_code.into());
+}
+
+fn delegate_to_cli_if_needed() -> anyhow::Result<bool> {
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    if args.is_empty() {
+        return Ok(false);
+    }
+
+    let current_exe = std::env::current_exe().ok();
+    let sibling = current_exe
+        .as_ref()
+        .map(|p| p.with_file_name("flowmuxctl"))
+        .filter(|p| p.is_file());
+    let private_install = current_exe
+        .as_ref()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .map(|prefix| prefix.join("lib").join("flowmux").join("flowmuxctl"))
+        .filter(|p| p.is_file());
+    let program = sibling
+        .or(private_install)
+        .unwrap_or_else(|| PathBuf::from("flowmuxctl"));
+
+    #[cfg(unix)]
+    {
+        use anyhow::Context;
+        use std::os::unix::process::CommandExt;
+
+        let err = Command::new(&program).args(args).exec();
+        Err::<(), _>(err).with_context(|| format!("launch {}", program.display()))?;
+    }
+
+    #[cfg(not(unix))]
+    {
+        use anyhow::Context;
+
+        let status = Command::new(&program)
+            .args(args)
+            .status()
+            .with_context(|| format!("launch {}", program.display()))?;
+        std::process::exit(status.code().unwrap_or(1));
+    }
+
+    Ok(true)
 }

@@ -5,7 +5,7 @@ runtime-version: '46'
 sdk: org.gnome.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
-command: flowmux-app
+command: flowmux
 finish-args:
   - --share=network
   - --share=ipc
@@ -26,9 +26,9 @@ modules:
       build-args:
         - --share=network
     build-commands:
-      - cargo --offline build --release --manifest-path Cargo.toml -p flowmux-app -p flowmux-cli
-      - install -Dm755 target/release/flowmux-app /app/bin/flowmux-app
-      - install -Dm755 target/release/flowmux     /app/bin/flowmux
+      - cargo --offline build --release --manifest-path Cargo.toml -p flowmux -p flowmux-cli
+      - install -Dm755 target/release/flowmux    /app/bin/flowmux
+      - install -Dm755 target/release/flowmuxctl /app/lib/flowmux/flowmuxctl
       - install -Dm644 resources/desktop/com.flowmux.App.desktop /app/share/applications/com.flowmux.App.desktop
       - install -Dm644 resources/icons/flowmux.svg /app/share/icons/hicolor/scalable/apps/com.flowmux.App.svg
       - for size in 16 24 32 48 64 96 128 256 512; do install -Dm644 "resources/icons/flowmux-${size}.png" "/app/share/icons/hicolor/${size}x${size}/apps/com.flowmux.App.png"; done

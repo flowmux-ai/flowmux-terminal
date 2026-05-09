@@ -838,6 +838,47 @@ impl WindowController {
         self.show_status_when_empty();
     }
 
+    /// Inline copy of the `GtkCommand::ActivateSurface` arm — used by
+    /// the notification click router so we can `await` the surface
+    /// switch before grabbing focus. Idempotent when the surface is
+    /// already active.
+    async fn activate_surface_now(&self, pane: PaneId, surface: SurfaceId) {
+        let ws_id = self.store.set_active_surface(pane, surface).await;
+        self.pane_registry
+            .borrow_mut()
+            .activate_surface(pane, surface);
+        self.refresh_window_title().await;
+        if let Some(ws_id) = ws_id {
+            self.sync_workspace_label(ws_id).await;
+        }
+    }
+
+    /// True when the GUI is the foreground window AND the user is
+    /// currently looking at exactly the pane+surface that the
+    /// notification came from. Used to suppress redundant toasts /
+    /// bell-popover entries (cmux's
+    /// `shouldSuppressExternalDelivery`).
+    fn is_source_focused(
+        &self,
+        source_pane: Option<PaneId>,
+        source_surface: Option<SurfaceId>,
+    ) -> bool {
+        let Some(pane) = source_pane else { return false };
+        if !self.window.is_active() {
+            return false;
+        }
+        if self.focused_pane.get() != Some(pane) {
+            return false;
+        }
+        match source_surface {
+            // Notification carries no surface — same-pane is enough.
+            None => true,
+            // Compare to the currently active surface inside the pane;
+            // a non-active tab still gets a notification.
+            Some(s) => self.pane_registry.borrow().active_surface(pane) == Some(s),
+        }
+    }
+
     /// Grab keyboard focus on `pane`. Deferred to the next idle so that
     /// any in-flight workspace activation has finished swapping the
     /// stack child before we ask GTK to focus a specific terminal /
@@ -1348,18 +1389,37 @@ impl WindowController {
             }
             GtkCommand::AddNotification {
                 pane,
+                surface,
                 workspace,
                 title,
                 body,
                 level,
+                ack,
             } => {
-                self.notifications.push(title, body, level, pane, workspace);
+                // Suppress when the user is already on the source
+                // pane+surface AND the app window is focused. Mirrors
+                // cmux's `shouldSuppressExternalDelivery` policy: don't
+                // toast or grow the bell list for an event the user is
+                // literally watching.
+                let suppress = self.is_source_focused(pane, surface);
+                if suppress {
+                    tracing::debug!(
+                        ?pane,
+                        ?surface,
+                        "notification suppressed: source pane+surface already focused"
+                    );
+                    let _ = ack.send(false);
+                    return;
+                }
+                self.notifications
+                    .push(title, body, level, pane, surface, workspace);
                 self.sidebar.bump_notification_badge();
                 if matches!(level, flowmux_core::NotificationLevel::AttentionNeeded) {
                     if let Some(ws_id) = workspace {
                         self.sidebar.mark_attention(ws_id);
                     }
                 }
+                let _ = ack.send(true);
             }
             GtkCommand::OpenNotification { id } => {
                 let Some(entry) = self.notifications.find(id) else {
@@ -1371,6 +1431,17 @@ impl WindowController {
                     self.activate_workspace(ws_id).await;
                 }
                 if let Some(pane) = entry.pane {
+                    // Switch to the source tab first when the entry
+                    // points at a non-active surface inside its pane,
+                    // then grab focus. The activate-surface dispatch
+                    // is awaited so the focus_pane idle below sees the
+                    // newly-active terminal/browser widget.
+                    if let Some(source_surface) = entry.surface {
+                        let active = self.pane_registry.borrow().active_surface(pane);
+                        if active != Some(source_surface) {
+                            self.activate_surface_now(pane, source_surface).await;
+                        }
+                    }
                     self.focus_pane(pane);
                 }
                 // Mirrors cmux's `bringToFront(window)` so the click on
@@ -2241,7 +2312,7 @@ fn make_callbacks(
 /// type is only re-exported from webkit6 when the `soup3` feature is
 /// enabled (which in turn pulls in libsoup-3). To keep the default
 /// build minimal we record the cookies that *would* be injected and
-/// return the count; flipping `flowmux-app/Cargo.toml` to
+/// return the count; flipping `flowmux/Cargo.toml` to
 /// `webkit6 = { version = "0.4", features = ["soup3"] }` and replacing
 /// the body below with `manager.add_cookie(...)` calls is the only
 /// change needed when we ship cookie import to users.

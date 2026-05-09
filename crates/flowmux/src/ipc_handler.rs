@@ -392,6 +392,7 @@ impl Handler for GuiHandler {
 
                 Request::Notify {
                     pane,
+                    surface,
                     ref title,
                     ref body,
                     level,
@@ -404,28 +405,38 @@ impl Handler for GuiHandler {
                         Some(p) => self.inner.store().workspace_for_pane(p).await,
                         None => None,
                     };
-                    // Tee to the GUI's in-process notification log so
-                    // the sidebar bell popover sees it. The desktop
-                    // toast still goes out through DaemonHandler.
+                    // Ask the GTK side to record the entry. It returns
+                    // `false` when the source pane+surface is already
+                    // focused — in that case we also skip the desktop
+                    // toast so flowmux stays out of the way.
+                    let (tx, rx) = oneshot::channel();
                     let _ = self
                         .bridge
                         .tx
                         .send(GtkCommand::AddNotification {
                             pane,
+                            surface,
                             workspace,
                             title: title.clone(),
                             body: body.clone(),
                             level,
+                            ack: tx,
                         })
                         .await;
-                    self.inner
-                        .handle(Request::Notify {
-                            pane,
-                            title: title.clone(),
-                            body: body.clone(),
-                            level,
-                        })
-                        .await
+                    let should_toast = rx.await.unwrap_or(true);
+                    if should_toast {
+                        self.inner
+                            .handle(Request::Notify {
+                                pane,
+                                surface,
+                                title: title.clone(),
+                                body: body.clone(),
+                                level,
+                            })
+                            .await
+                    } else {
+                        Response::Ok
+                    }
                 }
 
                 // Everything else is fully GUI-independent: ping, list,

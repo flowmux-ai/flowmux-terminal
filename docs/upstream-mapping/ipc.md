@@ -14,7 +14,7 @@
 - Verbs in `flowmux_ipc::protocol::Request` mirror cmux's documented CLI.
   Verbs we have not implemented yet return `RpcError::Unimplemented`
   rather than disappearing — keeps user automation forward-compatible.
-- Daemon side is hosted inside `flowmux-app`; the headless `flowmux` CLI is
+- Daemon side is hosted inside `flowmux`; the headless `flowmux` CLI is
   a thin client over the same socket. Either side can produce events
   (`Event::NotificationRaised`, `Event::PortListening`) so external
   tools can subscribe.
@@ -23,7 +23,7 @@
 
 - `flowmux-ipc` — protocol + client + server
 - `flowmux-cli` — verbs → client calls
-- `flowmux-app` — server handler
+- `flowmux` — server handler
 
 ## Open questions / risks
 

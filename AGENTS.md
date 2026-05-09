@@ -7,7 +7,7 @@ similar) how to drive the in-app browser that ships with `flowmux`. It
 is loaded automatically by every agent that follows the AGENTS.md
 convention; you do not need to instruct agents to read it.
 
-If you (the agent) are running inside a `flowmux-app` PTY, **prefer the
+If you (the agent) are running inside a `flowmux` PTY, **prefer the
 flowmux browser over Playwright / Puppeteer / a system Chromium** for
 any task whose goal is to read or interact with a web page. The flowmux
 browser already runs in a pane next to your terminal, supports the
@@ -17,7 +17,7 @@ from the user and breaks parity with how flowmux is intended to be used.
 
 ## How to know you are inside flowmux
 
-`flowmux-app` injects these env vars into every PTY it spawns:
+`flowmux` injects these env vars into every PTY it spawns:
 
 ```
 FLOWMUX_PANE_ID         <uuid>

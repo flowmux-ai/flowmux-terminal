@@ -31,7 +31,7 @@
 
 - `flowmux-notify` — parser + D-Bus sender
 - `flowmux-ipc` — `Request::Notify` verb
-- `flowmux-app` — pane ring CSS + sidebar badge
+- `flowmux` — pane ring CSS + sidebar badge
 
 ## Open questions / risks
 

@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 [package]
-name = "flowmux-app"
+name = "flowmux"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "GTK4 + libadwaita main application for flowmux."
+description = "GTK4 + libadwaita main application."
 
-# Inline cargo-deb metadata so `cargo deb -p flowmux-app` produces a
+# Inline cargo-deb metadata so `cargo deb -p flowmux` produces a
 # correctly-described .deb without an external manifest. Mirror of
 # packaging/debian/cargo-deb.toml.
 [package.metadata.deb]
@@ -17,7 +17,8 @@ section = "utils"
 priority = "optional"
 depends = "$auto, libgtk-4-1, libadwaita-1-0, libvte-2.91-gtk4-0, libwebkitgtk-6.0-4, libdbus-1-3, libsecret-1-0"
 assets = [
-    ["target/release/flowmux-app", "usr/bin/", "755"],
+    ["target/release/flowmux",     "usr/bin/", "755"],
+    ["target/release/flowmuxctl",  "usr/lib/flowmux/", "755"],
     ["../../resources/desktop/com.flowmux.App.desktop", "usr/share/applications/", "644"],
     ["../../resources/icons/flowmux.svg",      "usr/share/icons/hicolor/scalable/apps/com.flowmux.App.svg", "644"],
     ["../../resources/icons/flowmux-16.png",   "usr/share/icons/hicolor/16x16/apps/com.flowmux.App.png", "644"],
@@ -35,7 +36,7 @@ assets = [
 ]
 
 [[bin]]
-name = "flowmux-app"
+name = "flowmux"
 path = "src/main.rs"
 
 [dependencies]

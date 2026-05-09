@@ -11,14 +11,13 @@ use flowmux_core::{NotificationLevel, PaneId, SplitDirection};
 use flowmux_ipc::{client::Client, protocol::Request, protocol::Response};
 use std::io::Read;
 use std::path::PathBuf;
-use std::process::Command;
 use std::str::FromStr;
 
 mod agent;
 mod hook_install;
 mod hooks;
 
-/// Read `FLOWMUX_PANE_ID` (set by `flowmux-app` at PTY spawn time) and parse
+/// Read `FLOWMUX_PANE_ID` (set by `flowmux` at PTY spawn time) and parse
 /// it as a `PaneId`. Returns `None` if the env var is missing or invalid.
 /// Used as a fallback when the user does not pass an explicit `--pane`/
 /// positional pane id, so terminal-side agents can call e.g.
@@ -38,7 +37,7 @@ fn pane_from_env() -> Option<PaneId> {
 )]
 struct Cli {
     /// Override the daemon socket path. Defaults to `FLOWMUX_SOCKET_PATH`
-    /// (injected by `flowmux-app` into every PTY) and falls back to the
+    /// (injected by `flowmux` into every PTY) and falls back to the
     /// XDG runtime path. `FLOWMUX_SOCKET` is accepted as a legacy alias.
     #[arg(long, env = "FLOWMUX_SOCKET_PATH")]
     socket: Option<PathBuf>,
@@ -50,7 +49,7 @@ struct Cli {
     json: bool,
 
     #[command(subcommand)]
-    cmd: Option<Cmd>,
+    cmd: Cmd,
 }
 
 #[derive(Subcommand)]
@@ -67,7 +66,7 @@ enum Cmd {
     /// Send a desktop notification attached to a pane.
     ///
     /// When `--pane` is omitted the daemon picks up `FLOWMUX_PANE_ID`
-    /// from the calling PTY (set by flowmux-app at spawn time), so
+    /// from the calling PTY (set by flowmux at spawn time), so
     /// hooks running inside a flowmux pane can omit the flag and still
     /// have the click-through routed to the right pane.
     Notify {
@@ -393,9 +392,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let Some(cmd) = cli.cmd else {
-        return exec_flowmux_app();
-    };
+    let cmd = cli.cmd;
 
     // Local-only commands — handled before the daemon connect so they
     // work without a running flowmux GUI.
@@ -435,29 +432,6 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn exec_flowmux_app() -> anyhow::Result<()> {
-    let sibling = std::env::current_exe()
-        .ok()
-        .map(|p| p.with_file_name("flowmux-app"))
-        .filter(|p| p.is_file());
-    let program = sibling.unwrap_or_else(|| PathBuf::from("flowmux-app"));
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        let err = Command::new(&program).exec();
-        Err::<(), _>(err).with_context(|| format!("launch {}", program.display()))
-    }
-
-    #[cfg(not(unix))]
-    {
-        let status = Command::new(&program)
-            .status()
-            .with_context(|| format!("launch {}", program.display()))?;
-        std::process::exit(status.code().unwrap_or(1));
-    }
-}
-
 async fn notify_stream(client: &Client, pane: Option<PaneId>) -> anyhow::Result<()> {
     use flowmux_notify::{osc::parse_osc, OscExtractor};
     use std::sync::{Arc, Mutex};
@@ -485,6 +459,7 @@ async fn notify_stream(client: &Client, pane: Option<PaneId>) -> anyhow::Result<
             let resp = client
                 .call(Request::Notify {
                     pane,
+                    surface: hooks::surface_from_env(),
                     title,
                     body,
                     level,
@@ -517,6 +492,7 @@ fn build_request(cmd: Cmd) -> anyhow::Result<Request> {
             body,
         } => Request::Notify {
             pane: pane.or_else(pane_from_env),
+            surface: hooks::surface_from_env(),
             title,
             body,
             level: parse_level(&level),
@@ -529,6 +505,7 @@ fn build_request(cmd: Cmd) -> anyhow::Result<Request> {
             let body = message.unwrap_or_else(|| "task complete".to_string());
             Request::Notify {
                 pane: pane.or_else(pane_from_env),
+                surface: hooks::surface_from_env(),
                 title: format!("{agent} ready"),
                 body,
                 level: NotificationLevel::AttentionNeeded,
@@ -553,7 +530,7 @@ fn build_request(cmd: Cmd) -> anyhow::Result<Request> {
             } else {
                 SplitDirection::Vertical
             };
-            // When invoked from a terminal that flowmux-app spawned, the
+            // When invoked from a terminal that flowmux spawned, the
             // PTY's `FLOWMUX_PANE_ID` lets the daemon resolve "next to me"
             // without the caller passing a pane id explicitly. cmux's
             // CLI uses the same fallback (`CMUX_SURFACE_ID`).
@@ -714,14 +691,15 @@ async fn run_claude_hook_event(
     use hooks::*;
     let input = read_claude_hook_input();
     let pane = pane_from_env();
+    let surface = surface_from_env();
     let req = match event {
         ClaudeHookEvent::Stop => {
             let body = input.last_assistant_message.as_deref();
-            build_stop_notify("Claude", body, pane)
+            build_stop_notify("Claude", body, pane, surface)
         }
         ClaudeHookEvent::Notification => {
             let msg = input.message.as_deref();
-            build_notification_notify("Claude", msg, pane)
+            build_notification_notify("Claude", msg, pane, surface)
         }
         // The remaining events are tracked by cmux as stateful
         // (session→workspace mapping, status flips). flowmux's first
@@ -746,16 +724,17 @@ async fn run_generic_agent_hook_event(
 ) -> anyhow::Result<()> {
     use hooks::*;
     let pane = pane_from_env();
+    let surface = surface_from_env();
     let req = match event {
         AgentHookEvent::Stop { args } => {
             let input = read_codex_hook_input(args);
             let body = input.last_assistant_message.as_deref();
-            build_stop_notify(agent, body, pane)
+            build_stop_notify(agent, body, pane, surface)
         }
         AgentHookEvent::Notification { args } => {
             let input = read_codex_hook_input(args);
             let msg = input.message.as_deref();
-            build_notification_notify(agent, msg, pane)
+            build_notification_notify(agent, msg, pane, surface)
         }
         AgentHookEvent::SessionStart { .. } => return Ok(()),
     };

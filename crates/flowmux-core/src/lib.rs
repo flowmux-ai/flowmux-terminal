@@ -568,7 +568,7 @@ impl Pane {
                         // Drop OSC 0/2 when it is really a shell PS1 cwd echo.
                         // Otherwise every prompt's `user@host: /path` would
                         // overwrite folder labels and freeze tab/window titles
-                        // in PS1 form. flowmux-app separately applies cwd folder
+                        // in PS1 form. flowmux separately applies cwd folder
                         // names through terminal_tab_title_for_cwd via
                         // set_surface_cwd, while external program titles such
                         // as vi/codex/claude/tmux do not match the PS1 pattern
@@ -1624,7 +1624,7 @@ mod tests {
     fn set_surface_title_auto_drops_shell_ps1_echo_on_terminal() {
         // Regression guard: shell PS1-shaped OSC 0/2 titles (`user@host: /path`)
         // emitted on every prompt must not overwrite cwd-based folder labels.
-        // flowmux-app's cwd-notify flow applies folder names through
+        // flowmux's cwd-notify flow applies folder names through
         // set_surface_cwd, so OSC 0/2 echoes should be ignored.
         let pane_id = PaneId::new();
         let cwd = PathBuf::from("/tmp/flowmux-shell-echo-test");

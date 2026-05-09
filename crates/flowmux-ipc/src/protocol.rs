@@ -57,6 +57,12 @@ pub enum Request {
     /// `flowmux notify --pane <id> --title ... --body ...`
     Notify {
         pane: Option<PaneId>,
+        /// Specific tab surface inside `pane` that triggered the
+        /// notification. Lets the GUI route a click back to the right
+        /// tab even when the leaf pane has many. `None` for global
+        /// toasts that don't belong to any one tab.
+        #[serde(default)]
+        surface: Option<SurfaceId>,
         title: String,
         body: String,
         level: NotificationLevel,

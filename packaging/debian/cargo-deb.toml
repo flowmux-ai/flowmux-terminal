@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # cargo-deb metadata for flowmux. Build with:
 #   cargo install cargo-deb
-#   cargo deb -p flowmux-app --variant=cargo-deb
+#   cargo deb -p flowmux --variant=cargo-deb
 #
-# Two binaries ship: flowmux-app (GUI) and flowmux (CLI). flowmux-daemon is a
-# debug aid and isn't packaged; users run flowmux-app to get the daemon
-# alongside the GUI.
+# The public command is flowmux. CLI subcommands are handled by the private
+# /usr/lib/flowmux/flowmuxctl helper so only flowmux is exposed on PATH.
 
 [package.metadata.deb]
 name = "flowmux"
@@ -21,8 +20,8 @@ section = "utils"
 priority = "optional"
 depends = "$auto, libgtk-4-1, libadwaita-1-0, libvte-2.91-gtk4-0, libwebkitgtk-6.0-4, libdbus-1-3, libsecret-1-0"
 assets = [
-    ["target/release/flowmux-app", "usr/bin/", "755"],
     ["target/release/flowmux",     "usr/bin/", "755"],
+    ["target/release/flowmuxctl",  "usr/lib/flowmux/", "755"],
     ["resources/desktop/com.flowmux.App.desktop", "usr/share/applications/", "644"],
     ["resources/icons/flowmux.svg",      "usr/share/icons/hicolor/scalable/apps/com.flowmux.App.svg", "644"],
     ["resources/icons/flowmux-16.png",   "usr/share/icons/hicolor/16x16/apps/com.flowmux.App.png", "644"],

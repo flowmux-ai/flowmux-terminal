@@ -36,10 +36,9 @@ local install.
 
 - Run the basic checks before pushing. If they fail, report the cause and
   incomplete state.
-- After pushing, build with `cargo build --release -p flowmux-app -p flowmux-cli`.
-- If the build succeeds, install with
-  `cargo install --path crates/flowmux-app --force --locked` and
-  `cargo install --path crates/flowmux-cli --force --locked`.
+- After pushing, build with `cargo build --release -p flowmux -p flowmux-cli`.
+- If the build succeeds, install `target/release/flowmux` on PATH and
+  `target/release/flowmuxctl` under `~/.local/lib/flowmux/`.
 - For GUI launch support, also install
   `resources/desktop/com.flowmux.App.desktop` to
   `~/.local/share/applications/com.flowmux.App.desktop` and refresh the desktop

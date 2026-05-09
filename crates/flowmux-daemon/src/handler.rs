@@ -77,6 +77,7 @@ impl Handler for DaemonHandler {
 
                 Request::Notify {
                     pane,
+                    surface: _,
                     title,
                     body,
                     level,

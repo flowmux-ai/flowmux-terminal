@@ -3,7 +3,7 @@
 # Copy this file to `$XDG_CONFIG_HOME/flowmux/theme` (typically
 # `~/.config/flowmux/theme`) and edit the values. flowmux reads it at
 # startup; no restart-and-re-edit cycle is required if you want to
-# tweak — just relaunch flowmux-app.
+# tweak — just relaunch flowmux.
 #
 # Format: `key = value` lines, `#` for comments. Hex colors are
 # `#RRGGBB`. The 16-entry palette is `palette = N=#RRGGBB` repeated

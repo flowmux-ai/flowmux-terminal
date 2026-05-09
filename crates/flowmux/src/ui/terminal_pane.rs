@@ -140,8 +140,7 @@ pub struct PaneCallbacks {
     /// Return the surface's current 0-based index within the same pane. Tab DnD
     /// uses PaneRegistry::surface_tabs to compute final_index from the source
     /// and target relative positions.
-    pub position_of_surface_in_pane:
-        Rc<dyn Fn(PaneId, SurfaceId) -> Option<usize>>,
+    pub position_of_surface_in_pane: Rc<dyn Fn(PaneId, SurfaceId) -> Option<usize>>,
     /// Called when Ctrl+click selects a URL inside the terminal. The caller
     /// opens that URL in a new browser tab in the same pane
     /// (GtkCommand::OpenUrlInBrowserTab). The URL arrives with trailing
@@ -362,17 +361,7 @@ fn trim_url_trailing(s: &str) -> String {
     s.trim_end_matches(|c: char| {
         matches!(
             c,
-            '.' | ','
-                | ';'
-                | ':'
-                | '!'
-                | '?'
-                | ')'
-                | ']'
-                | '}'
-                | '\''
-                | '"'
-                | '`'
+            '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '\'' | '"' | '`'
         )
     })
     .to_string()

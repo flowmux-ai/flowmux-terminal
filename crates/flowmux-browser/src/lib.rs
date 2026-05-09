@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Common browser-controller types shared between flowmux-app's WebKit
+//! Common browser-controller types shared between flowmux's WebKit
 //! pane implementation, the IPC/CLI layer, and headless test mocks.
 //!
 //! flowmux ships an in-pane browser modeled after the cmux feature set
 //! (page snapshot, scripted click / fill / eval, profile-aware
 //! cookie storage). The actual rendering uses WebKitGTK 6 inside
-//! flowmux-app, but this crate keeps everything that doesn't need GTK
+//! flowmux, but this crate keeps everything that doesn't need GTK
 //! — the trait surface, the snapshot data shape, the JavaScript
 //! helpers that get evaluated on the page, and the profile model —
 //! so it can be unit-tested without a display.

@@ -555,7 +555,15 @@ fn build_pane(
                 registry.clone(),
                 theme.clone(),
             );
-            let right = build_pane(workspace, second, argv, cwd, callbacks, registry.clone(), theme);
+            let right = build_pane(
+                workspace,
+                second,
+                argv,
+                cwd,
+                callbacks,
+                registry.clone(),
+                theme,
+            );
             paned.set_start_child(Some(&left));
             paned.set_end_child(Some(&right));
             paned.set_resize_start_child(true);
@@ -624,7 +632,8 @@ fn build_leaf_pane(
 
     let mut tab_widgets = Vec::new();
     for surface in &surfaces {
-        let (tab, label) = build_surface_tab_widget(pane_id, surface, surface.id == active, callbacks);
+        let (tab, label) =
+            build_surface_tab_widget(pane_id, surface, surface.id == active, callbacks);
         tabs.append(&tab);
         tab_widgets.push((surface.id, tab.clone().upcast::<gtk::Widget>()));
         registry
@@ -1051,11 +1060,13 @@ fn build_panel(
                 .filter(|p| p.exists());
             let extra_env = flowmux_terminal::agent_pty_env(
                 pane_id,
+                surface.id,
                 workspace,
                 &socket,
                 bundled_cli.as_deref(),
             );
-            let pane = TerminalPane::spawn(pane_id, argv, cwd.clone(), extra_env, callbacks.clone());
+            let pane =
+                TerminalPane::spawn(pane_id, argv, cwd.clone(), extra_env, callbacks.clone());
             theme.apply_to_vte(&pane.widget);
             // Start the new terminal widget with the current zoom option.
             pane.widget
@@ -1079,19 +1090,21 @@ fn build_panel(
                 let cb = callbacks.on_terminal_title_changed.clone();
                 let surface_id = surface.id;
                 let widget_for_title = pane.widget.clone();
-                widget_for_title.clone().connect_window_title_notify(move |_| {
-                    let title = widget_for_title
-                        .window_title()
-                        .map(|t| t.to_string())
-                        .unwrap_or_default();
-                    tracing::debug!(
-                        %pane_id,
-                        %surface_id,
-                        title = %title,
-                        "VTE window-title notify"
-                    );
-                    (cb.borrow_mut())(pane_id, surface_id, title);
-                });
+                widget_for_title
+                    .clone()
+                    .connect_window_title_notify(move |_| {
+                        let title = widget_for_title
+                            .window_title()
+                            .map(|t| t.to_string())
+                            .unwrap_or_default();
+                        tracing::debug!(
+                            %pane_id,
+                            %surface_id,
+                            title = %title,
+                            "VTE window-title notify"
+                        );
+                        (cb.borrow_mut())(pane_id, surface_id, title);
+                    });
             }
 
             // Toggle the .focused class on frame focus enter/leave. theme.rs

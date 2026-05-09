@@ -27,7 +27,7 @@
 ## Crates touched
 
 - `flowmux-core` — types
-- `flowmux-app` — widget tree mirrors the pane tree
+- `flowmux` — widget tree mirrors the pane tree
 - `flowmux-ipc` — addresses panes/surfaces/workspaces by id
 
 ## Open questions / risks

@@ -51,8 +51,8 @@ flowmux/
 │   ├── flowmux-terminal/   Terminal backend trait + vte4 backend (libghostty later)
 │   ├── flowmux-notify/     OSC 9/99/777 parser + libnotify D-Bus sender
 │   ├── flowmux-ipc/        Unix-socket IPC (cmux socket-API compatible)
-│   ├── flowmux-cli/        `flowmux` binary (workspaces, panes, notify, ssh)
-│   └── flowmux-app/        GTK4 + libadwaita main app
+│   ├── flowmux-cli/        private `flowmuxctl` helper for CLI subcommands
+│   └── flowmux/            GTK4 + libadwaita main app and public `flowmux` binary
 ├── docs/
 │   ├── UPSTREAM.md       How we track cmux upstream
 │   └── upstream-mapping/ Per-feature spec (cmux behavior → flowmux impl)
@@ -100,7 +100,7 @@ Then:
 
 ```bash
 cargo check --workspace
-cargo run -p flowmux-app
+cargo run -p flowmux
 ```
 
 ## License

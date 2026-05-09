@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! VTE 2.91 / GTK4 backend skeleton.
 //!
-//! The actual widgets live on the GTK main thread inside `flowmux-app`;
+//! The actual widgets live on the GTK main thread inside `flowmux`;
 //! this module provides the type-level glue (so the trait surface is
 //! stable) and the wiring it would need. We intentionally don't run any
 //! VTE calls here — they require an active `gtk::init()`.
@@ -43,7 +43,7 @@ impl TerminalBackend for VteBackend {
     fn spawn(&mut self, _spec: SpawnSpec<'_>) -> Result<PaneId, TerminalError> {
         // Real impl will call `vte::Terminal::spawn_async` on the GTK
         // main loop and return the pane id once the child is reaped or
-        // an error surfaces. The `flowmux-app` crate owns the GTK runtime
+        // an error surfaces. The `flowmux` crate owns the GTK runtime
         // and provides a thin shim that calls into here.
         Err(TerminalError::Spawn(
             "vte backend not yet wired into GTK runtime".into(),

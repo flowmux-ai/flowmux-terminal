@@ -4,7 +4,7 @@
 //! Lives at `$XDG_CONFIG_HOME/flowmux/theme` (typically
 //! `~/.config/flowmux/theme`). Users put whatever color/font values they
 //! want there; flowmux reads it at startup and applies. flowmux itself
-//! ships only built-in fallbacks (in `flowmux-app::theme`) — no specific
+//! ships only built-in fallbacks (in `flowmux::theme`) — no specific
 //! upstream's theme curation lives in this tree.
 //!
 //! The on-disk format reuses the simple `key = value` parser from

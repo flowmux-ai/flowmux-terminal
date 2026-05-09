@@ -24,7 +24,7 @@
 ## Crates touched
 
 - `flowmux-terminal` — backend trait + impls
-- `flowmux-app` — wires the backend's widgets into the pane tree
+- `flowmux` — wires the backend's widgets into the pane tree
 - `flowmux-config` — ghostty config compatibility
 
 ## Open questions / risks

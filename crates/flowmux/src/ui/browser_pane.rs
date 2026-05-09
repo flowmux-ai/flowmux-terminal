@@ -130,9 +130,7 @@ impl BrowserPane {
             // blocked in main.rs by disabling the DMA-BUF renderer. webkit6
             // 0.4 exposes only Always / Never, not ON_DEMAND, and Never would
             // also lose video acceleration.
-            settings.set_hardware_acceleration_policy(
-                webkit6::HardwareAccelerationPolicy::Always,
-            );
+            settings.set_hardware_acceleration_policy(webkit6::HardwareAccelerationPolicy::Always);
         } else {
             tracing::warn!("WebView::settings() returned None — media options skipped");
         }
@@ -347,9 +345,7 @@ fn engine_to_profile(engine: &BrowserEngine) -> BrowserProfile {
         BrowserEngine::Webkit => BrowserProfile::Default,
         BrowserEngine::Chrome => BrowserProfile::ChromeImport,
         BrowserEngine::Firefox => BrowserProfile::FirefoxImport,
-        BrowserEngine::Custom { name } => BrowserProfile::Custom {
-            name: name.clone(),
-        },
+        BrowserEngine::Custom { name } => BrowserProfile::Custom { name: name.clone() },
     }
 }
 

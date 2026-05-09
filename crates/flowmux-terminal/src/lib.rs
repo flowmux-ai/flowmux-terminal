@@ -11,7 +11,7 @@
 //!
 //! See `docs/upstream-mapping/terminal.md` for the parity matrix.
 
-use flowmux_core::{PaneId, WorkspaceId};
+use flowmux_core::{PaneId, SurfaceId, WorkspaceId};
 use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
@@ -39,23 +39,29 @@ pub struct SpawnSpec<'a> {
 /// for `FLOWMUX_`.
 ///
 /// Variables produced:
-/// * `FLOWMUX_PANE_ID` / `FLOWMUX_SURFACE_ID` — same value (pane is the
-///   surface alias on flowmux, consistent with cmux's panel↔surface alias).
-/// * `FLOWMUX_WORKSPACE_ID` / `FLOWMUX_TAB_ID` — same value.
+/// * `FLOWMUX_PANE_ID` — leaf pane (split-tree node). Multiple tab
+///   surfaces inside a single pane share this id.
+/// * `FLOWMUX_SURFACE_ID` — the specific tab surface that owns this
+///   PTY. Distinct per tab so a notification can later route back to
+///   the correct tab even when the pane has many.
+/// * `FLOWMUX_WORKSPACE_ID` / `FLOWMUX_TAB_ID` — same value, the
+///   workspace this pane lives in.
 /// * `FLOWMUX_SOCKET_PATH` — the daemon's Unix socket path.
 /// * `FLOWMUX_BUNDLED_CLI_PATH` — only when the caller knows where the
 ///   `flowmux` binary lives (e.g. derived from `current_exe()` in app).
 pub fn agent_pty_env(
     pane: PaneId,
+    surface: SurfaceId,
     workspace: WorkspaceId,
     socket: &Path,
     bundled_cli: Option<&Path>,
 ) -> Vec<(String, String)> {
     let pane_s = pane.to_string();
+    let surface_s = surface.to_string();
     let workspace_s = workspace.to_string();
     let mut out = Vec::with_capacity(6);
-    out.push(("FLOWMUX_PANE_ID".to_string(), pane_s.clone()));
-    out.push(("FLOWMUX_SURFACE_ID".to_string(), pane_s));
+    out.push(("FLOWMUX_PANE_ID".to_string(), pane_s));
+    out.push(("FLOWMUX_SURFACE_ID".to_string(), surface_s));
     out.push(("FLOWMUX_WORKSPACE_ID".to_string(), workspace_s.clone()));
     out.push(("FLOWMUX_TAB_ID".to_string(), workspace_s));
     out.push((
@@ -106,17 +112,18 @@ mod tests {
     }
 
     #[test]
-    fn agent_pty_env_includes_pane_workspace_socket() {
+    fn agent_pty_env_includes_pane_surface_workspace_socket() {
         let pane = PaneId::new();
+        let surface = SurfaceId::new();
         let ws = WorkspaceId::new();
         let socket = PathBuf::from("/run/user/1000/flowmux.sock");
 
-        let env = agent_pty_env(pane, ws, &socket, None);
+        let env = agent_pty_env(pane, surface, ws, &socket, None);
 
         assert_eq!(collect(&env, "FLOWMUX_PANE_ID"), Some(pane.to_string().as_str()));
         assert_eq!(
             collect(&env, "FLOWMUX_SURFACE_ID"),
-            Some(pane.to_string().as_str())
+            Some(surface.to_string().as_str())
         );
         assert_eq!(
             collect(&env, "FLOWMUX_WORKSPACE_ID"),
@@ -130,24 +137,21 @@ mod tests {
             collect(&env, "FLOWMUX_SOCKET_PATH"),
             Some("/run/user/1000/flowmux.sock")
         );
-        // bundled_cli omitted when not provided.
         assert!(collect(&env, "FLOWMUX_BUNDLED_CLI_PATH").is_none());
     }
 
     #[test]
-    fn agent_pty_env_emits_pane_and_surface_alias_with_same_value() {
+    fn agent_pty_env_pane_and_surface_can_differ() {
+        // The previous flowmux build aliased pane = surface; that
+        // collapsed multi-tab routing because tab A and tab B in the
+        // same pane shared one env. Now they differ on purpose.
         let pane = PaneId::new();
-        let ws = WorkspaceId::new();
-        let env = agent_pty_env(pane, ws, Path::new("/x"), None);
-        assert_eq!(
+        let surface = SurfaceId::new();
+        let env = agent_pty_env(pane, surface, WorkspaceId::new(), Path::new("/x"), None);
+        assert_ne!(
             collect(&env, "FLOWMUX_PANE_ID"),
             collect(&env, "FLOWMUX_SURFACE_ID"),
-            "cmux convention: panel and surface ids alias to the same value"
-        );
-        assert_eq!(
-            collect(&env, "FLOWMUX_WORKSPACE_ID"),
-            collect(&env, "FLOWMUX_TAB_ID"),
-            "cmux convention: tab and workspace ids alias"
+            "pane and surface env vars must carry distinct ids"
         );
     }
 
@@ -155,6 +159,7 @@ mod tests {
     fn agent_pty_env_includes_bundled_cli_when_provided() {
         let env = agent_pty_env(
             PaneId::new(),
+            SurfaceId::new(),
             WorkspaceId::new(),
             Path::new("/sock"),
             Some(Path::new("/usr/local/bin/flowmux")),
@@ -181,9 +186,11 @@ mod tests {
     #[test]
     fn scenario_full_envv_array_is_well_formed_for_vte_spawn() {
         let pane = PaneId::new();
+        let surface = SurfaceId::new();
         let ws = WorkspaceId::new();
         let env = agent_pty_env(
             pane,
+            surface,
             ws,
             Path::new("/run/user/1000/flowmux.sock"),
             Some(Path::new("/usr/local/bin/flowmux")),
@@ -192,8 +199,6 @@ mod tests {
 
         assert_eq!(kv.len(), 6);
         for entry in &kv {
-            // Each entry must contain a single '=' delimiter so VTE/glib
-            // accepts it as a `KEY=VALUE` pair.
             let eq = entry.find('=').expect("envv entry must have '='");
             let key = &entry[..eq];
             let val = &entry[eq + 1..];
@@ -203,6 +208,8 @@ mod tests {
         }
 
         let pane_kv = format!("FLOWMUX_PANE_ID={pane}");
+        let surface_kv = format!("FLOWMUX_SURFACE_ID={surface}");
         assert!(kv.iter().any(|e| e == &pane_kv));
+        assert!(kv.iter().any(|e| e == &surface_kv));
     }
 }

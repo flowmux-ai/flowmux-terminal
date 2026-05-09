@@ -12,7 +12,7 @@
 //! `openNotification → focusTabFromNotification`). Clicking also flips
 //! `read = true`, which the popover renders with reduced opacity.
 
-use flowmux_core::{NotificationId, NotificationLevel, PaneId, WorkspaceId};
+use flowmux_core::{NotificationId, NotificationLevel, PaneId, SurfaceId, WorkspaceId};
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
@@ -36,6 +36,10 @@ pub struct NotificationEntry {
     /// Source pane for the click-to-focus route. `None` when the
     /// notifier did not specify a pane (e.g. global toasts).
     pub pane: Option<PaneId>,
+    /// Specific tab inside `pane` that triggered the event so the
+    /// click router can switch tabs when the user is currently
+    /// looking at a different surface in the same pane.
+    pub surface: Option<SurfaceId>,
     /// Workspace of `pane`, resolved by the IPC handler before the entry
     /// reached the GUI thread. Without it we cannot route clicks back to
     /// the right side-panel row.
@@ -68,6 +72,7 @@ impl NotificationStore {
         body: String,
         level: NotificationLevel,
         pane: Option<PaneId>,
+        surface: Option<SurfaceId>,
         workspace: Option<WorkspaceId>,
     ) -> NotificationId {
         let id = NotificationId::new();
@@ -83,6 +88,7 @@ impl NotificationStore {
             created_at: chrono::Utc::now(),
             read: false,
             pane,
+            surface,
             workspace,
         });
         id
@@ -136,6 +142,7 @@ mod tests {
             NotificationLevel::Info,
             None,
             None,
+            None,
         );
         let found = s.find(id).expect("entry should be findable by id");
         assert_eq!(found.title, "Claude");
@@ -152,12 +159,10 @@ mod tests {
             NotificationLevel::Info,
             None,
             None,
+            None,
         );
         assert!(s.mark_read(id), "first mark_read should report a change");
-        assert!(
-            !s.mark_read(id),
-            "second mark_read on same id is a no-op"
-        );
+        assert!(!s.mark_read(id), "second mark_read on same id is a no-op");
         assert!(s.find(id).unwrap().read);
     }
 
@@ -171,9 +176,9 @@ mod tests {
     #[test]
     fn entries_preserve_insertion_order_and_unread_count_tracks_reads() {
         let s = store();
-        let a = s.push("a".into(), "".into(), NotificationLevel::Info, None, None);
-        let b = s.push("b".into(), "".into(), NotificationLevel::Info, None, None);
-        let c = s.push("c".into(), "".into(), NotificationLevel::Info, None, None);
+        let a = s.push("a".into(), "".into(), NotificationLevel::Info, None, None, None);
+        let b = s.push("b".into(), "".into(), NotificationLevel::Info, None, None, None);
+        let c = s.push("c".into(), "".into(), NotificationLevel::Info, None, None, None);
         let entries = s.entries();
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].id, a);
@@ -191,16 +196,19 @@ mod tests {
     fn push_records_pane_and_workspace_for_click_routing() {
         let s = store();
         let pane = PaneId::new();
+        let surface = SurfaceId::new();
         let ws = WorkspaceId::new();
         let id = s.push(
             "claude".into(),
             "ready".into(),
             NotificationLevel::AttentionNeeded,
             Some(pane),
+            Some(surface),
             Some(ws),
         );
         let e = s.find(id).unwrap();
         assert_eq!(e.pane, Some(pane));
+        assert_eq!(e.surface, Some(surface));
         assert_eq!(e.workspace, Some(ws));
         assert_eq!(e.level, NotificationLevel::AttentionNeeded);
     }
@@ -216,6 +224,7 @@ mod tests {
                 format!("entry {i}"),
                 "".into(),
                 NotificationLevel::Info,
+                None,
                 None,
                 None,
             ));
@@ -240,6 +249,7 @@ mod tests {
             "step 1".into(),
             NotificationLevel::Info,
             Some(pane),
+            None,
             Some(ws),
         );
         let b = s.push(
@@ -247,9 +257,36 @@ mod tests {
             "step 2".into(),
             NotificationLevel::Info,
             Some(pane),
+            None,
             Some(ws),
         );
         assert_ne!(a, b);
         assert_eq!(s.entries().len(), 2);
+    }
+
+    #[test]
+    fn push_records_distinct_surfaces_within_same_pane() {
+        let s = store();
+        let pane = PaneId::new();
+        let tab_a = SurfaceId::new();
+        let tab_b = SurfaceId::new();
+        let id_a = s.push(
+            "Claude".into(),
+            "tab A done".into(),
+            NotificationLevel::Info,
+            Some(pane),
+            Some(tab_a),
+            None,
+        );
+        let id_b = s.push(
+            "Codex".into(),
+            "tab B done".into(),
+            NotificationLevel::Info,
+            Some(pane),
+            Some(tab_b),
+            None,
+        );
+        assert_eq!(s.find(id_a).unwrap().surface, Some(tab_a));
+        assert_eq!(s.find(id_b).unwrap().surface, Some(tab_b));
     }
 }

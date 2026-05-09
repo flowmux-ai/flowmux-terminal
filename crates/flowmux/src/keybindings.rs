@@ -113,12 +113,8 @@ pub fn install_actions(
         bridge.clone(),
         FocusDir::Right,
     );
-    let focus_up = make_focus_direction_action(
-        "focus-up",
-        focused.clone(),
-        bridge.clone(),
-        FocusDir::Up,
-    );
+    let focus_up =
+        make_focus_direction_action("focus-up", focused.clone(), bridge.clone(), FocusDir::Up);
     let focus_down = make_focus_direction_action(
         "focus-down",
         focused.clone(),

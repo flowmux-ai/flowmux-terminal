@@ -133,10 +133,7 @@ pub enum GtkCommand {
     /// If `from = None`, focus the active workspace's first leaf pane.
     /// This handles pressing Alt+arrow immediately after selecting only
     /// a workspace row in the side panel.
-    FocusDirection {
-        from: Option<PaneId>,
-        dir: FocusDir,
-    },
+    FocusDirection { from: Option<PaneId>, dir: FocusDir },
     /// Open a brand-new terminal surface in the active workspace.
     /// (Reserved for the planned horizontal surface-tab bar; currently
     /// unused since the sidebar shows workspaces, not surfaces.)
@@ -248,19 +245,24 @@ pub enum GtkCommand {
     /// `workspace` is resolved by the IPC handler from `pane` so the
     /// later [`Self::OpenNotification`] route knows which side-panel
     /// row to bring to the foreground without a second store lookup.
+    /// `surface` is the specific tab inside `pane` so suppression can
+    /// compare and the click router can switch tabs.
+    /// `ack` reports back whether the IPC handler should also fire the
+    /// desktop toast: `false` means we suppressed because the source
+    /// pane+surface is already focused.
     AddNotification {
         pane: Option<PaneId>,
+        surface: Option<SurfaceId>,
         workspace: Option<WorkspaceId>,
         title: String,
         body: String,
         level: NotificationLevel,
+        ack: oneshot::Sender<bool>,
     },
     /// User clicked a row in the bell popover. Mark the entry read,
     /// activate its workspace (if known), and grab focus on the source
     /// pane (if known). Mirrors cmux's `openNotification → focusTab`.
-    OpenNotification {
-        id: NotificationId,
-    },
+    OpenNotification { id: NotificationId },
     /// Cycle to the previous / next workspace in sidebar order.
     FocusWorkspaceDir { dir: WsNav },
     /// Jump straight to the N-th workspace (1-indexed; clamped to

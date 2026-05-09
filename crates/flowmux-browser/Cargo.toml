@@ -5,7 +5,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "Browser controller trait + DOM snapshot types + JS scripts shared by flowmux-app's WebKit impl and headless test mocks."
+description = "Browser controller trait + DOM snapshot types + JS scripts shared by flowmux's WebKit impl and headless test mocks."
 
 [dependencies]
 serde = { workspace = true }

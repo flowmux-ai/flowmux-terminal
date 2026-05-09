@@ -136,8 +136,8 @@ pub fn install_one(path: &Path, payload: &str, force: bool) -> Result<InstallOut
             .with_context(|| format!("creating directory {}", parent.display()))?;
     }
     if path.exists() {
-        let existing = fs::read_to_string(path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let existing =
+            fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         if existing == payload {
             return Ok(InstallOutcome::AlreadyUpToDate);
         }
@@ -198,11 +198,7 @@ pub fn install_all(
 }
 
 /// Doctor report for every requested target.
-pub fn doctor_all(
-    targets: &[Target],
-    home: &Path,
-    codex_home: Option<&Path>,
-) -> Vec<DoctorEntry> {
+pub fn doctor_all(targets: &[Target], home: &Path, codex_home: Option<&Path>) -> Vec<DoctorEntry> {
     targets
         .iter()
         .map(|t| {
@@ -228,7 +224,10 @@ pub fn uninstall_one(path: &Path) -> Result<UninstallOutcome> {
     if let Some(parent) = path.parent() {
         if parent.file_name().and_then(|s| s.to_str()) == Some("flowmux-browser") {
             // Empty the dir if we just removed the only file inside.
-            if fs::read_dir(parent).map(|mut d| d.next().is_none()).unwrap_or(false) {
+            if fs::read_dir(parent)
+                .map(|mut d| d.next().is_none())
+                .unwrap_or(false)
+            {
                 let _ = fs::remove_dir(parent);
             }
         }
@@ -374,7 +373,10 @@ mod tests {
         assert!(!path.parent().unwrap().exists());
 
         // Second uninstall is idempotent.
-        assert_eq!(uninstall_one(&path).unwrap(), UninstallOutcome::AlreadyAbsent);
+        assert_eq!(
+            uninstall_one(&path).unwrap(),
+            UninstallOutcome::AlreadyAbsent
+        );
     }
 
     #[test]

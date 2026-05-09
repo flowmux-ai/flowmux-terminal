@@ -81,17 +81,20 @@ fn build_dialog(
     hint.set_xalign(0.0);
     body.append(&hint);
 
-    // Bottom-most "Reset" button. Clicking it applies Options::default()
-    // through the same on_apply path the OK button uses, so the caller
-    // takes care of persisting the defaults and reloading the CSS — the
-    // dialog itself just closes.
+    // Bottom actions. Reset applies Options::default() through the same
+    // on_apply path the OK button uses, so the caller handles persistence
+    // and live CSS reloads while the dialog only closes itself.
     let reset_btn = gtk::Button::with_label("Reset to defaults");
     reset_btn.add_css_class("destructive-action");
-    reset_btn.set_halign(gtk::Align::End);
-    let reset_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    reset_row.set_margin_top(4);
-    reset_row.append(&reset_btn);
-    body.append(&reset_row);
+    let about_btn = gtk::Button::with_label("About");
+    let footer_spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    footer_spacer.set_hexpand(true);
+    let footer_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    footer_row.set_margin_top(4);
+    footer_row.append(&reset_btn);
+    footer_row.append(&footer_spacer);
+    footer_row.append(&about_btn);
+    body.append(&footer_row);
 
     let outer = gtk::Box::new(gtk::Orientation::Vertical, 0);
     outer.append(&header);
@@ -111,12 +114,7 @@ fn build_dialog(
         let opacity_spin = opacity_widgets.spin.clone();
         let on_apply = on_apply.clone();
         ok_btn.connect_clicked(move |_| {
-            let opts = collect_options(
-                &zoom_spin,
-                &engine_drop,
-                &focus_color_btn,
-                &opacity_spin,
-            );
+            let opts = collect_options(&zoom_spin, &engine_drop, &focus_color_btn, &opacity_spin);
             (on_apply)(opts);
             dialog.close();
         });
@@ -129,8 +127,39 @@ fn build_dialog(
             dialog.close();
         });
     }
+    {
+        let dialog = dialog.clone();
+        about_btn.connect_clicked(move |_| show_about_popup(&dialog));
+    }
 
     dialog
+}
+
+fn show_about_popup(parent: &impl IsA<gtk::Widget>) {
+    let body = about_body();
+    let dialog = adw::AlertDialog::builder()
+        .heading("About")
+        .body(body.as_str())
+        .body_use_markup(true)
+        .default_response("ok")
+        .close_response("ok")
+        .build();
+    dialog.add_response("ok", "OK");
+    dialog.connect_response(None, move |dialog, _| {
+        dialog.close();
+    });
+    dialog.present(Some(parent));
+}
+
+fn about_body() -> String {
+    format!(
+        "FlowMux - Agent Workflow Multiplexer Terminal\n\n\
+         FlowMux was inspired by the cmux (macOS) project.\n\n\
+         Maintained by JSUYA (Junsu Choi).\n\
+         <a href=\"https://github.com/JSUYA/flowmux\">https://github.com/JSUYA/flowmux</a>\n\n\
+         Version: v{}",
+        env!("CARGO_PKG_VERSION")
+    )
 }
 
 fn row(label_text: &str, value_widget: &impl IsA<gtk::Widget>) -> gtk::Box {
@@ -192,9 +221,8 @@ fn collect_options(
         .cloned()
         .unwrap_or(BrowserEngine::Webkit);
     let color_hex = color_button_hex(focus_color);
-    let opacity = Options::clamp_focus_border_opacity(
-        opacity_spin.value_as_int().clamp(0, 255) as u8,
-    );
+    let opacity =
+        Options::clamp_focus_border_opacity(opacity_spin.value_as_int().clamp(0, 255) as u8);
     Options {
         zoom_percent: zoom,
         default_browser_engine: engine,
@@ -240,7 +268,11 @@ fn build_focus_opacity_row(initial: u8) -> FocusOpacityRow {
     // Small markers at 0 / 50 / 100 so the user can gauge position quickly.
     scale.add_mark(0.0, gtk::PositionType::Bottom, None);
     scale.add_mark(50.0, gtk::PositionType::Bottom, None);
-    scale.add_mark(FOCUS_BORDER_OPACITY_MAX as f64, gtk::PositionType::Bottom, None);
+    scale.add_mark(
+        FOCUS_BORDER_OPACITY_MAX as f64,
+        gtk::PositionType::Bottom,
+        None,
+    );
 
     let spin = gtk::SpinButton::new(Some(&adj), 1.0, 0);
     spin.set_numeric(true);
@@ -313,6 +345,18 @@ mod tests {
         assert_eq!(engine_index_of(&BrowserEngine::Webkit), 0);
         assert_eq!(engine_index_of(&BrowserEngine::Chrome), 1);
         assert_eq!(engine_index_of(&BrowserEngine::Firefox), 2);
+    }
+
+    #[test]
+    fn about_body_contains_requested_copy() {
+        let body = about_body();
+        assert!(body.contains("FlowMux - Agent Workflow Multiplexer Terminal"));
+        assert!(body.contains("FlowMux was inspired by the cmux (macOS) project."));
+        assert!(body.contains("Maintained by JSUYA (Junsu Choi)."));
+        assert!(body.contains(
+            "<a href=\"https://github.com/JSUYA/flowmux\">https://github.com/JSUYA/flowmux</a>"
+        ));
+        assert!(body.ends_with(concat!("Version: v", env!("CARGO_PKG_VERSION"))));
     }
 
     /// GTK init is needed to verify that the slider and SpinButton share the
