@@ -2,8 +2,7 @@
 
 **Agent Workflow Multiplexer** — *Go with the agents' flow.*
 
-<img width="1429" height="929" alt="Screenshot from 2026-05-08 23-14-40" src="https://github.com/user-attachments/assets/9d35cbea-327d-4558-a4bc-a4853fcfb22d" />
-
+<img width="1426" height="926" alt="Screenshot from 2026-05-09 12-06-58" src="https://github.com/user-attachments/assets/5f452957-32c7-4439-aada-06a0e8c6d5c7" />
 
 
 
