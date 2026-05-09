@@ -156,38 +156,6 @@ cargo run -p flowmux           # debug GUI
 cargo check --workspace        # type-check everything
 ```
 
-## Install (user-local)
-
-The recommended single-user layout puts `flowmux` on `PATH` and tucks the
-CLI helper next to it where the GUI binary will find it:
-
-```bash
-# main binary on PATH
-install -Dm755 target/release/flowmux ~/.local/bin/flowmux
-
-# CLI helper — flowmux resolves it as <prefix>/lib/flowmux/flowmuxctl
-install -Dm755 target/release/flowmuxctl ~/.local/lib/flowmux/flowmuxctl
-
-# .desktop entry so GNOME / KDE menus see flowmux
-install -Dm644 resources/desktop/com.flowmux.App.desktop \
-    ~/.local/share/applications/com.flowmux.App.desktop
-update-desktop-database ~/.local/share/applications/ 2>/dev/null || true
-
-# wire AI agent lifecycle hooks (Claude Code, Codex, OpenCode)
-flowmux hooks setup
-flowmux hooks doctor      # verify per-agent registration
-```
-
-To uninstall, run `flowmux hooks uninstall` to clean up the agent configs,
-then remove the four files installed above.
-
-### Distro packaging
-
-Stub manifests for downstream packagers live under
-`packaging/debian/cargo-deb.toml` and
-`packaging/flatpak/com.flowmux.App.yml`. They are not yet the primary
-install path — prefer the user-local layout above.
-
 ## License
 
 GPL-3.0-or-later. See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).
