@@ -635,14 +635,8 @@ impl StateStore {
         let s = self.inner.lock().await;
         for ws in &s.workspaces {
             for surface in &ws.surfaces {
-                let mut found = None;
-                surface.root_pane.for_each_leaf(|id| {
-                    if id == pane {
-                        found = Some(ws.id);
-                    }
-                });
-                if found.is_some() {
-                    return found;
+                if pane_tree_contains(&surface.root_pane, pane) {
+                    return Some(ws.id);
                 }
             }
         }
@@ -789,18 +783,21 @@ impl StateStore {
     /// `target` has, plus the workspace id. Used by the GUI to decide
     /// whether closing `target` would also close the workspace, so it
     /// can put up a confirmation dialog before the mutation runs.
-    pub async fn workspace_pane_count_for(
-        &self,
-        target: PaneId,
-    ) -> Option<(WorkspaceId, usize)> {
+    pub async fn workspace_pane_count_for(&self, target: PaneId) -> Option<(WorkspaceId, usize)> {
         let s = self.inner.lock().await;
         for ws in &s.workspaces {
-            let mut leaves = Vec::new();
+            let mut count = 0usize;
+            let mut found = false;
             for surf in &ws.surfaces {
-                surf.root_pane.for_each_leaf(|id| leaves.push(id));
+                surf.root_pane.for_each_leaf(|id| {
+                    count += 1;
+                    if id == target {
+                        found = true;
+                    }
+                });
             }
-            if leaves.contains(&target) {
-                return Some((ws.id, leaves.len()));
+            if found {
+                return Some((ws.id, count));
             }
         }
         None
@@ -872,6 +869,17 @@ impl StateStore {
     pub fn save_now_blocking(&self) -> Result<(), flowmux_state::StateError> {
         let snap = self.inner.blocking_lock().clone();
         flowmux_state::save(&snap)
+    }
+}
+
+/// True when the pane tree has any leaf with id `target`. Walks the
+/// tree with early-exit so a hit on the left subtree skips the right.
+fn pane_tree_contains(tree: &Pane, target: PaneId) -> bool {
+    match tree {
+        Pane::Leaf { id, .. } => *id == target,
+        Pane::Split { first, second, .. } => {
+            pane_tree_contains(first, target) || pane_tree_contains(second, target)
+        }
     }
 }
 
@@ -1114,9 +1122,11 @@ mod tests {
         let ws_id = store
             .create_workspace(Some("auto".into()), std::path::PathBuf::from("/tmp/auto"))
             .await;
-        assert!(store
-            .rename_workspace(ws_id, "  Spaced Name  ".into())
-            .await);
+        assert!(
+            store
+                .rename_workspace(ws_id, "  Spaced Name  ".into())
+                .await
+        );
         let ws = store.get_workspace(ws_id).await.unwrap();
         assert_eq!(ws.custom_title.as_deref(), Some("Spaced Name"));
     }
@@ -2274,7 +2284,10 @@ mod tests {
 
     async fn create_named_workspace(store: &StateStore, name: &str) -> WorkspaceId {
         store
-            .create_workspace(Some(name.into()), std::path::PathBuf::from("/tmp").join(name))
+            .create_workspace(
+                Some(name.into()),
+                std::path::PathBuf::from("/tmp").join(name),
+            )
             .await
     }
 
@@ -2722,7 +2735,10 @@ mod tests {
     async fn surface_cwd_does_not_touch_workspace_name() {
         let store = StateStore::new_lazy(State::default());
         let ws_id = store
-            .create_workspace(Some("origin".into()), std::path::PathBuf::from("/tmp/origin"))
+            .create_workspace(
+                Some("origin".into()),
+                std::path::PathBuf::from("/tmp/origin"),
+            )
             .await;
         let ws = store.get_workspace(ws_id).await.unwrap();
         let pane = first_pane(&ws);
