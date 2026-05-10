@@ -16,6 +16,7 @@
 //! Accelerator format follows GTK's `gtk_accelerator_parse` syntax.
 
 use crate::bridge::{Bridge, FocusDir, GtkCommand, WsNav};
+use crate::ui::window::ClipboardToast;
 use flowmux_core::SplitDirection;
 use gtk::gio::prelude::*;
 use gtk::glib;
@@ -90,6 +91,7 @@ pub fn install_actions(
     bridge: Bridge,
     focused: FocusedPane,
     registry: TerminalRegistry,
+    clipboard_toast: ClipboardToast,
 ) {
     let split_right = make_pane_action(
         "split-right",
@@ -215,8 +217,8 @@ pub fn install_actions(
             .build()
     });
 
-    let copy = make_clipboard_action("copy", focused.clone(), registry.clone(), ClipboardOp::Copy);
-    let paste = make_clipboard_action("paste", focused.clone(), registry, ClipboardOp::Paste);
+    let copy = make_copy_action(focused.clone(), registry.clone(), clipboard_toast);
+    let paste = make_paste_action(focused.clone(), registry);
 
     let [w1, w2, w3, w4, w5, w6, w7, w8] = ws_jumps;
     window.add_action_entries([
@@ -373,12 +375,6 @@ fn make_focus_direction_action(
         .build()
 }
 
-#[derive(Clone, Copy)]
-enum ClipboardOp {
-    Copy,
-    Paste,
-}
-
 fn make_close_surface_action(
     name: &'static str,
     focused: FocusedPane,
@@ -418,30 +414,42 @@ fn make_close_surface_action(
         .build()
 }
 
-fn make_clipboard_action(
-    name: &'static str,
+fn make_copy_action(
     focused: FocusedPane,
     registry: TerminalRegistry,
-    op: ClipboardOp,
+    clipboard_toast: ClipboardToast,
 ) -> gtk::gio::ActionEntry<adw::ApplicationWindow> {
-    gtk::gio::ActionEntry::builder(name)
+    gtk::gio::ActionEntry::builder("copy")
         .activate(move |_, _, _| {
-            let pane = match focused.get() {
-                Some(p) => p,
-                None => return,
-            };
+            let Some(pane) = focused.get() else { return };
             let r = registry.borrow();
             let Some(term) = r.active_terminal(pane) else {
                 return;
             };
-            match op {
-                ClipboardOp::Copy => {
-                    term.widget.copy_clipboard_format(vte::Format::Text);
-                }
-                ClipboardOp::Paste => {
-                    term.widget.paste_clipboard();
-                }
+            // No selection means there is nothing to copy, and we want
+            // to leave whatever is already on the clipboard untouched
+            // (e.g. text the user copied from another app).
+            if !term.widget.has_selection() {
+                return;
             }
+            term.widget.copy_clipboard_format(vte::Format::Text);
+            clipboard_toast.show();
+        })
+        .build()
+}
+
+fn make_paste_action(
+    focused: FocusedPane,
+    registry: TerminalRegistry,
+) -> gtk::gio::ActionEntry<adw::ApplicationWindow> {
+    gtk::gio::ActionEntry::builder("paste")
+        .activate(move |_, _, _| {
+            let Some(pane) = focused.get() else { return };
+            let r = registry.borrow();
+            let Some(term) = r.active_terminal(pane) else {
+                return;
+            };
+            term.widget.paste_clipboard();
         })
         .build()
 }

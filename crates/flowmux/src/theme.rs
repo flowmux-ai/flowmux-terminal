@@ -154,6 +154,11 @@ impl ResolvedTheme {
         let control_hover_css = rgba_css(&blend_with_alpha(&self.fg, 0.09));
         let subdued_fg_css = rgba_css(&blend_with_alpha(&self.fg, 0.72));
         let sidebar_bg = rgba_css(&shift_lightness(&self.bg, -0.04));
+        let toast_bg_css = rgba_css(&blend_with_alpha(
+            &shift_lightness(&self.bg, if self.is_dark() { 0.12 } else { -0.12 }),
+            0.94,
+        ));
+        let toast_border_css = rgba_css(&blend_with_alpha(&self.fg, 0.18));
         format!(
             r#"
 .flowmux-pane {{
@@ -257,6 +262,14 @@ paned > separator {{
 .flowmux-pane-tab.flowmux-pane-tab-drop-after {{
     box-shadow: inset -2px 0 0 rgba(96, 165, 250, 0.95);
 }}
+.flowmux-clipboard-toast {{
+    background-color: {toast_bg};
+    color: {fg};
+    border: 1px solid {toast_border};
+    border-radius: 8px;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
+    padding: 8px 14px;
+}}
 "#,
             bg = bg_css,
             fg = rgba_css(&self.fg),
@@ -267,6 +280,8 @@ paned > separator {{
             control_hover = control_hover_css,
             subdued_fg = subdued_fg_css,
             sidebar = sidebar_bg,
+            toast_bg = toast_bg_css,
+            toast_border = toast_border_css,
         )
     }
 }

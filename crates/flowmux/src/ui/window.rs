@@ -48,6 +48,8 @@ pub struct WindowController {
     /// Global CssProvider. When the options dialog changes focus border color
     /// or opacity, reload CSS into this same instance so every pane updates immediately.
     css_provider: gtk::CssProvider,
+    /// Small in-window toast shown when terminal text is copied.
+    clipboard_toast: ClipboardToast,
     /// MRU pane list per workspace, with the front as most recently focused and
     /// capped at 3 panes. The side-panel label comes from the head pane's active
     /// surface title, and subtitles come from the active terminal cwd paths for
@@ -135,9 +137,14 @@ impl WindowController {
             .position(stored_sidebar_pos)
             .build();
 
+        let content_overlay = gtk::Overlay::new();
+        content_overlay.set_child(Some(&split));
+        let clipboard_toast = ClipboardToast::new();
+        content_overlay.add_overlay(clipboard_toast.widget());
+
         let toolbar = adw::ToolbarView::new();
         toolbar.add_top_bar(&adw::HeaderBar::new());
-        toolbar.set_content(Some(&split));
+        toolbar.set_content(Some(&content_overlay));
 
         // Restore saved window size/maximized state, otherwise default to 1280x800.
         let stored_window = store.window_layout_blocking();
@@ -178,6 +185,7 @@ impl WindowController {
             notifications,
             options,
             css_provider,
+            clipboard_toast,
             focus_mru: Rc::new(RefCell::new(HashMap::new())),
         };
         controller.install_state_flush_on_close();
@@ -584,6 +592,12 @@ impl WindowController {
     /// main thread without going through the bridge.
     pub fn pane_registry(&self) -> Rc<RefCell<PaneRegistry>> {
         self.pane_registry.clone()
+    }
+
+    /// Toast handle used by copy actions. Exposed to keybindings so the
+    /// action can remain synchronous on the GTK main thread.
+    pub fn clipboard_toast(&self) -> ClipboardToast {
+        self.clipboard_toast.clone()
     }
 
     fn install_state_flush_on_close(&self) {
@@ -2625,6 +2639,61 @@ fn show_color_dialog(
             });
         },
     );
+}
+
+/// Top-of-window "Copied to clipboard" toast. The generation counter
+/// keeps repeated copies safe: each new copy bumps `generation`, so the
+/// pending hide-timer from the previous copy notices it is stale and
+/// leaves the new toast visible for its own full duration.
+#[derive(Clone)]
+pub struct ClipboardToast {
+    revealer: gtk::Revealer,
+    generation: Rc<Cell<u64>>,
+}
+
+impl ClipboardToast {
+    pub fn new() -> Self {
+        let label = gtk::Label::new(Some("Copied to clipboard"));
+        label.set_xalign(0.5);
+
+        let toast = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        toast.add_css_class("flowmux-clipboard-toast");
+        toast.append(&label);
+
+        let revealer = gtk::Revealer::builder()
+            .transition_duration(140)
+            .transition_type(gtk::RevealerTransitionType::SlideDown)
+            .reveal_child(false)
+            .halign(gtk::Align::Center)
+            .valign(gtk::Align::Start)
+            .build();
+        revealer.set_margin_top(10);
+        revealer.set_can_target(false);
+        revealer.set_child(Some(&toast));
+
+        Self {
+            revealer,
+            generation: Rc::new(Cell::new(0)),
+        }
+    }
+
+    pub fn widget(&self) -> &gtk::Revealer {
+        &self.revealer
+    }
+
+    pub fn show(&self) {
+        let current = self.generation.get().wrapping_add(1);
+        self.generation.set(current);
+        self.revealer.set_reveal_child(true);
+
+        let revealer = self.revealer.clone();
+        let generation = self.generation.clone();
+        glib::timeout_add_local_once(Duration::from_millis(1400), move || {
+            if generation.get() == current {
+                revealer.set_reveal_child(false);
+            }
+        });
+    }
 }
 
 /// Evaluate a script on `browser`'s WebView and forward the result

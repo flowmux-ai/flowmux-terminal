@@ -154,6 +154,7 @@ fn main() -> anyhow::Result<()> {
             bridge_for_activate.clone(),
             controller.focused_pane.clone(),
             controller.pane_registry(),
+            controller.clipboard_toast(),
         );
         spawn_dispatch_loop(rx_for_activate.clone(), controller.clone());
         let controller_for_init = controller.clone();
