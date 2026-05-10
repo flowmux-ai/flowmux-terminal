@@ -126,7 +126,7 @@ fn main() -> anyhow::Result<()> {
     });
 
     // GTK runs on the main thread.
-    let app = adw::Application::builder().application_id(APP_ID).build();
+    let app = build_application();
     keybindings::install_accels(&app);
     let store_for_activate = store.clone();
     let rx_for_activate = rx.clone();
@@ -196,6 +196,25 @@ fn main() -> anyhow::Result<()> {
     std::process::exit(exit_code.into());
 }
 
+/// Build the libadwaita application with the flags every other piece of the
+/// multi-window story already relies on.
+///
+/// `NON_UNIQUE` is load-bearing: per-PID IPC socket (`runtime_socket_for_pid`),
+/// per-host `state.lock` ownership, and the per-process `Bridge` channel all
+/// assume each flowmux window is its own OS process. Without this flag,
+/// GApplication's default singleton behavior makes a second `flowmux` launch
+/// hand off to the existing process via D-Bus and exit, so the second
+/// `connect_activate` opens a window inside the same process — sharing the
+/// same `Bridge`. `async_channel` is MPMC, so a workspace click in window A
+/// then races with window B's dispatcher and sometimes flips the wrong
+/// window's active workspace.
+fn build_application() -> adw::Application {
+    adw::Application::builder()
+        .application_id(APP_ID)
+        .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
+        .build()
+}
+
 fn delegate_to_cli_if_needed() -> anyhow::Result<bool> {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     if args.is_empty() {
@@ -238,4 +257,37 @@ fn delegate_to_cli_if_needed() -> anyhow::Result<bool> {
     }
 
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use adw::prelude::*;
+    use gtk::gio::ApplicationFlags;
+
+    /// Regression guard for cross-window workspace navigation: the bug was
+    /// that two `flowmux` launches collapsed into one process under
+    /// GApplication's default singleton behavior, then both windows
+    /// shared a single MPMC `Bridge` and a click in window A activated
+    /// window B's workspace. The fix is `NON_UNIQUE` on the application
+    /// builder; if a future refactor drops it, this test fails before
+    /// the user does.
+    #[test]
+    fn application_uses_non_unique_so_each_window_runs_in_its_own_process() {
+        // libadwaita refuses to initialize without a display server.
+        // Skip silently on headless CI; the assertion below is a pure
+        // check against the configured GApplication flags and does not
+        // need a live GTK loop to be meaningful.
+        if adw::init().is_err() {
+            return;
+        }
+        let app = build_application();
+        assert!(
+            app.flags().contains(ApplicationFlags::NON_UNIQUE),
+            "build_application() must set NON_UNIQUE so two flowmux launches \
+             produce two processes (per-PID socket, state.lock, Bridge all \
+             assume this); got flags = {:?}",
+            app.flags()
+        );
+    }
 }
