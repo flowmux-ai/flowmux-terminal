@@ -9,9 +9,7 @@
 //! mutator API. Validates: no panic, no deadlock (timeout-bounded), workspace
 //! count stays sane, every snapshot at the end is structurally valid.
 
-use flowmux_core::{
-    Pane, PaneContent, PaneId, SplitDirection, SurfaceId, Workspace, WorkspaceId,
-};
+use flowmux_core::{Pane, PaneContent, PaneId, SplitDirection, SurfaceId, Workspace, WorkspaceId};
 use flowmux_daemon::state_store::StateStore;
 use flowmux_state::State;
 use std::collections::HashSet;
@@ -76,7 +74,11 @@ fn assert_state_invariants(state: &State) {
             );
             let mut leaves = Vec::new();
             collect_leaf_ids(&surface.root_pane, &mut leaves);
-            assert!(!leaves.is_empty(), "workspace {:?} has empty pane tree", ws.id);
+            assert!(
+                !leaves.is_empty(),
+                "workspace {:?} has empty pane tree",
+                ws.id
+            );
             for p in &leaves {
                 assert!(all_pane_ids.insert(*p), "duplicate pane id {:?}", p);
             }
@@ -166,9 +168,7 @@ async fn state_store_concurrent_churn_holds_invariants() {
                             .await;
                     }
                     3 => {
-                        let _ = store
-                            .add_terminal_surface_to_pane(pane_id, None)
-                            .await;
+                        let _ = store.add_terminal_surface_to_pane(pane_id, None).await;
                     }
                     4 => {
                         let dir = if rng.next_u64() & 1 == 0 {

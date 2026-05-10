@@ -106,9 +106,7 @@ async fn auto_title_repeat_is_a_fast_path() {
             .await;
     }
     let second = t1.elapsed();
-    eprintln!(
-        "auto_title same-value: first half {first:?}, second half {second:?} ({HALF} each)"
-    );
+    eprintln!("auto_title same-value: first half {first:?}, second half {second:?} ({HALF} each)");
     // Loose envelope: second must be within 4x of first. Catches a regression
     // that turns the no-op path quadratic without false-firing on noisy CI.
     assert!(

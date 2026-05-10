@@ -251,13 +251,25 @@ pub enum Request {
 pub enum Response {
     Ok,
     Pong,
-    WorkspaceCreated { id: WorkspaceId },
-    WorkspaceList { ids: Vec<WorkspaceId> },
-    SurfaceCreated { id: SurfaceId },
-    PaneSplitDone { new_pane: PaneId },
-    BrowserResult { value: String },
+    WorkspaceCreated {
+        id: WorkspaceId,
+    },
+    WorkspaceList {
+        ids: Vec<WorkspaceId>,
+    },
+    SurfaceCreated {
+        id: SurfaceId,
+    },
+    PaneSplitDone {
+        new_pane: PaneId,
+    },
+    BrowserResult {
+        value: String,
+    },
     BrowserOk,
-    BrowserBoolResult { value: bool },
+    BrowserBoolResult {
+        value: bool,
+    },
     /// Reply to `BrowserOpen`. `placement_strategy` mirrors cmux's
     /// response field so agents can tell whether their URL was added
     /// as a tab to an existing right-sibling browser pane or whether
@@ -266,10 +278,14 @@ pub enum Response {
         pane: PaneId,
         placement_strategy: PlacementStrategy,
     },
-    CookiesImported { count: usize },
+    CookiesImported {
+        count: usize,
+    },
     /// Reply to `AgentSessionGet`. `session_id = None` means no
     /// previous session was recorded for this `(agent, surface)`.
-    AgentSession { session_id: Option<String> },
+    AgentSession {
+        session_id: Option<String>,
+    },
     Error(RpcError),
 }
 
@@ -464,9 +480,7 @@ mod tests {
         })
         .unwrap();
         let back: Response = serde_json::from_str(&s).unwrap();
-        assert!(
-            matches!(back, Response::AgentSession { session_id: Some(s) } if s == "xyz")
-        );
+        assert!(matches!(back, Response::AgentSession { session_id: Some(s) } if s == "xyz"));
 
         let s = serde_json::to_string(&Response::AgentSession { session_id: None }).unwrap();
         let back: Response = serde_json::from_str(&s).unwrap();

@@ -74,12 +74,7 @@ impl AgentSessionStore {
     }
 
     /// Record (or overwrite) the session id for `(agent, surface)`.
-    pub fn record(
-        &self,
-        agent: &str,
-        surface: SurfaceId,
-        session_id: &str,
-    ) -> io::Result<()> {
+    pub fn record(&self, agent: &str, surface: SurfaceId, session_id: &str) -> io::Result<()> {
         let mut map = self.load(agent)?;
         map.insert(surface.to_string(), session_id.to_string());
         let bytes = serde_json::to_vec_pretty(&map)

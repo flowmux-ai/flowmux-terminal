@@ -106,9 +106,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn collect<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str> {
-        env.iter()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v.as_str())
+        env.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
     }
 
     #[test]
@@ -120,7 +118,10 @@ mod tests {
 
         let env = agent_pty_env(pane, surface, ws, &socket, None);
 
-        assert_eq!(collect(&env, "FLOWMUX_PANE_ID"), Some(pane.to_string().as_str()));
+        assert_eq!(
+            collect(&env, "FLOWMUX_PANE_ID"),
+            Some(pane.to_string().as_str())
+        );
         assert_eq!(
             collect(&env, "FLOWMUX_SURFACE_ID"),
             Some(surface.to_string().as_str())
@@ -177,7 +178,10 @@ mod tests {
             ("FLOWMUX_PANE_ID".into(), "abc".into()),
         ];
         let kv = env_to_kv_strings(&env);
-        assert_eq!(kv, vec!["A=1".to_string(), "FLOWMUX_PANE_ID=abc".to_string()]);
+        assert_eq!(
+            kv,
+            vec!["A=1".to_string(), "FLOWMUX_PANE_ID=abc".to_string()]
+        );
     }
 
     /// Scenario: building the env we will pass to `vte_terminal_spawn_async`.
@@ -203,7 +207,10 @@ mod tests {
             let key = &entry[..eq];
             let val = &entry[eq + 1..];
             assert!(!key.is_empty(), "envv key must be non-empty");
-            assert!(key.starts_with("FLOWMUX_"), "expected FLOWMUX_ prefix in {entry}");
+            assert!(
+                key.starts_with("FLOWMUX_"),
+                "expected FLOWMUX_ prefix in {entry}"
+            );
             assert!(!val.is_empty(), "envv value must be non-empty");
         }
 

@@ -176,9 +176,30 @@ mod tests {
     #[test]
     fn entries_preserve_insertion_order_and_unread_count_tracks_reads() {
         let s = store();
-        let a = s.push("a".into(), "".into(), NotificationLevel::Info, None, None, None);
-        let b = s.push("b".into(), "".into(), NotificationLevel::Info, None, None, None);
-        let c = s.push("c".into(), "".into(), NotificationLevel::Info, None, None, None);
+        let a = s.push(
+            "a".into(),
+            "".into(),
+            NotificationLevel::Info,
+            None,
+            None,
+            None,
+        );
+        let b = s.push(
+            "b".into(),
+            "".into(),
+            NotificationLevel::Info,
+            None,
+            None,
+            None,
+        );
+        let c = s.push(
+            "c".into(),
+            "".into(),
+            NotificationLevel::Info,
+            None,
+            None,
+            None,
+        );
         let entries = s.entries();
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].id, a);

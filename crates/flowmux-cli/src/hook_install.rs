@@ -187,7 +187,11 @@ fn check_codex() -> HookCheckEntry {
     }
     let config_path = home.join("config.toml");
     if !config_path.exists() {
-        return entry(HookTarget::Codex, HookCheckStatus::Missing, vec![config_path]);
+        return entry(
+            HookTarget::Codex,
+            HookCheckStatus::Missing,
+            vec![config_path],
+        );
     }
     let raw = match fs::read_to_string(&config_path) {
         Ok(s) => s,

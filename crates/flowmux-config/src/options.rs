@@ -249,8 +249,7 @@ pub fn load() -> Options {
 
 /// Serialize options to `options.json`, creating the parent directory if needed.
 pub fn save(opts: &Options) -> std::io::Result<()> {
-    let path = options_path()
-        .ok_or_else(|| std::io::Error::other("XDG config dir unavailable"))?;
+    let path = options_path().ok_or_else(|| std::io::Error::other("XDG config dir unavailable"))?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -312,13 +311,7 @@ mod tests {
     #[test]
     fn engine_label_falls_back_for_empty_custom() {
         assert_eq!(BrowserEngine::Webkit.label(), "WebKit");
-        assert_eq!(
-            BrowserEngine::Custom {
-                name: "".into()
-            }
-            .label(),
-            "Custom"
-        );
+        assert_eq!(BrowserEngine::Custom { name: "".into() }.label(), "Custom");
         assert_eq!(
             BrowserEngine::Custom {
                 name: "Brave".into()
@@ -483,8 +476,7 @@ mod tests {
     #[test]
     fn options_save_then_load_preserves_focus_color() {
         with_xdg(|_| {
-            let opts = Options::default()
-                .with_focus_border_color("#0bd968");
+            let opts = Options::default().with_focus_border_color("#0bd968");
             save(&opts).unwrap();
             let back = load();
             assert_eq!(back.focus_border_color, "#0bd968");

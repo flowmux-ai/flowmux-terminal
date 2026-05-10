@@ -123,10 +123,7 @@ mod tests {
         let mut store = RefStore::new();
         let s = scope(1);
         store.allocate(s, "body > button:nth-of-type(1)");
-        assert_eq!(
-            store.resolve(s, "e1"),
-            Some("body > button:nth-of-type(1)")
-        );
+        assert_eq!(store.resolve(s, "e1"), Some("body > button:nth-of-type(1)"));
     }
 
     #[test]

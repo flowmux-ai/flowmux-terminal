@@ -125,9 +125,10 @@ impl Report {
     /// `true` iff at least one entry is `NeedsFix` or `Error`. The CLI
     /// uses this to set its exit code.
     pub fn has_problems(&self) -> bool {
-        self.sections.iter().flat_map(|s| &s.entries).any(|e| {
-            matches!(e.status, Status::NeedsFix | Status::Error)
-        })
+        self.sections
+            .iter()
+            .flat_map(|s| &s.entries)
+            .any(|e| matches!(e.status, Status::NeedsFix | Status::Error))
     }
 }
 
@@ -136,10 +137,7 @@ impl Report {
 /// tests with a fake `home`.
 pub fn collect_offline(home: &Path, codex_home: Option<&Path>) -> Report {
     Report {
-        sections: vec![
-            section_agents(home, codex_home),
-            section_browser_offline(),
-        ],
+        sections: vec![section_agents(home, codex_home), section_browser_offline()],
     }
 }
 
@@ -233,10 +231,9 @@ fn skill_status(status: &agent::DoctorStatus, agent_present: bool) -> Status {
 fn skill_detail(status: &agent::DoctorStatus, path: &Path, agent_present: bool) -> String {
     match status {
         agent::DoctorStatus::Ok => path.display().to_string(),
-        agent::DoctorStatus::Drift => format!(
-            "{} (drift — `flowmux fix` re-syncs)",
-            path.display()
-        ),
+        agent::DoctorStatus::Drift => {
+            format!("{} (drift — `flowmux fix` re-syncs)", path.display())
+        }
         agent::DoctorStatus::Missing if agent_present => {
             format!("{} (missing — `flowmux fix` installs)", path.display())
         }
@@ -298,19 +295,22 @@ async fn section_daemon(socket: Option<PathBuf>) -> Section {
     let ping = match tokio::time::timeout(Duration::from_millis(250), Client::connect(&resolved))
         .await
     {
-        Ok(Ok(c)) => match tokio::time::timeout(Duration::from_millis(250), c.call(Request::Ping))
-            .await
-        {
-            Ok(Ok(Response::Pong)) => Ok(()),
-            Ok(Ok(other)) => Err(format!("unexpected response: {other:?}")),
-            Ok(Err(e)) => Err(format!("call failed: {e}")),
-            Err(_) => Err("ping timed out".into()),
-        },
+        Ok(Ok(c)) => {
+            match tokio::time::timeout(Duration::from_millis(250), c.call(Request::Ping)).await {
+                Ok(Ok(Response::Pong)) => Ok(()),
+                Ok(Ok(other)) => Err(format!("unexpected response: {other:?}")),
+                Ok(Err(e)) => Err(format!("call failed: {e}")),
+                Err(_) => Err("ping timed out".into()),
+            }
+        }
         Ok(Err(e)) => Err(format!("connect failed: {e}")),
         Err(_) => Err("connect timed out".into()),
     };
     let (status, detail) = match ping {
-        Ok(()) => (Status::Ok, "daemon responded to Ping (browser pane available)".into()),
+        Ok(()) => (
+            Status::Ok,
+            "daemon responded to Ping (browser pane available)".into(),
+        ),
         Err(reason) => (
             Status::Warn,
             format!("daemon not reachable — start `flowmux` to enable browser panes ({reason})"),
@@ -348,9 +348,7 @@ fn webkit_env_entry() -> Entry {
     let sandbox = std::env::var("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS").ok();
     let dmabuf = std::env::var("WEBKIT_DISABLE_DMABUF_RENDERER").ok();
     let detail = match (sandbox, dmabuf) {
-        (None, None) => {
-            "no overrides; flowmux GUI applies safe defaults at startup".into()
-        }
+        (None, None) => "no overrides; flowmux GUI applies safe defaults at startup".into(),
         (s, d) => format!(
             "user override: SANDBOX={} DMABUF={}",
             s.as_deref().unwrap_or("<unset>"),
@@ -399,10 +397,7 @@ fn browser_data_dir_entry() -> Entry {
         Entry {
             name: "browser data".into(),
             status: Status::Info,
-            detail: format!(
-                "{} (created on first browser pane open)",
-                dir.display()
-            ),
+            detail: format!("{} (created on first browser pane open)", dir.display()),
         }
     }
 }
@@ -539,7 +534,9 @@ pub struct FixReport {
 
 impl FixReport {
     pub fn has_problems(&self) -> bool {
-        self.outcomes.iter().any(|o| matches!(o.status, Status::Error))
+        self.outcomes
+            .iter()
+            .any(|o| matches!(o.status, Status::Error))
     }
 }
 

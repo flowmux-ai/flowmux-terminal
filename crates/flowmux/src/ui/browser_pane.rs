@@ -455,8 +455,12 @@ mod tests {
             BrowserProfile::FirefoxImport
         );
         assert_eq!(
-            engine_to_profile(&BrowserEngine::Custom { name: "Brave".into() }),
-            BrowserProfile::Custom { name: "Brave".into() }
+            engine_to_profile(&BrowserEngine::Custom {
+                name: "Brave".into()
+            }),
+            BrowserProfile::Custom {
+                name: "Brave".into()
+            }
         );
     }
 

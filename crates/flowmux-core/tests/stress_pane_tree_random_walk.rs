@@ -195,11 +195,8 @@ fn pane_tree_random_walk_holds_invariants() {
                 }
                 73..=84 => {
                     if let Some(active) = root.active_surface_id(target) {
-                        let _ = root.rename_surface(
-                            target,
-                            active,
-                            format!("name-{}", rng.next_u64()),
-                        );
+                        let _ =
+                            root.rename_surface(target, active, format!("name-{}", rng.next_u64()));
                         renames += 1;
                     }
                 }

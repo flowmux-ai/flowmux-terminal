@@ -465,13 +465,7 @@ impl Pane {
         // workspace looking for `target`, so calls that miss the leaf must
         // not pay for an env access.
         let mut home_cache: Option<Option<PathBuf>> = None;
-        set_surface_title_auto_descend(
-            self,
-            target,
-            surface_id,
-            &mut new_title,
-            &mut home_cache,
-        )
+        set_surface_title_auto_descend(self, target, surface_id, &mut new_title, &mut home_cache)
     }
 
     pub fn set_surface_cwd(
