@@ -17,6 +17,7 @@
 
 use crate::bridge::{Bridge, FocusDir, GtkCommand, WsNav};
 use crate::ui::window::ClipboardToast;
+use adw::prelude::*;
 use flowmux_core::SplitDirection;
 use gtk::gio::prelude::*;
 use gtk::glib;
@@ -41,6 +42,11 @@ pub const BINDINGS: &[(&str, &[&str])] = &[
     ("win.focus-up", &["<Alt>Up"]),
     ("win.focus-down", &["<Alt>Down"]),
     ("win.close-surface", &["<Alt>w"]),
+    // Ctrl+Shift+W asks the user to confirm, then closes the entire
+    // flowmux window (which under NON_UNIQUE GApplication is the whole
+    // app process). Distinct from Alt+W (single tab/pane only) so an
+    // accidental modifier slip can't nuke the whole session.
+    ("win.quit-app", &["<Ctrl><Shift>w"]),
     // Tab navigation. Bare Tab and Shift+Tab are reserved for the terminal
     // (shell completion, agent shortcuts, etc.). Ctrl+Tab cycles the left
     // workspace list.
@@ -129,6 +135,7 @@ pub fn install_actions(
         bridge.clone(),
         registry.clone(),
     );
+    let quit_app = make_quit_app_action(window.clone());
 
     let new_workspace = {
         let bridge = bridge.clone();
@@ -229,6 +236,7 @@ pub fn install_actions(
         focus_up,
         focus_down,
         close_surface,
+        quit_app,
         new_surface,
         new_browser_surface,
         next_surface,
@@ -414,6 +422,68 @@ fn make_close_surface_action(
         .build()
 }
 
+/// Action for `win.quit-app` (Ctrl+Shift+W). Asks the user to confirm
+/// before tearing the entire flowmux window down. We close the window
+/// rather than calling `application.quit()` so the existing
+/// `connect_close_request` handler (state flush, save, deferred destroy)
+/// runs exactly the same way as a window-manager close. With NON_UNIQUE
+/// GApplication, closing the only window ends the process — i.e.
+/// "quit the whole app" — without a separate quit path.
+fn make_quit_app_action(
+    window: adw::ApplicationWindow,
+) -> gtk::gio::ActionEntry<adw::ApplicationWindow> {
+    gtk::gio::ActionEntry::builder("quit-app")
+        .activate(move |_, _, _| {
+            tracing::debug!(action = "quit-app", "key action fired");
+            let window = window.clone();
+            glib::MainContext::default().spawn_local(async move {
+                if confirm_quit_app(&window).await {
+                    window.close();
+                }
+            });
+        })
+        .build()
+}
+
+/// Modal "Quit flowmux?" confirmation dialog. Returns true when the
+/// user picks "Quit", false when they cancel or dismiss. Mirrors the
+/// shape of `confirm_close_workspace` in `ui::window` (same response
+/// names, default = cancel, destructive styling on the confirm button)
+/// so the two dialogs behave identically from the user's side.
+async fn confirm_quit_app(window: &adw::ApplicationWindow) -> bool {
+    let (dialog, rx) = build_quit_dialog();
+    dialog.present(Some(window));
+    rx.await.unwrap_or(false)
+}
+
+/// Construct the quit-confirmation dialog plus a oneshot receiver that
+/// resolves to `true` for "quit" / `false` for cancel-or-dismiss.
+/// Split out from [`confirm_quit_app`] so tests can present the dialog,
+/// fire a response programmatically (`dialog.response("quit")`), and
+/// observe the receiver value without driving an actual GUI session.
+fn build_quit_dialog() -> (adw::AlertDialog, oneshot::Receiver<bool>) {
+    let dialog = adw::AlertDialog::new(
+        Some("Quit flowmux?"),
+        Some("This closes the flowmux window and stops every running tab."),
+    );
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("quit", "Quit");
+    dialog.set_default_response(Some("cancel"));
+    dialog.set_close_response("cancel");
+    dialog.set_response_appearance("quit", adw::ResponseAppearance::Destructive);
+
+    let (tx, rx) = oneshot::channel::<bool>();
+    let tx_cell: Rc<Cell<Option<oneshot::Sender<bool>>>> = Rc::new(Cell::new(Some(tx)));
+    let tx_for_resp = tx_cell.clone();
+    dialog.connect_response(None, move |dialog, response| {
+        if let Some(tx) = tx_for_resp.take() {
+            let _ = tx.send(response == "quit");
+        }
+        dialog.close();
+    });
+    (dialog, rx)
+}
+
 fn make_copy_action(
     focused: FocusedPane,
     registry: TerminalRegistry,
@@ -485,5 +555,156 @@ mod tests {
     fn ctrl_shift_b_opens_new_browser_surface_distinct_from_terminal_tab() {
         assert_eq!(accels("win.new-surface"), &["<Ctrl><Shift>t"]);
         assert_eq!(accels("win.new-browser-surface"), &["<Ctrl><Shift>b"]);
+    }
+
+    /// Ctrl+Shift+W must trigger the whole-window quit confirmation,
+    /// distinct from Alt+W (single-pane close). Pinning both bindings
+    /// here so a future shortcut shuffle doesn't silently collapse them
+    /// onto the same key.
+    #[test]
+    fn ctrl_shift_w_quits_app_distinct_from_alt_w_close_surface() {
+        assert_eq!(accels("win.quit-app"), &["<Ctrl><Shift>w"]);
+        assert_eq!(accels("win.close-surface"), &["<Alt>w"]);
+        // The two bindings must not share an accelerator — sharing
+        // would mean one key both closes a tab and asks to quit the
+        // whole app, which is exactly the regression the user hit on
+        // Alt+W and the reason quit-app got its own modifier combo.
+        let close_set: std::collections::HashSet<_> =
+            accels("win.close-surface").iter().copied().collect();
+        for accel in accels("win.quit-app") {
+            assert!(
+                !close_set.contains(accel),
+                "win.quit-app must not share an accelerator with win.close-surface"
+            );
+        }
+    }
+
+    /// Quit dialog has Cancel/Quit responses, defaults to Cancel, treats
+    /// dismissal as Cancel, and styles Quit as destructive — same shape
+    /// as `confirm_close_workspace` so the two confirmation dialogs feel
+    /// identical from the user's side.
+    #[gtk::test]
+    async fn quit_dialog_has_cancel_default_and_destructive_quit_response() {
+        adw::init().expect("libadwaita should initialize in GTK test");
+        let (dialog, _rx) = build_quit_dialog();
+        assert_eq!(dialog.default_response().as_deref(), Some("cancel"));
+        assert_eq!(dialog.close_response(), "cancel");
+        assert_eq!(
+            dialog.response_appearance("quit"),
+            adw::ResponseAppearance::Destructive
+        );
+        // Both responses are enabled and exposed by id so the action
+        // handler can compare against the literal "quit"/"cancel" keys.
+        assert!(dialog.is_response_enabled("cancel"));
+        assert!(dialog.is_response_enabled("quit"));
+    }
+
+    /// Scenario: user presses Ctrl+Shift+W, the dialog appears,
+    /// and picking "Quit" closes the window (NON_UNIQUE GApplication
+    /// → process exit). Picking "Cancel" leaves the window alone.
+    /// We exercise the dialog directly via `build_quit_dialog` +
+    /// `dialog.response(...)` so the test does not depend on
+    /// keyboard-accel routing or widget-tree introspection.
+    #[gtk::test]
+    async fn quit_dialog_quit_response_resolves_true_cancel_resolves_false() {
+        adw::init().expect("libadwaita should initialize in GTK test");
+
+        let (dialog, rx) = build_quit_dialog();
+        dialog.emit_by_name::<()>("response", &[&"quit"]);
+        let result = rx.await.expect("dialog must signal a response");
+        assert!(
+            result,
+            "picking Quit must resolve to true so the action proceeds with window.close()"
+        );
+
+        let (dialog2, rx2) = build_quit_dialog();
+        dialog2.emit_by_name::<()>("response", &[&"cancel"]);
+        let result2 = rx2.await.expect("dialog must signal a response");
+        assert!(
+            !result2,
+            "picking Cancel must resolve to false so the action leaves the window alone"
+        );
+    }
+
+    /// Scenario: install the quit-app action on a real ApplicationWindow,
+    /// register it, and verify that the GAction name is actually exposed
+    /// on the window — i.e. a real `Ctrl+Shift+W` press routed through
+    /// `gtk::Application::activate_action` will find a handler. Catches
+    /// regressions where the entry is added but mis-spelled or never
+    /// reaches `add_action_entries`.
+    #[gtk::test]
+    async fn quit_app_action_is_registered_on_application_window_under_win_namespace() {
+        use gtk::gio::prelude::ActionGroupExt;
+
+        adw::init().expect("libadwaita should initialize in GTK test");
+        let app = adw::Application::builder()
+            .application_id("com.flowmux.App.UiTest.QuitAppActionRegistered")
+            .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        app.register(None::<&gtk::gio::Cancellable>).unwrap();
+        let window = adw::ApplicationWindow::builder()
+            .application(&app)
+            .default_width(320)
+            .default_height(240)
+            .build();
+        let entry = make_quit_app_action(window.clone());
+        window.add_action_entries([entry]);
+
+        // The accelerator binds to "win.quit-app", which means the
+        // action lives in the ApplicationWindow's "win" action group
+        // under the bare name "quit-app".
+        assert!(
+            window.has_action("quit-app"),
+            "quit-app action must be registered on the window so Ctrl+Shift+W routes to it"
+        );
+    }
+
+    /// Scenario: dispatching the quit-app action through GAction
+    /// activation (the same path the keyboard accelerator takes) must
+    /// schedule the confirmation dialog rather than closing the window
+    /// outright. We pin "no synchronous close" so a future refactor
+    /// that drops the confirm step is caught here, not in production.
+    #[gtk::test]
+    async fn activating_quit_app_action_does_not_close_window_synchronously() {
+        adw::init().expect("libadwaita should initialize in GTK test");
+        let app = adw::Application::builder()
+            .application_id("com.flowmux.App.UiTest.QuitAppActionNoSyncClose")
+            .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        app.register(None::<&gtk::gio::Cancellable>).unwrap();
+        let window = adw::ApplicationWindow::builder()
+            .application(&app)
+            .default_width(320)
+            .default_height(240)
+            .build();
+        let entry = make_quit_app_action(window.clone());
+        window.add_action_entries([entry]);
+
+        let close_count = Rc::new(Cell::new(0u32));
+        let close_count_for_handler = close_count.clone();
+        window.connect_close_request(move |_| {
+            close_count_for_handler.set(close_count_for_handler.get() + 1);
+            // Stop so the window survives test teardown.
+            glib::Propagation::Stop
+        });
+
+        gtk::prelude::WidgetExt::activate_action(&window, "win.quit-app", None)
+            .expect("win.quit-app action should be registered on the window");
+
+        // Pump one idle cycle so any synchronous-close bug would have
+        // already surfaced. The intended behaviour is that the action
+        // pops a confirm dialog and waits for the user's response, so
+        // close_count must remain zero here.
+        let (idle_tx, idle_rx) = oneshot::channel();
+        glib::idle_add_local_once(move || {
+            let _ = idle_tx.send(());
+        });
+        let _ = idle_rx.await;
+
+        assert_eq!(
+            close_count.get(),
+            0,
+            "Ctrl+Shift+W must wait for the confirm dialog response — it must not close the window before the user picks Quit"
+        );
     }
 }
