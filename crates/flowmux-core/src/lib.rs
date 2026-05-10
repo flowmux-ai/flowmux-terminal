@@ -459,11 +459,19 @@ impl Pane {
         if new_title.trim().is_empty() {
             return false;
         }
-        // Reading $HOME once per call avoids the per-recursion env hit when
-        // we descend through deep pane trees.
-        let home = std::env::var_os("HOME").map(PathBuf::from);
         let mut new_title = Some(new_title);
-        set_surface_title_auto_descend(self, target, surface_id, &mut new_title, home.as_deref())
+        // `home_cache` defers the `$HOME` env lookup until the leaf actually
+        // needs it (Terminal surface with cwd set). state_store walks every
+        // workspace looking for `target`, so calls that miss the leaf must
+        // not pay for an env access.
+        let mut home_cache: Option<Option<PathBuf>> = None;
+        set_surface_title_auto_descend(
+            self,
+            target,
+            surface_id,
+            &mut new_title,
+            &mut home_cache,
+        )
     }
 
     pub fn set_surface_cwd(
@@ -820,7 +828,7 @@ fn set_surface_title_auto_descend(
     target: PaneId,
     surface_id: SurfaceId,
     new_title: &mut Option<String>,
-    home: Option<&Path>,
+    home_cache: &mut Option<Option<PathBuf>>,
 ) -> bool {
     match node {
         Pane::Leaf { id, content } if *id == target => match content {
@@ -836,6 +844,9 @@ fn set_surface_title_auto_descend(
                     return false;
                 }
                 if let SurfaceKind::Terminal { cwd: Some(cwd), .. } = &surface.kind {
+                    let home = home_cache
+                        .get_or_insert_with(|| std::env::var_os("HOME").map(PathBuf::from))
+                        .as_deref();
                     if title_is_shell_cwd_echo(candidate, cwd, home) {
                         return false;
                     }
@@ -847,8 +858,8 @@ fn set_surface_title_auto_descend(
         },
         Pane::Leaf { .. } => false,
         Pane::Split { first, second, .. } => {
-            set_surface_title_auto_descend(first, target, surface_id, new_title, home)
-                || set_surface_title_auto_descend(second, target, surface_id, new_title, home)
+            set_surface_title_auto_descend(first, target, surface_id, new_title, home_cache)
+                || set_surface_title_auto_descend(second, target, surface_id, new_title, home_cache)
         }
     }
 }
