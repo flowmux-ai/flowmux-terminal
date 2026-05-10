@@ -1250,6 +1250,12 @@ impl WindowController {
                         // widget alive across the close.
                         self.apply_close_pane_incremental_or_rerender(workspace, pane)
                             .await;
+                        // Alt+W on a single-tab pane lands here. Without this
+                        // call focus stays on the dead pane id, so arrow keys
+                        // / typing go nowhere until the user clicks a sibling.
+                        // CloseFocused already calls focus_after_close in the
+                        // same situation; keep the two close paths in sync.
+                        self.focus_after_close(workspace, pane).await;
                         let _ = ack.send(Ok(()));
                     }
                 }
@@ -5121,6 +5127,107 @@ mod tests {
             controller.focused_pane.get(),
             Some(pane_a),
             "closing an unfocused pane must not steal focus from the pane the user is typing in"
+        );
+    }
+
+    /// Regression: Alt+W triggers `win.close-surface` (CloseSurface),
+    /// not the X-button's CloseFocused. When the focused pane has only
+    /// one tab CloseSurface falls through to the daemon's `PaneRemoved`
+    /// outcome, but the GTK side originally only ran the incremental
+    /// collapse and forgot to hand focus to a sibling — leaving
+    /// `focused_pane` pointing at the dead pane id. The user reported
+    /// this as "Alt+W on a multi-split pane stops focusing anything".
+    ///
+    /// Same nested-split shape as the CloseFocused regression so the
+    /// grand-paned slot replacement is exercised; only the dispatched
+    /// command differs.
+    #[gtk::test]
+    async fn closing_focused_pane_via_alt_w_in_nested_split_focuses_sibling() {
+        adw::init().expect("libadwaita should initialize in GTK test");
+        let root = std::env::temp_dir().join("flowmux-ui-close-surface-prev-nested");
+        std::fs::create_dir_all(&root).unwrap();
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("ui".into()), root.clone())
+            .await;
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        let pane_a = ws.surfaces[0].root_pane.first_leaf_id().unwrap();
+
+        let (bridge, _rx) = Bridge::new();
+        let app = adw::Application::builder()
+            .application_id("com.flowmux.App.UiTest.CloseSurfacePrevNested")
+            .build();
+        app.register(None::<&gtk::gio::Cancellable>).unwrap();
+        let controller = WindowController::new(
+            &app,
+            store.clone(),
+            Arc::new(ResolvedTheme::load()),
+            bridge,
+            gtk::CssProvider::new(),
+        );
+        controller.render_workspace(&ws);
+
+        // Tree shape: Split{ Leaf(A), Split{ Leaf(B), Leaf(C) } }.
+        let (_, pane_b) = store
+            .split_pane(pane_a, SplitDirection::Vertical)
+            .await
+            .expect("first split should succeed");
+        controller
+            .apply_split_incremental_or_rerender(ws_id, pane_a, pane_b, SplitDirection::Vertical)
+            .await;
+        let (_, pane_c) = store
+            .split_pane(pane_b, SplitDirection::Horizontal)
+            .await
+            .expect("second split should succeed");
+        controller
+            .apply_split_incremental_or_rerender(ws_id, pane_b, pane_c, SplitDirection::Horizontal)
+            .await;
+
+        for p in [pane_a, pane_b, pane_c] {
+            controller.focused_pane.set(Some(p));
+            controller
+                .dispatch(GtkCommand::PaneFocused { pane: p })
+                .await;
+        }
+        assert_eq!(controller.focused_pane.get(), Some(pane_c));
+
+        // Alt+W path: keybindings.rs sends CloseSurface with the active
+        // surface of the focused pane, not CloseFocused.
+        let surface_c = controller
+            .pane_registry
+            .borrow()
+            .active_surface(pane_c)
+            .expect("focused pane must have an active surface");
+        let (ack_tx, ack_rx) = oneshot::channel();
+        controller
+            .dispatch(GtkCommand::CloseSurface {
+                pane: pane_c,
+                surface: surface_c,
+                ack: ack_tx,
+            })
+            .await;
+        ack_rx.await.unwrap().unwrap();
+
+        // grab_focus runs from an idle handler; pump one idle cycle so the
+        // EventControllerFocus on_focus callback updates focused_pane.
+        let (idle_tx, idle_rx) = oneshot::channel();
+        glib::idle_add_local_once(move || {
+            let _ = idle_tx.send(());
+        });
+        let _ = idle_rx.await;
+
+        assert_eq!(
+            controller.focused_pane.get(),
+            Some(pane_b),
+            "regression: Alt+W (CloseSurface) on the focused pane in a nested split must hand focus to the previous MRU sibling, not leave focused_pane stuck on the removed pane id"
+        );
+        assert!(
+            controller
+                .pane_registry
+                .borrow()
+                .pane_frame(pane_c)
+                .is_none(),
+            "closed pane C should be forgotten by the registry"
         );
     }
 }
