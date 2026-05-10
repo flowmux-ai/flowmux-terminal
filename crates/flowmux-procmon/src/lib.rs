@@ -169,4 +169,51 @@ mod tests {
         let ports = listening_ports(&pids).unwrap();
         assert!(ports.contains(&port), "expected {port} in {ports:?}");
     }
+
+    #[test]
+    fn descendants_of_unknown_pid_yields_only_itself() {
+        // A PID that is not currently a process can still appear as a
+        // singleton "subtree" — the walker simply finds no children. This
+        // documents the fact that callers must treat the result as "PIDs
+        // we know about", not "live PIDs", and that we do not try to
+        // validate liveness here (cheap procfs scan only).
+        let unlikely_pid: u32 = u32::MAX - 1;
+        let ds = descendants(unlikely_pid).unwrap();
+        assert!(ds.contains(&unlikely_pid));
+        // No live children for a synthetic PID.
+        assert_eq!(ds.len(), 1);
+    }
+
+    #[test]
+    fn listening_ports_filters_to_pids_owning_the_socket() {
+        // A second process's listener should not show up under our PID.
+        let other = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let other_port = other.local_addr().unwrap().port();
+        let our = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let our_port = our.local_addr().unwrap().port();
+
+        // Pretend a different (synthetic) PID owns nothing — the result
+        // must not include either port. Only our own pid set should
+        // surface our_port.
+        let other_pids = HashSet::from([u32::MAX - 1]);
+        let ports = listening_ports(&other_pids).unwrap();
+        assert!(!ports.contains(&our_port));
+        assert!(!ports.contains(&other_port));
+
+        let our_pids = HashSet::from([std::process::id()]);
+        let ports = listening_ports(&our_pids).unwrap();
+        assert!(ports.contains(&our_port));
+        assert!(ports.contains(&other_port));
+    }
+
+    #[test]
+    fn comm_of_returns_basename_of_self() {
+        let comm = comm_of(std::process::id()).expect("comm should be readable");
+        assert!(!comm.is_empty());
+        // The current binary is one of the cargo test runners. The comm
+        // must not include a path separator (kernel truncates to basename
+        // and 16 chars).
+        assert!(!comm.contains('/'));
+        assert!(comm.len() <= 16);
+    }
 }

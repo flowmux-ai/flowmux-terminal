@@ -155,4 +155,63 @@ mod tests {
             Some("https://example.com/flowmux.git")
         );
     }
+
+    #[test]
+    fn local_info_reports_no_remote_when_origin_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["-c", "init.defaultBranch=main", "init"]);
+
+        let info = local_info(dir.path()).unwrap().unwrap();
+        assert_eq!(info.branch, "main");
+        assert_eq!(info.remote_url, None);
+    }
+
+    #[test]
+    fn local_info_walks_upward_to_discover_repo_from_subdir() {
+        // gix::discover walks parents; a request from inside the repo's
+        // worktree must still resolve to the same repo, not "not a repo".
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["-c", "init.defaultBranch=main", "init"]);
+        let nested = dir.path().join("nested/deeper");
+        std::fs::create_dir_all(&nested).unwrap();
+        let info = local_info(&nested).unwrap().unwrap();
+        assert_eq!(info.branch, "main");
+    }
+
+    #[test]
+    fn local_info_reports_short_oid_for_detached_head() {
+        // After init + commit + checkout to the commit's OID, HEAD becomes
+        // detached and `branch` should fall back to a short OID instead of
+        // a branch name. The value can vary across git versions, so we
+        // assert on shape rather than equality.
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["-c", "init.defaultBranch=main", "init"]);
+        git(dir.path(), &["config", "user.name", "T"]);
+        git(dir.path(), &["config", "user.email", "t@t.test"]);
+        std::fs::write(dir.path().join("README"), "hello").unwrap();
+        git(dir.path(), &["add", "README"]);
+        git(
+            dir.path(),
+            &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+        );
+        // Resolve to the commit OID and detach.
+        let oid = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        let oid = String::from_utf8(oid.stdout).unwrap();
+        let oid = oid.trim();
+        git(dir.path(), &["checkout", "--detach", oid]);
+
+        let info = local_info(dir.path()).unwrap().unwrap();
+        // Detached → branch holds either a short OID, the literal
+        // "HEAD" fallback, or the full OID — never an empty string.
+        assert!(!info.branch.is_empty());
+        assert!(
+            info.branch == "HEAD" || oid.starts_with(&info.branch) || info.branch == oid,
+            "unexpected detached branch label: {:?}",
+            info.branch
+        );
+    }
 }

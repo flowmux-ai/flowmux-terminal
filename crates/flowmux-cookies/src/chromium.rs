@@ -67,3 +67,62 @@ impl Source for Chromium {
         Err(Error::EncryptedValuesUnsupported)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_browser_id_yields_no_config_path() {
+        let c = Chromium::new(BrowserId::Firefox);
+        assert!(c.config_dir().is_none());
+    }
+
+    #[test]
+    fn each_supported_id_resolves_to_a_path_under_home() {
+        // dirs::home_dir is platform-dependent; on CI it's still set under
+        // /home/<user> so the constructed paths must end with the slug we
+        // expect. We verify by suffix to stay robust to the home prefix.
+        for (id, expected_suffix) in [
+            (BrowserId::Chrome, "google-chrome/Default/Cookies"),
+            (BrowserId::Chromium, "chromium/Default/Cookies"),
+            (
+                BrowserId::Brave,
+                "BraveSoftware/Brave-Browser/Default/Cookies",
+            ),
+            (BrowserId::Edge, "microsoft-edge/Default/Cookies"),
+            (BrowserId::Arc, "arc/User Data/Default/Cookies"),
+        ] {
+            let path = Chromium::new(id)
+                .config_dir()
+                .unwrap_or_else(|| panic!("expected config dir for {id:?}"));
+            assert!(
+                path.ends_with(expected_suffix),
+                "{id:?}: {path:?} does not end with {expected_suffix:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn list_cookies_returns_profile_not_found_when_db_missing() {
+        // Provided the test environment has no Chrome installed, the call
+        // surfaces ProfileNotFound rather than the EncryptedValuesUnsupported
+        // gate (the gate fires only after detect() succeeds).
+        let c = Chromium::new(BrowserId::Chrome);
+        if c.detect().is_some() {
+            // CI host happens to have Chrome — assert the gate fires
+            // instead of the missing-profile path.
+            let err = c.list_cookies(None).unwrap_err();
+            assert!(
+                matches!(err, Error::EncryptedValuesUnsupported),
+                "expected encryption gate, got {err:?}"
+            );
+        } else {
+            let err = c.list_cookies(None).unwrap_err();
+            assert!(
+                matches!(err, Error::ProfileNotFound(_)),
+                "expected ProfileNotFound, got {err:?}"
+            );
+        }
+    }
+}

@@ -138,4 +138,46 @@ mod tests {
     fn rejects_non_numeric_port() {
         assert!(SshTarget::parse("user@host:ssh").is_err());
     }
+
+    #[test]
+    fn parse_user_at_host_without_port_defaults_to_22() {
+        let t = SshTarget::parse("alice@dev").unwrap();
+        assert_eq!(t.user, "alice");
+        assert_eq!(t.host, "dev");
+        assert_eq!(t.port, 22);
+    }
+
+    #[test]
+    fn parse_host_with_port_uses_default_user_from_env() {
+        // Without a `user@` prefix, the parser falls back to $USER (or
+        // "root" if unset). Using a unique username so the assertion does
+        // not collide with real CI environments.
+        std::env::set_var("USER", "flowmux-test-user");
+        let t = SshTarget::parse("dev:2222").unwrap();
+        assert_eq!(t.user, "flowmux-test-user");
+        assert_eq!(t.host, "dev");
+        assert_eq!(t.port, 2222);
+    }
+
+    #[test]
+    fn rejects_port_overflow() {
+        // Above u16::MAX must be rejected; we don't silently truncate.
+        assert!(SshTarget::parse("user@host:99999").is_err());
+    }
+
+    #[test]
+    fn ipv6_literal_with_explicit_port_is_split_at_last_colon() {
+        // Today the parser only supports a single colon (host:port) and
+        // does not understand `[::1]:22`. Documenting the limitation as a
+        // regression guard so that future bracket support can flip this
+        // assertion intentionally.
+        let result = SshTarget::parse("user@::1:22");
+        // The current behavior: rsplit_once(':') produces ("::1", "22") so
+        // a literal IPv6 happens to parse, but only because there are no
+        // brackets in the input.
+        let t = result.unwrap();
+        assert_eq!(t.user, "user");
+        assert_eq!(t.host, "::1");
+        assert_eq!(t.port, 22);
+    }
 }
