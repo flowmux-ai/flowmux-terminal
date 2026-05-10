@@ -192,6 +192,7 @@ impl TerminalPane {
         // cursor; Ctrl+left-click opens the URL in a new browser tab in the
         // same pane. Plain clicks continue into VTE text selection.
         install_url_link_handling(&term, id, callbacks.on_open_url.clone());
+        install_shift_enter_newline_handling(&term);
 
         // Process exit.
         {
@@ -448,6 +449,47 @@ fn install_url_link_handling(
     term.add_controller(click);
 }
 
+const ALT_ENTER_BYTES: &[u8] = b"\x1b\r";
+
+fn install_shift_enter_newline_handling(term: &vte::Terminal) {
+    // A traditional PTY does not carry a distinct Shift+Enter event.
+    // Agent TUIs already treat Alt+Enter as "insert newline", so synthesize
+    // that byte sequence for Shift+Enter before VTE sees a plain Enter.
+    let key = gtk::EventControllerKey::new();
+    key.set_propagation_phase(gtk::PropagationPhase::Capture);
+
+    let term_widget = term.clone();
+    key.connect_key_pressed(move |_, keyval, _keycode, state| {
+        if should_translate_shift_enter(keyval, state) {
+            term_widget.feed_child(ALT_ENTER_BYTES);
+            glib::Propagation::Stop
+        } else {
+            glib::Propagation::Proceed
+        }
+    });
+
+    term.add_controller(key);
+}
+
+fn should_translate_shift_enter(keyval: gtk::gdk::Key, state: gtk::gdk::ModifierType) -> bool {
+    if !is_enter_key(keyval) || !state.contains(gtk::gdk::ModifierType::SHIFT_MASK) {
+        return false;
+    }
+
+    let native_modifiers = gtk::gdk::ModifierType::CONTROL_MASK
+        | gtk::gdk::ModifierType::ALT_MASK
+        | gtk::gdk::ModifierType::SUPER_MASK
+        | gtk::gdk::ModifierType::HYPER_MASK
+        | gtk::gdk::ModifierType::META_MASK;
+    !state.intersects(native_modifiers)
+}
+
+fn is_enter_key(keyval: gtk::gdk::Key) -> bool {
+    keyval == gtk::gdk::Key::Return
+        || keyval == gtk::gdk::Key::KP_Enter
+        || keyval == gtk::gdk::Key::ISO_Enter
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -497,5 +539,34 @@ mod tests {
     fn trim_url_trailing_handles_empty() {
         assert_eq!(trim_url_trailing(""), "");
         assert_eq!(trim_url_trailing("...,,;"), "");
+    }
+
+    #[test]
+    fn shift_enter_is_translated_for_prompt_newlines() {
+        assert!(should_translate_shift_enter(
+            gtk::gdk::Key::Return,
+            gtk::gdk::ModifierType::SHIFT_MASK
+        ));
+        assert!(should_translate_shift_enter(
+            gtk::gdk::Key::KP_Enter,
+            gtk::gdk::ModifierType::SHIFT_MASK | gtk::gdk::ModifierType::LOCK_MASK
+        ));
+        assert_eq!(ALT_ENTER_BYTES, b"\x1b\r");
+    }
+
+    #[test]
+    fn plain_or_modified_enter_keeps_native_terminal_handling() {
+        assert!(!should_translate_shift_enter(
+            gtk::gdk::Key::Return,
+            gtk::gdk::ModifierType::empty()
+        ));
+        assert!(!should_translate_shift_enter(
+            gtk::gdk::Key::Return,
+            gtk::gdk::ModifierType::SHIFT_MASK | gtk::gdk::ModifierType::CONTROL_MASK
+        ));
+        assert!(!should_translate_shift_enter(
+            gtk::gdk::Key::Return,
+            gtk::gdk::ModifierType::SHIFT_MASK | gtk::gdk::ModifierType::ALT_MASK
+        ));
     }
 }
