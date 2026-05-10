@@ -41,6 +41,7 @@ trait FdoNotifications {
     fn close_notification(&self, id: u32) -> zbus::Result<()>;
 }
 
+#[derive(Clone)]
 pub struct DesktopNotifier {
     conn: Connection,
 }

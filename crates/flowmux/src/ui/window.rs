@@ -2085,22 +2085,11 @@ impl WindowController {
         }
         let notifier_cell = self.notifier.clone();
         glib::MainContext::default().spawn_local(async move {
-            let mut guard = notifier_cell.borrow_mut();
-            if guard.is_none() {
-                match flowmux_notify::DesktopNotifier::connect().await {
-                    Ok(n) => *guard = Some(n),
-                    Err(e) => {
-                        tracing::debug!(
-                            error = %e,
-                            "could not connect to FDO notifications for close"
-                        );
-                        return;
-                    }
-                }
-            }
-            let n = guard.as_ref().expect("notifier just connected");
+            let Some(notifier) = ensure_desktop_notifier(&notifier_cell).await else {
+                return;
+            };
             for did in desktop_ids {
-                if let Err(e) = n.close(did).await {
+                if let Err(e) = notifier.close(did).await {
                     tracing::debug!(error = %e, did, "close notification failed");
                 }
             }
@@ -2116,22 +2105,11 @@ impl WindowController {
         let count = self.notifications.unread_count() as i64;
         let notifier_cell = self.notifier.clone();
         glib::MainContext::default().spawn_local(async move {
-            let mut guard = notifier_cell.borrow_mut();
-            if guard.is_none() {
-                match flowmux_notify::DesktopNotifier::connect().await {
-                    Ok(n) => *guard = Some(n),
-                    Err(e) => {
-                        tracing::debug!(
-                            error = %e,
-                            "could not connect to FDO notifications for launcher badge"
-                        );
-                        return;
-                    }
-                }
-            }
-            let n = guard.as_ref().expect("notifier just connected");
+            let Some(notifier) = ensure_desktop_notifier(&notifier_cell).await else {
+                return;
+            };
             let app_uri = format!("application://{}.desktop", crate::APP_ID);
-            if let Err(e) = n.update_launcher_count(&app_uri, count).await {
+            if let Err(e) = notifier.update_launcher_count(&app_uri, count).await {
                 tracing::debug!(error = %e, count, "launcher entry update failed");
             }
         });
@@ -2156,6 +2134,35 @@ impl WindowController {
             .or_else(|| snap.workspace_order.first().copied());
         if let Some(active) = active {
             self.activate_workspace(active).await;
+        }
+    }
+}
+
+/// Lazily connect to the FDO notifications service and return a clone
+/// of the cached [`flowmux_notify::DesktopNotifier`].
+///
+/// The cell is `Rc<RefCell<Option<…>>>`, but every consumer issues
+/// `await`-ing D-Bus calls. Holding `borrow_mut()` across the await
+/// would let two `spawn_local` tasks (e.g. the close-and-refresh pair
+/// fired when the bell popover is opened) collide — the second one
+/// panics on `RefCell` re-borrow, the panic gets swallowed by glib's
+/// task wrapper, and the launcher badge never updates. So we briefly
+/// touch the cell to read or to install a freshly connected notifier,
+/// drop the borrow, and only then await on a cloned handle.
+async fn ensure_desktop_notifier(
+    cell: &Rc<RefCell<Option<flowmux_notify::DesktopNotifier>>>,
+) -> Option<flowmux_notify::DesktopNotifier> {
+    if let Some(n) = cell.borrow().as_ref().cloned() {
+        return Some(n);
+    }
+    match flowmux_notify::DesktopNotifier::connect().await {
+        Ok(n) => {
+            *cell.borrow_mut() = Some(n.clone());
+            Some(n)
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, "could not connect to FDO notifications");
+            None
         }
     }
 }
