@@ -17,6 +17,12 @@ finish-args:
   - --talk-name=org.freedesktop.secrets
   # flowmux writes its socket into XDG_RUNTIME_DIR; Flatpak isolates this
   # by default so the in-sandbox `flowmux` CLI uses the same path.
+  # flowmux is a terminal emulator, so the spawned shell needs to run on
+  # the host (not inside the sandbox) to see the user's `~/.bashrc`,
+  # host-installed binaries (git, tig, etc.), and their actual PATH.
+  # The terminal pane wraps argv with `flatpak-spawn --host` when it
+  # detects /.flatpak-info, and that helper talks to this D-Bus name.
+  - --talk-name=org.freedesktop.Flatpak
 
 modules:
   # libvte is not bundled in org.gnome.Platform (terminal lib, not generic

@@ -288,20 +288,7 @@ impl TerminalPane {
         }
 
         let argv: Vec<String> = if argv.is_empty() {
-            // Spawn the user's $SHELL as a *login* shell. The `-l` flag
-            // makes the shell source per-shell profile init
-            // (.bash_profile / .profile / .zprofile / fish login conf
-            // etc.), which in turn pulls in .bashrc / .zshrc so the
-            // user's PS1 + helper functions (e.g. parse_git_branch, a
-            // ghostty-integration hook) are defined before the first
-            // prompt. This is the same convention xterm / alacritty /
-            // kitty use and the only one that reliably works inside
-            // Flatpak sandboxes, where $SHELL may resolve to /bin/sh
-            // (bash-in-POSIX-mode) and would otherwise skip .bashrc
-            // entirely, surfacing as `sh: parse_git_branch: command
-            // not found` on the first prompt.
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
-            vec![shell, "-l".into()]
+            default_shell_argv()
         } else {
             argv
         };
@@ -501,6 +488,49 @@ fn is_enter_key(keyval: gtk::gdk::Key) -> bool {
     keyval == gtk::gdk::Key::Return
         || keyval == gtk::gdk::Key::KP_Enter
         || keyval == gtk::gdk::Key::ISO_Enter
+}
+
+/// argv used when the caller asks for the default shell (no explicit
+/// command). The exact construction depends on whether we're running
+/// inside a Flatpak sandbox.
+///
+/// * **Outside a sandbox** — run `$SHELL -l` (login shell). This is
+///   the convention xterm / alacritty / kitty use; it makes any
+///   POSIX-ish shell source the per-shell profile (.bash_profile /
+///   .profile / .zprofile / fish login conf), which in turn pulls
+///   .bashrc / .zshrc so the user's PS1 + helpers are defined before
+///   the first prompt.
+///
+/// * **Inside Flatpak** — wrap with `flatpak-spawn --host --watch-bus`
+///   so the shell actually runs on the host, not inside the sandbox.
+///   Without this the sandbox's shell can't see the host's `~/.bashrc`
+///   nor any host-installed tools (`git`, `tig`, `xset`, …), producing
+///   `sh: git: command not found` for every command. `--watch-bus`
+///   ties the host-side process lifetime to ours so closing the pane
+///   actually reaps the shell. Requires
+///   `--talk-name=org.freedesktop.Flatpak` in the Flatpak manifest's
+///   finish-args.
+fn default_shell_argv() -> Vec<String> {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
+    if is_flatpak_sandbox() {
+        vec![
+            "flatpak-spawn".into(),
+            "--host".into(),
+            "--watch-bus".into(),
+            shell,
+            "-l".into(),
+        ]
+    } else {
+        vec![shell, "-l".into()]
+    }
+}
+
+/// Detect whether the current process is running inside a Flatpak
+/// sandbox. Flatpak sets `FLATPAK_ID` for sandboxed apps and writes a
+/// `/.flatpak-info` file at the sandbox root; either is sufficient
+/// proof.
+fn is_flatpak_sandbox() -> bool {
+    std::env::var_os("FLATPAK_ID").is_some() || std::path::Path::new("/.flatpak-info").exists()
 }
 
 #[cfg(test)]
