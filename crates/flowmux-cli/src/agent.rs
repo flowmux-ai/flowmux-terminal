@@ -3,12 +3,13 @@
 //! flowmux-browser SKILL discoverable to Claude Code, OpenCode, and
 //! Codex CLI installed locally for the current user.
 //!
-//! Strategy: every supported agent has a documented user-level skill
-//! / AGENTS file location under `$HOME`. We mirror our embedded
-//! `SKILL.md` (and a small `flowmux-browser.md` snippet for Codex) into
-//! those paths idempotently. `doctor` walks the same paths and
-//! reports presence / content drift so the user can verify a fresh
-//! install or update without leaving the terminal.
+//! Strategy: every supported agent has a documented user-level skills
+//! directory under `$HOME` (`~/.claude/skills/`, `~/.config/opencode/skills/`,
+//! `$CODEX_HOME/skills/`). We mirror our embedded `SKILL.md` into each
+//! one idempotently so the same SKILL.md auto-loads as a real skill in
+//! every agent. `doctor` walks the same paths and reports presence /
+//! content drift so the user can verify a fresh install or update
+//! without leaving the terminal.
 //!
 //! Embedded payload comes straight from this repo via `include_str!`,
 //! so a `cargo install --path crates/flowmux-cli --force` rebuild
@@ -23,9 +24,6 @@ use std::path::{Path, PathBuf};
 /// `<repo>/.claude/skills/flowmux-browser/SKILL.md`.
 pub const SKILL_BODY: &str = include_str!("../../../.claude/skills/flowmux-browser/SKILL.md");
 
-/// AGENTS.md body — used as the Codex-style instruction snippet.
-pub const AGENTS_BODY: &str = include_str!("../../../AGENTS.md");
-
 /// One agent we know how to wire up. The `Target` enum stays small —
 /// adding a new agent means adding a variant + its
 /// `resolved_install_path` arm + a doctor entry.
@@ -35,12 +33,14 @@ pub enum Target {
     /// every directory under `~/.claude/skills/<name>/` automatically.
     ClaudeCode,
     /// `~/.config/opencode/skills/flowmux-browser/SKILL.md`. OpenCode
-    /// follows the same skill convention as Claude Code.
+    /// follows the same skill convention as Claude Code (see
+    /// <https://opencode.ai/docs/skills>).
     OpenCode,
-    /// `~/.codex/flowmux-browser.md`. Codex CLI does not have a skills
-    /// concept — it loads `AGENTS.md` files. We drop a sibling file
-    /// the user can import (`@flowmux-browser`) into their own
-    /// `~/.codex/AGENTS.md` and never overwrite the user's own file.
+    /// `$CODEX_HOME/skills/flowmux-browser/SKILL.md` (default
+    /// `~/.codex/skills/...`). Codex CLI auto-discovers every
+    /// `SKILL.md` under its skills dir — same shape as Claude / OpenCode
+    /// — so the user does not have to import anything by hand. See
+    /// <https://developers.openai.com/codex/skills>.
     Codex,
 }
 
@@ -59,14 +59,11 @@ impl Target {
         Self::ALL.iter().copied().find(|t| t.slug() == s)
     }
 
-    /// Body that gets written to disk. Claude Code / OpenCode use the
-    /// `SKILL.md` frontmatter+body shape; Codex receives the same
-    /// content under a different filename (no skill concept).
+    /// Body that gets written to disk. All three agents accept the
+    /// same `SKILL.md` frontmatter+body shape, so the payload is
+    /// uniform.
     pub fn payload(self) -> &'static str {
-        match self {
-            Target::ClaudeCode | Target::OpenCode => SKILL_BODY,
-            Target::Codex => SKILL_BODY,
-        }
+        SKILL_BODY
     }
 
     /// Path the install writes to. `home` is the resolved
@@ -89,7 +86,9 @@ impl Target {
             Target::Codex => codex_home
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| home.join(".codex"))
-                .join("flowmux-browser.md"),
+                .join("skills")
+                .join("flowmux-browser")
+                .join("SKILL.md"),
         }
     }
 }
@@ -311,7 +310,7 @@ mod tests {
 
         assert!(claude.ends_with(".claude/skills/flowmux-browser/SKILL.md"));
         assert!(opencode.ends_with(".config/opencode/skills/flowmux-browser/SKILL.md"));
-        assert!(codex.ends_with(".codex/flowmux-browser.md"));
+        assert!(codex.ends_with(".codex/skills/flowmux-browser/SKILL.md"));
     }
 
     #[test]
@@ -319,7 +318,10 @@ mod tests {
         let home = fake_home();
         let codex_home = home.path().join("custom-codex");
         let path = Target::Codex.resolved_install_path(home.path(), Some(&codex_home));
-        assert_eq!(path, codex_home.join("flowmux-browser.md"));
+        assert_eq!(
+            path,
+            codex_home.join("skills").join("flowmux-browser").join("SKILL.md"),
+        );
     }
 
     #[test]
@@ -381,10 +383,56 @@ mod tests {
 
     #[test]
     fn embedded_payload_is_not_empty() {
-        // Sanity: include_str! resolved to actual SKILL/AGENTS bodies.
+        // Sanity: include_str! resolved to the real SKILL body.
         assert!(SKILL_BODY.contains("flowmux"));
         assert!(SKILL_BODY.contains("snapshot"));
-        assert!(AGENTS_BODY.contains("AGENTS.md"));
+    }
+
+    #[test]
+    fn all_targets_share_the_same_skill_payload() {
+        // Why: every supported agent must auto-load the SKILL as a
+        // skill, not as a sibling AGENTS snippet — so the payload is
+        // identical across targets (frontmatter + body).
+        for t in Target::ALL {
+            assert_eq!(t.payload(), SKILL_BODY, "{:?} drifted", t);
+        }
+    }
+
+    #[test]
+    fn every_target_writes_into_a_skills_directory() {
+        // Why: previously Codex got a sibling `~/.codex/flowmux-browser.md`
+        // that the user had to `@import`. Recent Codex CLI loads
+        // `$CODEX_HOME/skills/<name>/SKILL.md` natively — assert all
+        // three targets resolve to the agent's skills dir so the
+        // SKILL is auto-discovered everywhere.
+        let home = fake_home();
+        for t in Target::ALL {
+            let p = t.resolved_install_path(home.path(), None);
+            assert_eq!(
+                p.file_name().and_then(|s| s.to_str()),
+                Some("SKILL.md"),
+                "{:?} should end in SKILL.md, got {}",
+                t,
+                p.display(),
+            );
+            assert_eq!(
+                p.parent().and_then(|p| p.file_name()).and_then(|s| s.to_str()),
+                Some("flowmux-browser"),
+                "{:?} skill dir should be flowmux-browser, got {}",
+                t,
+                p.display(),
+            );
+            assert_eq!(
+                p.parent()
+                    .and_then(|p| p.parent())
+                    .and_then(|p| p.file_name())
+                    .and_then(|s| s.to_str()),
+                Some("skills"),
+                "{:?} should live under a skills/ dir, got {}",
+                t,
+                p.display(),
+            );
+        }
     }
 
     /// Scenario: full install → doctor reports OK → simulate a flowmux

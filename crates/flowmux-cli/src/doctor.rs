@@ -186,6 +186,15 @@ fn section_agents(home: &Path, codex_home: Option<&Path>) -> Section {
             detail: hook_detail(&hook.status, &hook.paths),
         };
         entries.push(skill_entry);
+        // Legacy Codex sibling file (`$CODEX_HOME/flowmux-browser.md`)
+        // from before we moved to `$CODEX_HOME/skills/...`. The file is
+        // harmless but no longer referenced; if any survived an upgrade,
+        // surface a row so the user knows `flowmux fix` will clean it.
+        if matches!(target, agent::Target::Codex) {
+            if let Some(entry) = codex_legacy_entry(home, codex_home) {
+                entries.push(entry);
+            }
+        }
         entries.push(hook_entry);
     }
 
@@ -193,6 +202,33 @@ fn section_agents(home: &Path, codex_home: Option<&Path>) -> Section {
         title: "AI agents".into(),
         entries,
     }
+}
+
+/// Path of the pre-skill Codex sibling file flowmux used to write
+/// before Codex CLI gained native skills. Kept here (rather than in
+/// `agent::`) because it only exists for the migration story —
+/// nothing in the install path ever writes here today.
+fn codex_legacy_sibling_path(home: &Path, codex_home: Option<&Path>) -> PathBuf {
+    codex_home
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| home.join(".codex"))
+        .join("flowmux-browser.md")
+}
+
+/// Build a doctor entry for the Codex legacy sibling file *iff* it
+/// exists on disk. Returning `None` when it's absent keeps the
+/// report quiet for fresh installs — we only want to surface this
+/// row to users who upgraded from a pre-skills flowmux build.
+fn codex_legacy_entry(home: &Path, codex_home: Option<&Path>) -> Option<Entry> {
+    let path = codex_legacy_sibling_path(home, codex_home);
+    if !path.exists() {
+        return None;
+    }
+    Some(Entry {
+        name: "codex legacy skill".into(),
+        status: Status::NeedsFix,
+        detail: format!("{} (pre-skills sibling — `flowmux fix` removes it)", path.display()),
+    })
 }
 
 fn hook_target_for(t: agent::Target) -> hook_install::HookTarget {
@@ -579,6 +615,13 @@ pub fn run_fix(home: &Path, codex_home: Option<&Path>, flowmux_bin: &str) -> Fix
         }
     }
 
+    // Codex legacy sibling cleanup. Only emits a row when the legacy
+    // file actually exists, so the fix output stays empty for fresh
+    // installs. We never touch `$CODEX_HOME` itself or anything else.
+    if let Some(outcome) = run_codex_legacy_cleanup(home, codex_home) {
+        outcomes.push(outcome);
+    }
+
     // Hooks — install_install handles the "agent home missing → skip"
     // case itself, so we surface its Skipped status verbatim.
     for target in hook_install::HookTarget::ALL {
@@ -618,6 +661,28 @@ pub fn run_fix(home: &Path, codex_home: Option<&Path>, flowmux_bin: &str) -> Fix
     }
 
     FixReport { outcomes }
+}
+
+/// Remove the pre-skills Codex sibling file if it exists. Returns
+/// `None` when there's nothing to clean up so callers can keep the
+/// fix output quiet on fresh installs.
+fn run_codex_legacy_cleanup(home: &Path, codex_home: Option<&Path>) -> Option<FixOutcome> {
+    let path = codex_legacy_sibling_path(home, codex_home);
+    if !path.exists() {
+        return None;
+    }
+    match std::fs::remove_file(&path) {
+        Ok(()) => Some(FixOutcome {
+            area: "codex legacy skill".into(),
+            status: Status::Ok,
+            detail: format!("removed {}", path.display()),
+        }),
+        Err(e) => Some(FixOutcome {
+            area: "codex legacy skill".into(),
+            status: Status::Error,
+            detail: format!("removing {}: {e}", path.display()),
+        }),
+    }
 }
 
 pub fn render_fix_text(report: &FixReport) -> String {
@@ -857,6 +922,85 @@ mod tests {
         let _ = run_fix(home.path(), None, "flowmux");
         let after = fs::read_to_string(&path).unwrap();
         assert_eq!(after, agent::Target::ClaudeCode.payload());
+    }
+
+    /// A user upgrading from a pre-skills flowmux build still has a
+    /// `~/.codex/flowmux-browser.md` sibling file. Doctor surfaces it
+    /// as NeedsFix so the user knows `flowmux fix` will tidy up.
+    #[test]
+    fn doctor_flags_codex_legacy_sibling_when_present() {
+        let home = fake_home();
+        let codex_home = home.path().join(".codex");
+        fs::create_dir_all(&codex_home).unwrap();
+        let legacy = codex_home.join("flowmux-browser.md");
+        fs::write(&legacy, "legacy payload").unwrap();
+
+        let report = collect_offline(home.path(), None);
+        let row = report
+            .sections
+            .iter()
+            .find(|s| s.title == "AI agents")
+            .unwrap()
+            .entries
+            .iter()
+            .find(|e| e.name == "codex legacy skill");
+        let row = row.expect("legacy row should be present when the sibling file exists");
+        assert_eq!(row.status, Status::NeedsFix, "{}", row.detail);
+        assert!(row.detail.contains("flowmux-browser.md"));
+    }
+
+    /// Fresh installs (no legacy file) must not emit the legacy row —
+    /// otherwise the report grows a permanent zombie entry for every
+    /// new user.
+    #[test]
+    fn doctor_omits_legacy_row_when_sibling_absent() {
+        let home = fake_home();
+        // Make the codex home exist but without the legacy file, so
+        // the codex skill row itself stays a real assertion target.
+        fs::create_dir_all(home.path().join(".codex")).unwrap();
+        let report = collect_offline(home.path(), None);
+        let any_legacy = report
+            .sections
+            .iter()
+            .flat_map(|s| &s.entries)
+            .any(|e| e.name == "codex legacy skill");
+        assert!(!any_legacy, "legacy row leaked into a clean report");
+    }
+
+    /// `flowmux fix` must remove the legacy sibling file when it
+    /// exists. A second fix run must stay silent (no zombie row).
+    #[test]
+    fn fix_removes_codex_legacy_sibling_then_is_idempotent() {
+        let _lock = home_env_lock();
+        let home = fake_home();
+        let _h = HomeOverride::set(home.path());
+        let codex_home = home.path().join(".codex");
+        fs::create_dir_all(&codex_home).unwrap();
+        let legacy = codex_home.join("flowmux-browser.md");
+        fs::write(&legacy, "legacy payload").unwrap();
+
+        let fix = run_fix(home.path(), None, "flowmux");
+        let row = fix
+            .outcomes
+            .iter()
+            .find(|o| o.area == "codex legacy skill")
+            .expect("legacy cleanup row should be in the fix report");
+        assert_eq!(row.status, Status::Ok, "{}", row.detail);
+        assert!(!legacy.exists(), "legacy file should be gone after fix");
+
+        // Re-run: now that the file is absent, no legacy row should
+        // appear in either doctor or fix.
+        let report = collect_offline(home.path(), None);
+        assert!(!report
+            .sections
+            .iter()
+            .flat_map(|s| &s.entries)
+            .any(|e| e.name == "codex legacy skill"));
+        let fix2 = run_fix(home.path(), None, "flowmux");
+        assert!(!fix2
+            .outcomes
+            .iter()
+            .any(|o| o.area == "codex legacy skill"));
     }
 
     /// Process-wide guard for tests that mutate $HOME. Restored on drop.
