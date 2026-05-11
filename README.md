@@ -110,6 +110,46 @@ sudo apt install \
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
+### Ubuntu 22.04 (jammy) — install via Flatpak
+
+The native apt build above needs GTK 4.12+ and `libwebkitgtk-6.0`,
+neither of which is in the 22.04 archive. On 22.04 the supported path
+is Flatpak: the GNOME 46 runtime brings GTK 4.14, libadwaita 1.5,
+libvte 0.76, and WebKitGTK 6.0 into the sandbox without touching the
+host system, so the same flowmux build runs unchanged.
+
+```bash
+# 1. Install Flatpak, flatpak-builder, and the Flathub remote
+sudo apt install flatpak flatpak-builder
+flatpak remote-add --if-not-exists --user flathub \
+    https://flathub.org/repo/flathub.flatpakrepo
+
+# 2. Install the GNOME 46 runtime/SDK and the Rust SDK extension
+flatpak install -y --user flathub \
+    org.gnome.Platform//46 org.gnome.Sdk//46 \
+    org.freedesktop.Sdk.Extension.rust-stable//23.08
+
+# 3. Build and install flowmux from this repo (per-user, no sudo)
+flatpak-builder --user --install --force-clean \
+    build-flatpak packaging/flatpak/com.flowmux.App.yml
+
+# 4. Launch
+flatpak run com.flowmux.App
+```
+
+Notes for the Flatpak build:
+
+- GStreamer plugins (see next section) are already bundled in the
+  GNOME runtime, so you do not need to install them separately on the
+  host for the Flatpak build to play media in the tab browser.
+- The `flowmux` and `flowmuxctl` binaries inside the sandbox are
+  reachable from a host terminal as `flatpak run --command=flowmux
+  com.flowmux.App ...` and `flatpak run --command=flowmuxctl
+  com.flowmux.App ...`. The in-app browser CLI flow described in
+  [`AGENTS.md`](AGENTS.md) works the same way.
+- After upgrading the repo, re-run step 3 to rebuild against the new
+  source. The `--force-clean` flag wipes the previous build tree.
+
 ### Recommended (optional) — full media playback in tab browser
 
 WebKitGTK delegates media decoding to GStreamer. Without these
