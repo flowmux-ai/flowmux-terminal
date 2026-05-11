@@ -26,7 +26,7 @@ modules:
       build-args:
         - --share=network
     build-commands:
-      - cargo --offline build --release --manifest-path Cargo.toml -p flowmux -p flowmux-cli
+      - cargo build --release --manifest-path Cargo.toml -p flowmux -p flowmux-cli
       - install -Dm755 target/release/flowmux    /app/bin/flowmux
       - install -Dm755 target/release/flowmuxctl /app/lib/flowmux/flowmuxctl
       - install -Dm644 resources/desktop/com.flowmux.App.desktop /app/share/applications/com.flowmux.App.desktop
