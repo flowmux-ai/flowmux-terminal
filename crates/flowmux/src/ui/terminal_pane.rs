@@ -288,7 +288,20 @@ impl TerminalPane {
         }
 
         let argv: Vec<String> = if argv.is_empty() {
-            vec![std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into())]
+            // Spawn the user's $SHELL as a *login* shell. The `-l` flag
+            // makes the shell source per-shell profile init
+            // (.bash_profile / .profile / .zprofile / fish login conf
+            // etc.), which in turn pulls in .bashrc / .zshrc so the
+            // user's PS1 + helper functions (e.g. parse_git_branch, a
+            // ghostty-integration hook) are defined before the first
+            // prompt. This is the same convention xterm / alacritty /
+            // kitty use and the only one that reliably works inside
+            // Flatpak sandboxes, where $SHELL may resolve to /bin/sh
+            // (bash-in-POSIX-mode) and would otherwise skip .bashrc
+            // entirely, surfacing as `sh: parse_git_branch: command
+            // not found` on the first prompt.
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
+            vec![shell, "-l".into()]
         } else {
             argv
         };
