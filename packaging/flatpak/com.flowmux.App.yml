@@ -24,6 +24,11 @@ modules:
   # finds `vte-2.91-gtk4 >= 0.76` inside the sandbox.
   - name: vte
     buildsystem: meson
+    # vte 0.80 pulls fast_float as a meson subproject (cloned from
+    # github at configure time), so this module needs network too.
+    build-options:
+      build-args:
+        - --share=network
     config-opts:
       - -Dgtk3=false
       - -Dgtk4=true
