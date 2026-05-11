@@ -570,6 +570,7 @@ fn is_flatpak_sandbox() -> bool {
 /// Flatpak sandbox.
 const FLATPAK_HOST_SHELL_BRIDGE: &str = r#"
 import pty, os, sys, fcntl, termios, struct, select, signal, pwd, tty
+from urllib.parse import quote
 
 shell = pwd.getpwuid(os.getuid()).pw_shell or '/bin/bash'
 
@@ -625,7 +626,37 @@ def sync_winsize():
         except OSError:
             pass
 
+# Track the host shell's cwd and emit OSC 7 to the sandbox PTY whenever
+# it changes. flowmux runs inside the sandbox and reads VTE's
+# current-directory-uri to keep tab names, workspace labels, the window
+# title, and split starting directory in sync with `cd`. The native
+# build gets this for free from the shell's own OSC 7 + a
+# `/proc/<vte_pid>/cwd` fallback, but in Flatpak the PID VTE sees is
+# the sandbox-side `flatpak-spawn` wrapper, not the host shell, so
+# /proc fallback resolves to the wrong process and is invisible from
+# the sandbox anyway. The bridge runs on the host with /proc access to
+# the real shell, so it is the right place to announce cwd.
+last_cwd = None
+def emit_cwd_if_changed():
+    global last_cwd
+    try:
+        cwd = os.readlink('/proc/%d/cwd' % pid)
+    except OSError:
+        return
+    if cwd == last_cwd:
+        return
+    last_cwd = cwd
+    try:
+        seq = b'\x1b]7;file://' + quote(cwd, safe='/').encode('ascii') + b'\x07'
+    except (UnicodeError, ValueError):
+        return
+    try:
+        os.write(1, seq)
+    except OSError:
+        pass
+
 sync_winsize()
+emit_cwd_if_changed()
 
 def on_term(*_):
     try:
@@ -645,6 +676,7 @@ try:
         # idle wake-up and push it through to the host PTY.
         rfds, _, _ = select.select([0, fd], [], [], 0.5)
         sync_winsize()
+        emit_cwd_if_changed()
         if 0 in rfds:
             try:
                 data = os.read(0, 4096)
