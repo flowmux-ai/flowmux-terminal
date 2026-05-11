@@ -4,9 +4,11 @@
 //! Resolution order:
 //!
 //! 1. flowmux's own theme config at `$XDG_CONFIG_HOME/flowmux/theme`,
-//!    if the file exists. This is flowmux's own location — no other
-//!    application's config is consulted.
-//! 2. flowmux's built-in neutral dark default, authored in this file.
+//!    if the file exists.
+//! 2. flowmux's built-in defaults, authored in this file. Background and
+//!    foreground mirror Ghostty's shipped defaults verbatim (`#282c34` /
+//!    `#ffffff`) so flowmux looks like Ghostty out of the box without
+//!    reading any external config file at runtime.
 //!
 //! Applied to:
 //!
@@ -30,11 +32,21 @@ pub struct ResolvedTheme {
     pub cursor: gdk::RGBA,
     pub selection_bg: Option<gdk::RGBA>,
     pub selection_fg: Option<gdk::RGBA>,
-    /// Only `Some` when the source provided all 16 ANSI entries. We
-    /// don't synthesize a partial palette from defaults to avoid
-    /// inventing colors the user didn't ask for.
-    pub palette: Option<Vec<gdk::RGBA>>,
+    /// Always 16 entries. Indices missing from the user's theme file
+    /// fall back to Ghostty's default ANSI palette (Tomorrow), so a
+    /// fresh install renders prompts / ls output with Ghostty's
+    /// shipped colors instead of VTE's built-in grays.
+    pub palette: Vec<gdk::RGBA>,
 }
+
+/// Ghostty's default ANSI 16-color palette, copied verbatim from
+/// ghostty's `src/terminal/color.zig` `Name.default()` (the Tomorrow
+/// scheme). flowmux inlines this so a fresh install matches Ghostty
+/// without reading any external config.
+const DEFAULT_PALETTE: [&str; 16] = [
+    "#1d1f21", "#cc6666", "#b5bd68", "#f0c674", "#81a2be", "#b294bb", "#8abeb7", "#c5c8c6",
+    "#666666", "#d54e53", "#b9ca4a", "#e7c547", "#7aa6da", "#c397d8", "#70c0b1", "#eaeaea",
+];
 
 impl ResolvedTheme {
     pub fn load() -> Self {
@@ -43,6 +55,7 @@ impl ResolvedTheme {
         let path = flowmux_config::theme::user_theme_path()
             .map(|p| p.display().to_string())
             .unwrap_or_default();
+        let user_palette_count = cfg.palette.iter().filter(|p| p.is_some()).count();
         tracing::info!(
             source = if cfg.background.is_some() { "user theme file" } else { "builtin defaults" },
             path = %path,
@@ -50,43 +63,39 @@ impl ResolvedTheme {
             fg = ?cfg.foreground.as_deref(),
             font_family = ?cfg.font_family.as_deref(),
             font_size = ?cfg.font_size,
-            palette_set = theme.palette.is_some(),
+            user_palette_count,
             "resolved theme"
         );
         theme
     }
 
     fn from_ghostty(cfg: &flowmux_config::ghostty::GhosttyConfig) -> Self {
-        // Built-in fallbacks (flowmux-authored) only kick in if the user's
-        // ghostty config + theme file haven't supplied a value.
+        // Built-in fallbacks kick in only when the user's flowmux theme
+        // file does not supply a value. `bg`/`fg` mirror Ghostty's shipped
+        // defaults verbatim; `cursor` follows `fg` because Ghostty leaves
+        // cursor-color unset, which on Ghostty's side resolves to fg too.
         let bg = cfg
             .background
             .as_deref()
             .and_then(parse)
-            .unwrap_or_else(|| parse_or_black("#0e1116"));
+            .unwrap_or_else(|| parse_or_black("#282c34"));
         let fg = cfg
             .foreground
             .as_deref()
             .and_then(parse)
-            .unwrap_or_else(|| parse_or_black("#d8dee4"));
-        let cursor = cfg
-            .cursor_color
-            .as_deref()
-            .and_then(parse)
-            .unwrap_or_else(|| parse_or_black("#c5cdd9"));
+            .unwrap_or_else(|| parse_or_black("#ffffff"));
+        let cursor = cfg.cursor_color.as_deref().and_then(parse).unwrap_or(fg);
         let selection_bg = cfg.selection_background.as_deref().and_then(parse);
         let selection_fg = cfg.selection_foreground.as_deref().and_then(parse);
 
-        let parsed: Vec<Option<gdk::RGBA>> = cfg
-            .palette
-            .iter()
-            .map(|s| s.as_deref().and_then(parse))
+        let palette: Vec<gdk::RGBA> = (0..16)
+            .map(|i| {
+                cfg.palette[i]
+                    .as_deref()
+                    .and_then(parse)
+                    .unwrap_or_else(|| parse_or_black(DEFAULT_PALETTE[i]))
+            })
             .collect();
-        let palette = if parsed.iter().all(Option::is_some) {
-            Some(parsed.into_iter().map(Option::unwrap).collect())
-        } else {
-            None
-        };
 
         let family = cfg.font_family.as_deref().unwrap_or("monospace");
         let size = cfg.font_size.unwrap_or(12.0);
@@ -105,16 +114,8 @@ impl ResolvedTheme {
 
     pub fn apply_to_vte(&self, term: &vte::Terminal) {
         term.set_font(Some(&self.font));
-        match &self.palette {
-            Some(pal) => {
-                let refs: Vec<&gdk::RGBA> = pal.iter().collect();
-                term.set_colors(Some(&self.fg), Some(&self.bg), &refs);
-            }
-            None => {
-                term.set_color_background(&self.bg);
-                term.set_color_foreground(&self.fg);
-            }
-        }
+        let refs: Vec<&gdk::RGBA> = self.palette.iter().collect();
+        term.set_colors(Some(&self.fg), Some(&self.bg), &refs);
         term.set_color_cursor(Some(&self.cursor));
         if let Some(sbg) = &self.selection_bg {
             term.set_color_highlight(Some(sbg));
@@ -236,9 +237,21 @@ paned > separator {{
     background-color: {sidebar};
 }}
 .navigation-sidebar row {{
+    color: {fg};
     border-radius: 6px;
     margin: 2px 6px;
     padding: 8px 10px;
+}}
+/* libadwaita wraps the workspace title in .heading and the path
+   subtitles in .caption/.dim-label, both of which assign their own
+   color in the dark theme. Re-pin the color on the labels so the
+   sidebar folder names follow Ghostty's foreground. The .dim-label
+   variants keep their natural dimming because that class adjusts
+   opacity, not color. */
+.navigation-sidebar row label,
+.navigation-sidebar row label.heading,
+.navigation-sidebar row label.caption {{
+    color: {fg};
 }}
 .navigation-sidebar row.flowmux-attention {{
     background-color: rgba(245, 158, 11, 0.18);
