@@ -114,9 +114,11 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 The native apt build above needs GTK 4.12+ and `libwebkitgtk-6.0`,
 neither of which is in the 22.04 archive. On 22.04 the supported path
-is Flatpak: the GNOME 46 runtime brings GTK 4.14, libadwaita 1.5,
-libvte 0.76, and WebKitGTK 6.0 into the sandbox without touching the
-host system, so the same flowmux build runs unchanged.
+is Flatpak: the GNOME 48 runtime brings GTK 4.18, libadwaita 1.8,
+libvte 0.78, and WebKitGTK 6.0 into the sandbox without touching the
+host system, so the same flowmux build runs unchanged. The matching
+`rust-stable//24.08` SDK extension ships a current Rust toolchain so
+the workspace's crate-level edition requirements are met.
 
 ```bash
 # 1. Install Flatpak, flatpak-builder, and the Flathub remote
@@ -124,10 +126,10 @@ sudo apt install flatpak flatpak-builder
 flatpak remote-add --if-not-exists --user flathub \
     https://flathub.org/repo/flathub.flatpakrepo
 
-# 2. Install the GNOME 46 runtime/SDK and the Rust SDK extension
+# 2. Install the GNOME 48 runtime/SDK and the Rust SDK extension
 flatpak install -y --user flathub \
-    org.gnome.Platform//46 org.gnome.Sdk//46 \
-    org.freedesktop.Sdk.Extension.rust-stable//23.08
+    org.gnome.Platform//48 org.gnome.Sdk//48 \
+    org.freedesktop.Sdk.Extension.rust-stable//24.08
 
 # 3. Build and install flowmux from this repo (per-user, no sudo)
 flatpak-builder --user --install --force-clean \
