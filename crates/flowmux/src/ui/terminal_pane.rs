@@ -491,69 +491,30 @@ fn is_enter_key(keyval: gtk::gdk::Key) -> bool {
 }
 
 /// argv used when the caller asks for the default shell (no explicit
-/// command). The exact construction depends on whether we're running
-/// inside a Flatpak sandbox.
+/// command).
 ///
-/// * **Outside a sandbox** — run `$SHELL -l` (login shell). This is
-///   the convention xterm / alacritty / kitty use; it makes any
-///   POSIX-ish shell source the per-shell profile (.bash_profile /
-///   .profile / .zprofile / fish login conf), which in turn pulls
-///   .bashrc / .zshrc so the user's PS1 + helpers are defined before
-///   the first prompt.
+/// Runs `$SHELL -l` (login shell). The `-l` flag makes any POSIX-ish
+/// shell source the per-shell profile (.bash_profile / .profile /
+/// .zprofile / fish login conf), which in turn pulls .bashrc / .zshrc
+/// so the user's PS1 + helpers are defined before the first prompt.
+/// Same convention xterm / alacritty / kitty use.
 ///
-/// * **Inside Flatpak** — run `flatpak-spawn --host --watch-bus --
-///   setsid --ctty bash -l`. The wrapper layers are:
-///
-///   * `flatpak-spawn --host --watch-bus` — escape the sandbox so the
-///     shell sees the host's `~/.bashrc`, host `PATH`, and
-///     host-installed tools (`git`, `tig`, `xset`, …). `--watch-bus`
-///     ties the host-side process to our lifetime. Requires
-///     `--talk-name=org.freedesktop.Flatpak` in the manifest.
-///
-///   * `setsid --ctty` — start a new session on the host and assign
-///     the forwarded PTY FD as the new session's controlling terminal
-///     via `TIOCSCTTY`. Without this step, programs that open
-///     `/dev/tty` directly (tig, less, vim, htop, …) fail with
-///     "Failed to open tty for input" and bash prints "cannot set
-///     terminal process group … no job control in this shell". With
-///     it, the host shell gets full job-control and `/dev/tty` works.
-///     The kernel rejects this if the PTY is already claimed by
-///     another session (the sandbox's `flatpak-spawn` process); when
-///     that happens setsid exits with an error and the pane shows it
-///     instead of running a broken shell. A previous attempt wrapped
-///     the shell in `script(1)` to allocate a fresh host-side PTY,
-///     but that combination produced a runaway prompt-redraw loop
-///     through `flatpak-spawn`'s FD forwarding.
-///
-///   * `bash -l` (not `$SHELL -l`) — the sandbox's `$SHELL` on the
-///     GNOME Platform runtime often arrives as `/bin/sh`, which on
-///     Debian/Ubuntu hosts is dash, and dash without ctty refuses to
-///     start. Force bash; zsh / fish users get bash for now, lifting
-///     that needs `getent passwd` plumbing as a follow-up.
+/// Note on Flatpak: inside a Flatpak sandbox this runs the sandbox's
+/// own shell, so it cannot see host-installed tools (`git`, `tig`,
+/// `xset`, …) — only what's packaged in the GNOME Platform runtime.
+/// Several attempts at escaping the sandbox via `flatpak-spawn --host`
+/// (with `script(1)` and `setsid --ctty` wrappers) were tried and
+/// each produced a worse failure mode: `setsid` is denied
+/// `TIOCSCTTY` because the kernel keeps the PTY's session leader as
+/// the in-sandbox `flatpak-spawn` process, and the `script` wrapper
+/// caused a runaway prompt-redraw loop through `flatpak-spawn`'s
+/// FD-forwarding pipe. A controlling-terminal-aware host bridge
+/// remains a future option, but the only currently working baseline
+/// is the in-sandbox shell. Users who need host tools should install
+/// flowmux natively rather than via Flatpak.
 fn default_shell_argv() -> Vec<String> {
-    if is_flatpak_sandbox() {
-        vec![
-            "flatpak-spawn".into(),
-            "--host".into(),
-            "--watch-bus".into(),
-            "--".into(),
-            "setsid".into(),
-            "--ctty".into(),
-            "bash".into(),
-            "-l".into(),
-        ]
-    } else {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
-        vec![shell, "-l".into()]
-    }
-}
-
-/// Detect whether the current process is running inside a Flatpak
-/// sandbox. Flatpak sets `FLATPAK_ID` for sandboxed apps and writes a
-/// `/.flatpak-info` file at the sandbox root; either is sufficient
-/// proof.
-fn is_flatpak_sandbox() -> bool {
-    std::env::var_os("FLATPAK_ID").is_some() || std::path::Path::new("/.flatpak-info").exists()
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
+    vec![shell, "-l".into()]
 }
 
 #[cfg(test)]
