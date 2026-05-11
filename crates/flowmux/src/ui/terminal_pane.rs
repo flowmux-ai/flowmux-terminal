@@ -569,9 +569,37 @@ fn is_flatpak_sandbox() -> bool {
 /// shell that flowmux's terminal pane exposes when running inside a
 /// Flatpak sandbox.
 const FLATPAK_HOST_SHELL_BRIDGE: &str = r#"
-import pty, os, sys, fcntl, termios, struct, select, signal, pwd
+import pty, os, sys, fcntl, termios, struct, select, signal, pwd, tty
 
 shell = pwd.getpwuid(os.getuid()).pw_shell or '/bin/bash'
+
+# Put the inherited sandbox PTY (forwarded into us as fd 0/1 by
+# flatpak-spawn) into RAW mode before we start pumping. Without this
+# step the chain runs *two* line disciplines back-to-back — the
+# sandbox PTY and the inner host PTY — so:
+#   * Enter prints a blank line (CR -> NL twice + double echo)
+#   * Tab completion doesn't fire until Enter (sandbox PTY ICANON
+#     keeps the byte buffered)
+#   * Ctrl-C never reaches bash; the sandbox PTY's ISIG fires SIGINT
+#     at flatpak-spawn instead and the pane freezes
+#   * ncurses apps (tig, vim, htop, less) can't read individual
+#     keystrokes — input arrives one cooked line at a time
+# Raw mode disables ECHO / ICANON / ISIG / OPOST on the sandbox PTY
+# so it becomes a transparent passthrough; only the inner host PTY,
+# which the shell already configures correctly, applies line
+# discipline. Restore the original attributes on exit.
+try:
+    saved_attrs = termios.tcgetattr(0)
+    tty.setraw(0)
+except (termios.error, OSError):
+    saved_attrs = None
+
+def restore_pty():
+    if saved_attrs is not None:
+        try:
+            termios.tcsetattr(0, termios.TCSANOW, saved_attrs)
+        except (termios.error, OSError):
+            pass
 
 def winsize():
     try:
@@ -604,6 +632,7 @@ def on_term(*_):
         os.killpg(os.getpgid(pid), signal.SIGHUP)
     except OSError:
         pass
+    restore_pty()
     sys.exit(0)
 
 signal.signal(signal.SIGTERM, on_term)
@@ -645,6 +674,7 @@ try:
     os.killpg(os.getpgid(pid), signal.SIGHUP)
 except OSError:
     pass
+restore_pty()
 try:
     _, status = os.waitpid(pid, 0)
     sys.exit(os.waitstatus_to_exitcode(status))
