@@ -6,7 +6,7 @@
 //! `#[serde(default)]`, so partial user files load safely.
 //!
 //! Zoom is an integer percentage (10..=200), and [`Options::zoom_factor`]
-//! returns the 0.1..=2.0 scale accepted by GTK/VTE/WebView. Changing the web
+//! returns the 0.1..=2.0 scale accepted by GTK/terminal/WebView. Changing the web
 //! view engine option does not affect existing browser tabs; it applies only
 //! to newly created browser tabs.
 
@@ -142,7 +142,7 @@ impl Options {
         p.clamp(ZOOM_MIN, ZOOM_MAX)
     }
 
-    /// Scale in 0.1..=2.0 form for VTE `set_font_scale` and WebView
+    /// Scale in 0.1..=2.0 form for terminal `set_font_scale` and WebView
     /// `set_zoom_level`.
     pub fn zoom_factor(&self) -> f64 {
         Self::clamp_zoom(self.zoom_percent) as f64 / 100.0

@@ -12,9 +12,9 @@
 
 ### A terminal for AI agent workflows, browser control, and task signals.
 
-flowmux is a Linux/GTK4 terminal for AI coding agents. Its terminal backend
-contract is libghostty-oriented, while the GTK app still uses an embeddable
-GTK terminal widget until libghostty exposes a stable Linux surface.
+flowmux is a Linux/GTK4 terminal for AI coding agents. Its terminal pane uses
+`libghostty-vt` for VT state, flowmux-owned PTYs for process lifecycle, and a
+GTK renderer owned by the application.
 
 > It is an unofficial GPL-3.0-or-later reimplementation inspired by [cmux](https://cmux.com/ko), a macOS/AppKit app, and is not affiliated with cmux.
   
@@ -105,31 +105,29 @@ flowmux/
 ```bash
 sudo apt install \
     build-essential pkg-config \
-    libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev \
+    libgtk-4-dev libadwaita-1-dev \
     libwebkitgtk-6.0-dev libssl-dev \
     libssh2-1-dev libdbus-1-dev
-# rustup (stable toolchain)
+# rustup (stable toolchain) and Zig 0.15.x are required. Zig builds
+# the vendored libghostty-vt library used by the terminal pane.
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-`flowmux-terminal` is the libghostty-oriented process/PTY contract. The GTK
-application still links `libvte-2.91-gtk4` for the current embeddable terminal
-widget, so the native GUI build needs the VTE development package for now.
+The GTK terminal pane is backed by `libghostty-vt` plus flowmux's own
+GTK renderer and PTY lifecycle, so the native GUI build has no external
+terminal widget runtime dependency.
 
 ### Ubuntu 22.04 (jammy) support
 
-The current supported jammy path is Flatpak. Ubuntu 22.04 does not ship
-`libvte-2.91-gtk4-dev`, so an apt-only native GTK4 terminal build still
-needs either a separately provided GTK4 VTE build or the future
-libghostty renderer path that removes the VTE runtime dependency.
+Ubuntu 22.04 support no longer depends on a separately packaged GTK4 terminal widget.
+Install the GTK/libadwaita/WebKit development packages above plus Zig 0.15.x,
+then build normally with cargo. The Flatpak build still bridges the terminal
+shell back to the host with `flatpak-spawn --host`, so host tools such as
+`git`, `tig`, `vim`, and `htop` stay visible.
 
-The Flatpak build supplies a GTK4-capable VTE inside the GNOME runtime,
-while flowmux bridges the terminal shell back to the host with
-`flatpak-spawn --host`, so host tools such as `git`, `tig`, `vim`, and
-`htop` stay visible. The terminal input path tracks smkx/rmkx
-application cursor mode in `flowmuxctl pty-tee`, so ncurses tools such
-as `tig` receive the correct Up/Down key bytes even when the Ubuntu
-22.04 IBus workaround is active.
+The terminal input path reads libghostty's DECCKM state directly, so ncurses
+tools such as `tig` receive application-cursor Up/Down bytes after `smkx`
+without the previous toolkit/IBus-specific workaround path.
 
 ```bash
 # 1. Install Flatpak, flatpak-builder, and the Flathub remote

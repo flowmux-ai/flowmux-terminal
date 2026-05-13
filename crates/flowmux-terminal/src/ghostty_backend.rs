@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Libghostty-oriented terminal backend.
 //!
-//! `libghostty` is not yet exposed as a stable GTK widget, so flowmux's
-//! GUI still owns the concrete Linux widget. This backend owns the
-//! terminal process contract that must survive that renderer swap:
-//! spawn argv/cwd/env, raw input bytes, dimensions, and close lifecycle.
+//! flowmux's GUI owns the concrete GTK renderer while libghostty owns the
+//! VT state. This backend models the terminal process contract shared with
+//! the GUI path: spawn argv/cwd/env, raw input bytes, dimensions, and close
+//! lifecycle.
 
 use crate::{SpawnSpec, TerminalBackend, TerminalError};
 use flowmux_core::PaneId;

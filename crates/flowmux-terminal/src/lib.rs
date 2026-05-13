@@ -2,7 +2,7 @@
 //! Libghostty-oriented terminal backend abstraction.
 //!
 //! flowmux keeps process/PTY state behind a [`TerminalBackend`] so the
-//! GTK layer can adopt libghostty rendering without changing IPC,
+//! GTK layer uses libghostty-backed rendering without changing IPC,
 //! workspace, or agent-environment plumbing.
 
 use flowmux_core::{PaneId, SurfaceId, WorkspaceId};

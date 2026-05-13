@@ -5,7 +5,7 @@
 Generated from `Cargo.lock` with `cargo about generate about.hbs --workspace --locked --fail`.
 
 This inventory covers Rust crates pulled into the Cargo workspace. System
-libraries used at runtime, such as GTK, libadwaita, VTE, WebKitGTK, D-Bus, and
+libraries used at runtime, such as GTK, libadwaita, WebKitGTK, D-Bus, and
 Secret Service implementations, retain their own distribution licenses.
 
 ## License Overview
@@ -8196,8 +8196,6 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ### MIT License
 
 Used by:
-- vte4-sys 0.8.0
-- vte4 0.8.0
 
 ```text
 Permission is hereby granted, free of charge, to any person obtaining a copy

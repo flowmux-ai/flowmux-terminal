@@ -3,18 +3,17 @@
 //!
 //! ## Why this exists
 //!
-//! VTE 0.68 (Ubuntu 22.04) and 0.76 (Ubuntu 24.04) ship without the
-//! Konsole-only `notification-received` signal: OSC 9 / 99 / 777
-//! escapes that agents like Claude Code and Codex emit are silently
-//! dropped by the terminal widget. flowmux therefore cannot react to
-//! them on the GUI side without an out-of-band sniffer.
+//! Some terminal-widget stacks do not expose OSC 9 / 99 / 777 notifications
+//! as structured GUI events. flowmux therefore keeps notification parsing in
+//! a PTY-side sniffer instead of tying it to a toolkit-specific signal.
 //!
 //! `pty-tee` is that sniffer. It is invoked transparently as the
-//! "shell" command by `terminal_pane::spawn`, runs as VTE's child
-//! process, and sits between the user's real shell and VTE:
+//! "shell" command by `terminal_pane::spawn`, runs as the terminal pane's
+//! child process, and sits between the pane's outer PTY and the user's real
+//! shell:
 //!
 //! ```text
-//!     VTE  <-->  outer PTY (stdin/stdout)  <-->  pty-tee  <-->  inner PTY  <-->  shell
+//!     terminal pane  <-->  outer PTY (stdin/stdout)  <-->  pty-tee  <-->  inner PTY  <-->  shell
 //!                                                  |
 //!                                                  +--> OscExtractor --> Request::Notify
 //! ```
@@ -25,16 +24,15 @@
 //! `flowmux_notify::OscExtractor`, and any parsed OSC notification is
 //! forwarded to the daemon over the existing IPC socket. The shell's
 //! view (its `tty`, its termios, its environment) is unchanged from a
-//! direct VTE spawn.
+//! direct terminal spawn.
 //!
 //! ## Why a separate process
 //!
-//! * VTE owns its slave PTY and gives no in-process snoop point on the
-//!   master fd. A subprocess that holds the inner master is the
-//!   simplest way to interpose.
+//! * The terminal pane owns the outer PTY while pty-tee owns the inner
+//!   master. This keeps OSC parsing independent of the renderer.
 //! * Crashes / OOMs in the tee never take down the GUI.
 //! * The same binary works on Ubuntu 22.04 and 24.04 because we never
-//!   touch a VTE-version-specific API.
+//!   touch a renderer-version-specific API.
 
 use anyhow::{anyhow, Context};
 use flowmux_core::{NotificationLevel, PaneId, SurfaceId};
@@ -84,7 +82,7 @@ struct NotifyEvent {
 }
 
 /// Public entry point used by `main.rs`. Returns the inner shell's exit
-/// code so `flowmuxctl` can exit transparently — VTE then sees the
+/// code so `flowmuxctl` can exit transparently — the terminal pane sees the
 /// child exit at the user's expected status.
 pub fn run(
     pane: Option<PaneId>,
@@ -261,7 +259,7 @@ fn run_pty_pump(
             }
         }
 
-        // 7b. Outer (user keystrokes / VTE input) → inner shell.
+        // 7b. Outer (user keystrokes / terminal input) → inner shell.
         if fds[0].revents & libc::POLLIN != 0 {
             match read_some(libc::STDIN_FILENO, &mut buf) {
                 ReadOutcome::Data(slice) => {
@@ -277,7 +275,7 @@ fn run_pty_pump(
                 }
                 ReadOutcome::WouldBlock => {}
                 ReadOutcome::Eof => {
-                    // VTE closed the outer end (terminal pane closed).
+                    // The terminal pane closed the outer end.
                     // Send SIGHUP so the inner shell can clean up.
                     let _ = signal::kill(child_pid, Signal::SIGHUP);
                 }
@@ -290,7 +288,7 @@ fn run_pty_pump(
             let _ = signal::kill(child_pid, Signal::SIGHUP);
         }
 
-        // 7c. Inner shell → outer (VTE) + OSC sniffer.
+        // 7c. Inner shell → outer terminal + OSC sniffer.
         if fds[1].revents & libc::POLLIN != 0 {
             match read_some(master_fd, &mut buf) {
                 ReadOutcome::Data(slice) => {
@@ -528,7 +526,7 @@ fn write_all(fd: RawFd, mut data: &[u8]) -> std::io::Result<()> {
             Some(libc::EINTR) => continue,
             // EAGAIN == EWOULDBLOCK on every Linux libc.
             Some(libc::EAGAIN) => {
-                // Tiny spin — the receiver (kernel pty buffer or VTE)
+                // Tiny spin — the receiver (kernel pty buffer or terminal pane)
                 // drains within microseconds in practice.
                 std::thread::yield_now();
                 continue;

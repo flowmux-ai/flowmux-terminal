@@ -373,7 +373,7 @@ impl WindowController {
             // unparent followed by `is_none()` slot-pick, GTK4 can leave
             // the parent slot still pointing at `paned` until the next
             // event-loop flush, which triggered the rerender fallback —
-            // and that fallback rebuilt every other pane's VTE, killing
+            // and that fallback rebuilt every other pane's terminal, killing
             // any agent (claude/codex/shell) running in those panes.
             let paned_widget: gtk::Widget = paned.clone().upcast();
             if grand_paned.start_child().as_ref() == Some(&paned_widget) {
@@ -912,7 +912,7 @@ impl WindowController {
     }
 
     /// Shared pane registry — exposed so the keybindings module can
-    /// reach into VTE widgets for copy/paste actions on the GTK
+    /// reach into terminal widgets for copy/paste actions on the GTK
     /// main thread without going through the bridge.
     pub fn pane_registry(&self) -> Rc<RefCell<PaneRegistry>> {
         self.pane_registry.clone()
@@ -1083,8 +1083,8 @@ impl WindowController {
         }
     }
 
-    /// Relying only on VTE OSC 7 (`current-directory-uri::notify`) misses shells
-    /// without vte.sh integration, such as Ubuntu's default bash spawned by
+    /// Relying only on libghostty OSC 7 (`current-directory-uri::notify`) misses shells
+    /// without OSC 7 integration, such as Ubuntu's default bash spawned by
     /// flowmux; after `cd`, no notify ever arrives and the tab name stays stale.
     /// Poll once per second to reuse TerminalPane::current_dir()'s
     /// `/proc/<pid>/cwd` fallback. The OSC 7 event path remains immediate, and
@@ -1500,7 +1500,7 @@ impl WindowController {
                 }
                 // After a surface is activated through click, IPC, or another
                 // path, move keyboard focus to the
-                // newly active widget: the terminal's vte::Terminal or the
+                // newly active widget: the terminal's gtk::DrawingArea or the
                 // browser's WebView. That lets typing go to the new tab's shell
                 // or page and keeps Tab as shell completion instead of tab-bar
                 // traversal. Defer one frame because the widget was just added
@@ -1680,7 +1680,7 @@ impl WindowController {
                 surface,
                 title,
             } => {
-                // VTE received an OSC 0/2 window title. Prompt-shaped shell
+                // libghostty parsed an OSC 0/2 window title. Prompt-shaped shell
                 // titles such as "user@host:~/path" duplicate cwd-driven labels,
                 // and trim-empty or whitespace-only values are ignored. Everything
                 // else follows BrowserTitleChanged semantics, respecting title_locked.
@@ -4715,7 +4715,7 @@ mod tests {
     #[gtk::test]
     async fn scenario_workspace_name_and_subtitles_track_focused_terminals_end_to_end() {
         adw::init().expect("libadwaita should initialize in GTK test");
-        // Only root_dir must exist because VTE terminal spawn uses it. Other cwd
+        // Only root_dir must exist because terminal spawn uses it. Other cwd
         // values are handled as strings by store / sync logic.
         let root = std::env::temp_dir().join("flowmux-scn-name-subtitles");
         std::fs::create_dir_all(&root).unwrap();
@@ -5089,17 +5089,17 @@ mod tests {
     }
 
     /// Regression: closing the split sibling must keep the surviving pane's
-    /// underlying VTE widget instance alive. Pane-level widgets (the
-    /// `gtk::Frame` and the `vte::Terminal` it wraps) own the live PTY child
+    /// underlying terminal widget instance alive. Pane-level widgets (the
+    /// `gtk::Frame` and the `gtk::DrawingArea` it wraps) own the live PTY child
     /// process, so any path that swaps them out kills running programs like
     /// claude / codex / shells. The earlier `rerender_workspace` fallback did
     /// exactly that. This test pins the contract for the incremental path:
     /// the same widget instance survives split, survives close-of-sibling,
-    /// and the pane's VTE terminal is reachable through the registry.
+    /// and the pane's terminal is reachable through the registry.
     #[gtk::test]
-    async fn closing_split_sibling_preserves_surviving_pane_vte_widget_identity() {
+    async fn closing_split_sibling_preserves_surviving_pane_terminal_widget_identity() {
         adw::init().expect("libadwaita should initialize in GTK test");
-        let root = std::env::temp_dir().join("flowmux-ui-close-sibling-vte");
+        let root = std::env::temp_dir().join("flowmux-ui-close-sibling-terminal");
         std::fs::create_dir_all(&root).unwrap();
         let store = StateStore::new_lazy(State::default());
         let ws_id = store
@@ -5110,7 +5110,7 @@ mod tests {
 
         let (bridge, _rx) = Bridge::new();
         let app = adw::Application::builder()
-            .application_id("com.flowmux.App.UiTest.CloseSiblingVte")
+            .application_id("com.flowmux.App.UiTest.CloseSiblingTerminal")
             .build();
         app.register(None::<&gtk::gio::Cancellable>).unwrap();
         let controller = WindowController::new(
@@ -5123,9 +5123,9 @@ mod tests {
         );
         controller.render_workspace(&ws);
 
-        // Snapshot the original pane's VTE widget + frame BEFORE the split so we
+        // Snapshot the original pane's terminal widget + frame BEFORE the split so we
         // can compare object identity through every subsequent rebuild.
-        let original_vte_pre_split = {
+        let original_terminal_pre_split = {
             let r = controller.pane_registry.borrow();
             r.active_terminal(original)
                 .expect("rendered workspace should expose a terminal for the only pane")
@@ -5150,7 +5150,7 @@ mod tests {
             .apply_split_incremental_or_rerender(ws_id, original, sibling, SplitDirection::Vertical)
             .await;
 
-        let original_vte_after_split = controller
+        let original_terminal_after_split = controller
             .pane_registry
             .borrow()
             .active_terminal(original)
@@ -5164,8 +5164,8 @@ mod tests {
             .expect("original pane frame must still be registered after split");
 
         assert!(
-            original_vte_pre_split == original_vte_after_split,
-            "split rebuilt the surviving pane's VTE widget — that would kill any running PTY child (claude/codex/shell)"
+            original_terminal_pre_split == original_terminal_after_split,
+            "split rebuilt the surviving pane's terminal widget — that would kill any running PTY child (claude/codex/shell)"
         );
         assert!(
             original_frame_pre_split == original_frame_after_split,
@@ -5184,13 +5184,13 @@ mod tests {
             .await;
         ack_rx.await.unwrap().unwrap();
 
-        let original_vte_after_close = controller
+        let original_terminal_after_close = controller
             .pane_registry
             .borrow()
             .active_terminal(original)
             .expect(
                 "regression: closing the split sibling dropped the surviving pane's terminal entry — \
-                 a fresh VTE means the running shell / agent was killed",
+                 a fresh terminal means the running shell / agent was killed",
             )
             .widget
             .clone();
@@ -5201,8 +5201,8 @@ mod tests {
             .expect("regression: surviving pane's frame should still be registered after close");
 
         assert!(
-            original_vte_pre_split == original_vte_after_close,
-            "regression: closing the split sibling rebuilt the surviving pane's VTE — the running PTY child was killed and the user sees a fresh empty terminal instead of their claude/codex session"
+            original_terminal_pre_split == original_terminal_after_close,
+            "regression: closing the split sibling rebuilt the surviving pane's terminal — the running PTY child was killed and the user sees a fresh empty terminal instead of their claude/codex session"
         );
         assert!(
             original_frame_pre_split == original_frame_after_close,
@@ -5229,12 +5229,12 @@ mod tests {
         );
     }
 
-    /// Regression: same VTE-identity contract across nested splits — the
+    /// Regression: same terminal-identity contract across nested splits — the
     /// scenario the user reported was a deeper split tree, not a flat
     /// side-by-side. Build Pane A (claude) → split A right to get B → focus B
     /// → split B down to get C, so the tree is Split{A, Split{B, C}} with two
     /// levels of `gtk::Paned`. Closing C must collapse only the inner paned
-    /// and leave A and B's VTE widgets intact.
+    /// and leave A and B's terminal widgets intact.
     #[gtk::test]
     async fn closing_inner_pane_in_two_level_split_preserves_other_panes() {
         adw::init().expect("libadwaita should initialize in GTK test");
@@ -5262,7 +5262,7 @@ mod tests {
         );
         controller.render_workspace(&ws);
 
-        let a_vte_initial = controller
+        let a_terminal_initial = controller
             .pane_registry
             .borrow()
             .active_terminal(pane_a)
@@ -5284,7 +5284,7 @@ mod tests {
             .apply_split_incremental_or_rerender(ws_id, pane_a, pane_b, SplitDirection::Vertical)
             .await;
 
-        let b_vte_initial = controller
+        let b_terminal_initial = controller
             .pane_registry
             .borrow()
             .active_terminal(pane_b)
@@ -5302,14 +5302,14 @@ mod tests {
             .await;
 
         // Sanity: A and B widgets identity unchanged across both splits.
-        let a_vte_after_splits = controller
+        let a_terminal_after_splits = controller
             .pane_registry
             .borrow()
             .active_terminal(pane_a)
             .expect("pane A terminal must survive both splits")
             .widget
             .clone();
-        let b_vte_after_splits = controller
+        let b_terminal_after_splits = controller
             .pane_registry
             .borrow()
             .active_terminal(pane_b)
@@ -5317,12 +5317,12 @@ mod tests {
             .widget
             .clone();
         assert!(
-            a_vte_initial == a_vte_after_splits,
-            "pane A's VTE must be identical across nested splits"
+            a_terminal_initial == a_terminal_after_splits,
+            "pane A's terminal must be identical across nested splits"
         );
         assert!(
-            b_vte_initial == b_vte_after_splits,
-            "pane B's VTE must survive its own split"
+            b_terminal_initial == b_terminal_after_splits,
+            "pane B's terminal must survive its own split"
         );
 
         // Close C (the deepest, newest pane). Tree should collapse to Split{A, B}.
@@ -5335,7 +5335,7 @@ mod tests {
             .await;
         ack_rx.await.unwrap().unwrap();
 
-        let a_vte_after_close = controller
+        let a_terminal_after_close = controller
             .pane_registry
             .borrow()
             .active_terminal(pane_a)
@@ -5345,7 +5345,7 @@ mod tests {
             )
             .widget
             .clone();
-        let b_vte_after_close = controller
+        let b_terminal_after_close = controller
             .pane_registry
             .borrow()
             .active_terminal(pane_b)
@@ -5359,12 +5359,12 @@ mod tests {
             .expect("pane A's frame must still be registered after closing inner pane C");
 
         assert!(
-            a_vte_initial == a_vte_after_close,
-            "regression: closing inner pane C rebuilt pane A's VTE widget — claude/codex/shell killed"
+            a_terminal_initial == a_terminal_after_close,
+            "regression: closing inner pane C rebuilt pane A's terminal widget — claude/codex/shell killed"
         );
         assert!(
-            b_vte_initial == b_vte_after_close,
-            "regression: closing inner pane C rebuilt pane B's VTE widget"
+            b_terminal_initial == b_terminal_after_close,
+            "regression: closing inner pane C rebuilt pane B's terminal widget"
         );
         assert!(
             a_frame_initial == a_frame_after_close,

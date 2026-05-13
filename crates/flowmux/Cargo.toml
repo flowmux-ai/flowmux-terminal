@@ -15,7 +15,7 @@ name = "flowmux"
 maintainer = "The flowmux Authors <noreply@flowmux.invalid>"
 section = "utils"
 priority = "optional"
-depends = "$auto, libgtk-4-1, libadwaita-1-0, libvte-2.91-gtk4-0, libwebkitgtk-6.0-4, libdbus-1-3, libsecret-1-0"
+depends = "$auto, libgtk-4-1, libadwaita-1-0, libwebkitgtk-6.0-4, libdbus-1-3, libsecret-1-0"
 assets = [
     ["target/release/flowmux",     "usr/bin/", "755"],
     ["target/release/flowmuxctl",  "usr/lib/flowmux/", "755"],
@@ -61,5 +61,8 @@ serde_json = { workspace = true }
 
 gtk = { package = "gtk4", version = "0.9", features = ["v4_12"] }
 adw = { package = "libadwaita", version = "0.7", features = ["v1_5"] }
-vte = { package = "vte4", version = "0.8", features = ["v0_76"] }
 webkit6 = "0.4"
+nix = { workspace = true }
+libc = { workspace = true }
+libghostty-vt = { workspace = true }
+pangocairo = "0.20"

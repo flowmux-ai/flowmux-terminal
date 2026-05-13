@@ -466,7 +466,7 @@ pub enum IncrementalSplitOutcome {
 /// identified by `new_pane_id` is added as the second child.
 ///
 /// The key to this incremental path is reusing the target pane's `gtk::Frame`,
-/// so other panes' VTE shell sessions and browser navigation state survive
+/// so other panes' terminal shell sessions and browser navigation state survive
 /// without rerender. The daemon-side split_pane must already have run before
 /// this call so the tree shape is decided.
 ///
@@ -1332,7 +1332,7 @@ fn build_panel(
                 extra_env,
                 callbacks.clone(),
             );
-            theme.apply_to_vte(&pane.widget);
+            theme.apply_to_terminal(&pane);
             // Start the new terminal widget with the current zoom option.
             pane.set_font_scale((callbacks.read_options)().zoom_factor());
 
@@ -1347,7 +1347,7 @@ fn build_panel(
             }
 
             // Apply OSC 0/2 window titles emitted by vi/claude/codex/tmux and
-            // similar programs to the tab label and window title. VTE may send
+            // similar programs to the tab label and window title. terminal may send
             // empty resets, so the dispatcher ignores trim-empty values.
             {
                 let cb = callbacks.on_terminal_title_changed.clone();
@@ -1379,10 +1379,9 @@ fn build_panel(
             });
             pane.add_controller(focus);
 
-            // The bare VTE widget is the pane's root — never wrap it in
-            // a one-child layout container before inserting it into the
-            // surface stack. See the doc comment on TerminalPane.widget
-            // for why (Paned split sizing regression).
+            // The terminal widget is the pane's root; keeping the same root
+            // instance alive preserves the running PTY child across split
+            // tree changes.
             let widget = pane.root_widget();
             let mut r = registry.borrow_mut();
             r.terminals.insert(surface.id, pane);

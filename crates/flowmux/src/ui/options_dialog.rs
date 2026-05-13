@@ -14,7 +14,7 @@
 //! dialog closes itself so the caller only handles the callback.
 //!
 //! Layering: this module only owns GTK widgets. Saving options to disk and
-//! applying zoom to VTE/WebView are handled by [`crate::ui::window`]. The
+//! applying zoom to terminal/WebView are handled by [`crate::ui::window`]. The
 //! dialog returns the user's intended [`Options`] through the callback.
 
 use adw::prelude::*;

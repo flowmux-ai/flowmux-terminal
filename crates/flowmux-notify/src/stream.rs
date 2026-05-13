@@ -7,9 +7,9 @@
 //! or `ESC ] ... BEL`), and emits the payload to a callback. Other
 //! bytes (CSI, SGR, regular text) are passed through untouched.
 //!
-//! VTE-based panes don't need this module — VTE exposes a
-//! `bell-event` / OSC signal directly. We use this for the libghostty
-//! backend and for piping `flowmux notify` output through stdin.
+//! Toolkit-provided OSC signals do not need this module. flowmux uses it
+//! for the PTY-side notification sniffer and for piping `flowmux notify`
+//! output through stdin.
 
 /// Maximum OSC payload size we will buffer. Real OSC 9 / OSC 777 messages
 /// from agent CLIs are well under 4 KiB; capping the buffer keeps a
@@ -117,7 +117,7 @@ impl<F: FnMut(&str)> OscExtractor<F> {
                     self.state = State::Ground;
                 } else if b == b']' {
                     // `ESC ]` inside an open OSC starts a *new* OSC.
-                    // VTE handles this by aborting the previous,
+                    // Terminal emulators handle this by aborting the previous,
                     // unterminated sequence; we mirror that so a
                     // misbehaving stream like
                     //   ESC ] 9 ; ESC ] 4 ; 0 ; rgb BEL
@@ -309,7 +309,7 @@ mod tests {
     /// payload was spliced onto the first one's prefix and the parser
     /// dropped a malformed `Terminal / 4;0;rgb…` entry into the bell
     /// popover. We now treat `ESC ]` mid-OSC as a restart, mirroring
-    /// VTE's behaviour: only the second payload survives.
+    /// terminal-emulator behaviour: only the second payload survives.
     #[test]
     fn nested_open_bracket_aborts_previous_payload_and_starts_new() {
         let s = b"\x1b]9;\x1b]4;0;rgb:11/22/33\x07";

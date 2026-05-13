@@ -140,11 +140,11 @@ enum Cmd {
     /// wrapper around the user's shell.
     ///
     /// Forks the child argv on an inner PTY, pumps bytes between the
-    /// outer terminal (VTE) and the inner shell, and snoops every
+    /// outer terminal pane and the inner shell, and snoops every
     /// inner→outer byte through the OSC parser so OSC 9 / 99 / 777
     /// notifications emitted by agents like Claude Code or Codex
-    /// reach the daemon's `Request::Notify` path even though VTE
-    /// 0.68/0.76 silently drop those escapes.
+    /// reach the daemon's `Request::Notify` path without depending on
+    /// a GUI terminal signal.
     ///
     /// Hidden because end users should never invoke it directly —
     /// `terminal_pane::spawn` wraps the shell with it automatically.

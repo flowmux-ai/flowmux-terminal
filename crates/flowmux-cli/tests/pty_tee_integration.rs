@@ -9,7 +9,7 @@
 //! "daemon's notify handler is invoked" is wired up.
 //!
 //! This is the regression guard the user asked for after we discovered
-//! VTE 0.68 / 0.76 silently swallow these escapes.
+//! legacy terminal-widget paths silently swallowed these escapes.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixListener;
@@ -116,7 +116,7 @@ fn run_tee_with_osc(osc_payloads: &[&str]) -> Vec<String> {
         // Suppress the tracing output so test logs stay clean.
         .env("FLOWMUX_LOG", "off")
         // Keep stdin a live pipe (not /dev/null) so the tee does not
-        // see an immediate EOF and HUP the child. Real VTE keeps the
+        // see an immediate EOF and HUP the child. Real terminal keeps the
         // outer end open for the lifetime of the pane; the test must
         // mimic that by holding ChildStdin until after the child
         // finishes.

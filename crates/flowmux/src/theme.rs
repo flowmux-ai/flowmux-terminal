@@ -12,7 +12,7 @@
 //!
 //! Applied to:
 //!
-//! * VTE terminal widgets — font, bg/fg/cursor, ANSI palette, selection.
+//! * flowmux terminal widgets — font, bg/fg/cursor, ANSI palette, selection.
 //! * libadwaita color scheme — forced dark when the background is dark.
 //! * Global CSS — pane frame and sidebar tint.
 //!
@@ -23,7 +23,6 @@
 
 use gtk::gdk;
 use gtk::pango;
-use vte::prelude::*;
 
 pub struct ResolvedTheme {
     pub font: pango::FontDescription,
@@ -35,7 +34,7 @@ pub struct ResolvedTheme {
     /// Always 16 entries. Indices missing from the user's theme file
     /// fall back to Ghostty's default ANSI palette (Tomorrow), so a
     /// fresh install renders prompts / ls output with Ghostty's
-    /// shipped colors instead of VTE's built-in grays.
+    /// shipped colors instead of toolkit defaults.
     pub palette: Vec<gdk::RGBA>,
 }
 
@@ -112,23 +111,8 @@ impl ResolvedTheme {
         }
     }
 
-    pub fn apply_to_vte(&self, term: &vte::Terminal) {
-        term.set_font(Some(&self.font));
-        let refs: Vec<&gdk::RGBA> = self.palette.iter().collect();
-        term.set_colors(Some(&self.fg), Some(&self.bg), &refs);
-        term.set_color_cursor(Some(&self.cursor));
-        if let Some(sbg) = &self.selection_bg {
-            term.set_color_highlight(Some(sbg));
-        }
-        if let Some(sfg) = &self.selection_fg {
-            term.set_color_highlight_foreground(Some(sfg));
-        }
-        // Soften the look — block-blink cursor, no audible bell, generous
-        // scrollback.
-        term.set_cursor_blink_mode(vte::CursorBlinkMode::On);
-        term.set_cursor_shape(vte::CursorShape::Block);
-        term.set_audible_bell(false);
-        term.set_scrollback_lines(20_000);
+    pub fn apply_to_terminal(&self, term: &crate::ui::terminal_pane::TerminalPane) {
+        term.apply_theme(self);
     }
 
     pub fn is_dark(&self) -> bool {
@@ -173,7 +157,7 @@ impl ResolvedTheme {
     border-color: {focus};
     box-shadow: inset 0 0 0 1px {focus};
 }}
-.flowmux-pane vte-terminal {{
+.flowmux-pane .flowmux-terminal {{
     padding: 7px;
     border-radius: 0 0 3px 3px;
 }}

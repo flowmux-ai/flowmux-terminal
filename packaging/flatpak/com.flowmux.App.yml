@@ -23,37 +23,6 @@ finish-args:
   - --talk-name=org.freedesktop.Flatpak
 
 modules:
-  # libvte is not bundled in org.gnome.Platform (terminal lib, not generic
-  # GNOME). Build it from upstream so the vte4-sys crate's pkg-config probe
-  # finds `vte-2.91-gtk4 >= 0.76` inside the sandbox.
-  - name: vte
-    buildsystem: meson
-    # vte 0.80 pulls fast_float as a meson subproject (cloned from
-    # github at configure time), so this module needs network too.
-    build-options:
-      build-args:
-        - --share=network
-    config-opts:
-      # Force libdir=lib (meson defaults to lib64 on x86_64) so the
-      # generated vte-2.91-gtk4.pc lands in /app/lib/pkgconfig, which is
-      # what flatpak adds to PKG_CONFIG_PATH and where the runtime linker
-      # looks for /app libraries.
-      - -Dlibdir=lib
-      - -Dgtk3=false
-      - -Dgtk4=true
-      - -Dvapi=false
-      - -Dgir=false
-      - -Ddocs=false
-      - -D_systemd=false
-    cleanup:
-      - /bin
-      - /libexec
-      - /share/vala
-    sources:
-      - type: git
-        url: https://gitlab.gnome.org/GNOME/vte.git
-        tag: '0.80.0'
-
   - name: flowmux
     buildsystem: simple
     build-options:

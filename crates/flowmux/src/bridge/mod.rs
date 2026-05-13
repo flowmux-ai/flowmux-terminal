@@ -174,7 +174,7 @@ pub enum GtkCommand {
     /// existing GTK widget is moved, so the running terminal/browser state is
     /// preserved and the source pane loses that tab.
     TearOffSurface { pane: PaneId, surface: SurfaceId },
-    /// VTE reported a cwd change for a terminal surface.
+    /// terminal pane reported a cwd change for a terminal surface.
     TerminalCwdChanged {
         pane: PaneId,
         surface: SurfaceId,
@@ -194,7 +194,7 @@ pub enum GtkCommand {
         surface: SurfaceId,
         title: String,
     },
-    /// VTE reported an OSC 0/2 window-title change. Programs such as
+    /// terminal pane reported an OSC 0/2 window-title change. Programs such as
     /// vi, claude, codex, or tmux can emit these from inside the shell.
     /// The daemon ignores user-renamed surfaces and empty reset titles.
     TerminalTitleChanged {
@@ -310,7 +310,7 @@ pub enum GtkCommand {
     /// visibility, store active_workspace, and first-leaf grab_focus happen
     /// in one flow shared by clicks, Alt+number, and Ctrl+Tab.
     ActivateWorkspace { id: WorkspaceId },
-    /// A notification was raised on a pane (from VTE OSC signal). Update
+    /// A notification was raised on a pane (from terminal OSC signal). Update
     /// the pane border / sidebar badge.
     #[allow(dead_code)]
     NotificationOnPane {

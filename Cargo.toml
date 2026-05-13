@@ -51,14 +51,11 @@ fs2 = "0.4"
 # Notifications / D-Bus
 zbus = { version = "4", default-features = false, features = ["tokio"] }
 
-# Low-level PTY / signals (used by `flowmuxctl pty-tee` to forkpty the
-# user's shell on an inner PTY and snoop OSC notifications on the way
-# back to VTE). Pinned to a release whose MSRV is well below the
-# workspace MSRV (1.75); the feature set is the minimum that gives us
-# `openpty`, `tcsetattr`, `TIOCSWINSZ`/`TIOCGWINSZ`, `ppoll`, and
-# child reaping.
+# Low-level PTY / signals (used by `flowmuxctl pty-tee` and the GTK
+# terminal pane to fork PTYs, forward resize events, and reap children).
 nix = { version = "0.29", default-features = false, features = ["fs", "term", "process", "signal", "poll", "ioctl"] }
 libc = "0.2"
+libghostty-vt = "0.1.1"
 
 # TOML editing (Codex `~/.codex/config.toml`).
 toml_edit = { version = "0.22", features = ["display"] }
