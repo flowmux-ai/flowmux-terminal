@@ -108,7 +108,7 @@ sudo apt install \
     libgtk-4-dev libadwaita-1-dev \
     libwebkitgtk-6.0-dev libssl-dev \
     libssh2-1-dev libdbus-1-dev
-# rustup (stable toolchain) and Zig 0.15.x are required. Zig builds
+# rustup (Rust 1.93 or newer) and Zig 0.15.x are required. Zig builds
 # the vendored libghostty-vt library used by the terminal pane.
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
@@ -135,10 +135,9 @@ sudo apt install flatpak flatpak-builder
 flatpak remote-add --if-not-exists --user flathub \
     https://flathub.org/repo/flathub.flatpakrepo
 
-# 2. Install the GNOME 48 runtime/SDK and the Rust SDK extension
+# 2. Install the GNOME 48 runtime/SDK
 flatpak install -y --user flathub \
-    org.gnome.Platform//48 org.gnome.Sdk//48 \
-    org.freedesktop.Sdk.Extension.rust-stable//24.08
+    org.gnome.Platform//48 org.gnome.Sdk//48
 
 # 3. Build and install flowmux from this repo (per-user, no sudo)
 flatpak-builder --user --install --force-clean \
@@ -153,6 +152,9 @@ Notes for the Flatpak build:
 - GStreamer plugins (see next section) are already bundled in the
   GNOME runtime, so you do not need to install them separately on the
   host for the Flatpak build to play media in the tab browser.
+- The Flatpak manifest bootstraps Rust 1.95.0 and Zig 0.15.2 inside the
+  build tree. This avoids depending on the runtime SDK's Rust extension,
+  which can lag behind `libghostty-vt`'s Rust 1.93 minimum.
 - The `flowmux` and `flowmuxctl` binaries inside the sandbox are
   reachable from a host terminal as `flatpak run --command=flowmux
   com.flowmux.App ...` and `flatpak run --command=flowmuxctl

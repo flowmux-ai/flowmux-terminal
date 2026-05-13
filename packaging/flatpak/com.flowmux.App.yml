@@ -3,8 +3,6 @@ app-id: com.flowmux.App
 runtime: org.gnome.Platform
 runtime-version: '48'
 sdk: org.gnome.Sdk
-sdk-extensions:
-  - org.freedesktop.Sdk.Extension.rust-stable
 command: flowmux
 finish-args:
   - --share=network
@@ -26,13 +24,21 @@ modules:
   - name: flowmux
     buildsystem: simple
     build-options:
-      append-path: /usr/lib/sdk/rust-stable/bin
       build-args:
         - --share=network
     build-commands:
-      - cargo build --release --manifest-path Cargo.toml -p flowmux -p flowmux-cli
+      - bash packaging/flatpak/bootstrap-toolchain.sh cargo build --release --manifest-path Cargo.toml -p flowmux -p flowmux-cli
       - install -Dm755 target/release/flowmux    /app/bin/flowmux
       - install -Dm755 target/release/flowmuxctl /app/lib/flowmux/flowmuxctl
+      - |
+        set -eu
+        ghostty_lib_dir="$(find target/release/build -path '*/ghostty-install/lib' -type d -print -quit)"
+        if [ -z "$ghostty_lib_dir" ]; then
+            echo "libghostty-vt build output was not found" >&2
+            exit 1
+        fi
+        install -d /app/lib
+        cp -P "$ghostty_lib_dir"/libghostty-vt.so* /app/lib/
       - install -Dm644 resources/desktop/com.flowmux.App.desktop /app/share/applications/com.flowmux.App.desktop
       - install -Dm644 resources/icons/flowmux.svg /app/share/icons/hicolor/scalable/apps/com.flowmux.App.svg
       - for size in 16 24 32 48 64 96 128 256 512; do install -Dm644 "resources/icons/flowmux-${size}.png" "/app/share/icons/hicolor/${size}x${size}/apps/com.flowmux.App.png"; done
