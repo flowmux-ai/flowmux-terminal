@@ -19,9 +19,7 @@ use crate::bridge::{Bridge, FocusDir, GtkCommand, WsNav};
 use crate::ui::window::ClipboardToast;
 use adw::prelude::*;
 use flowmux_core::SplitDirection;
-use gtk::gio::prelude::*;
 use gtk::glib;
-use gtk::prelude::*;
 use std::cell::Cell;
 use std::rc::Rc;
 use tokio::sync::oneshot;
@@ -489,33 +487,37 @@ fn make_quit_app_action(
 /// names, default = cancel, destructive styling on the confirm button)
 /// so the two dialogs behave identically from the user's side.
 async fn confirm_quit_app(window: &adw::ApplicationWindow) -> bool {
-    let (dialog, rx) = build_quit_dialog();
-    dialog.present(Some(window));
+    let (dialog, rx) = build_quit_dialog(Some(window));
+    dialog.present();
     rx.await.unwrap_or(false)
 }
 
 /// Construct the quit-confirmation dialog plus a oneshot receiver that
 /// resolves to `true` for "quit" / `false` for cancel-or-dismiss.
 /// Split out from [`confirm_quit_app`] so tests can present the dialog,
-/// fire a response programmatically (`dialog.response("quit")`), and
+/// fire a response programmatically (`dialog.response(...)`), and
 /// observe the receiver value without driving an actual GUI session.
-fn build_quit_dialog() -> (adw::AlertDialog, oneshot::Receiver<bool>) {
-    let dialog = adw::AlertDialog::new(
-        Some("Quit flowmux?"),
-        Some("This closes the flowmux window and stops every running tab."),
-    );
-    dialog.add_response("cancel", "Cancel");
-    dialog.add_response("quit", "Quit");
-    dialog.set_default_response(Some("cancel"));
-    dialog.set_close_response("cancel");
-    dialog.set_response_appearance("quit", adw::ResponseAppearance::Destructive);
+fn build_quit_dialog(
+    parent: Option<&adw::ApplicationWindow>,
+) -> (gtk::MessageDialog, oneshot::Receiver<bool>) {
+    let dialog = gtk::MessageDialog::builder()
+        .modal(true)
+        .message_type(gtk::MessageType::Question)
+        .text("Quit flowmux?")
+        .secondary_text("This closes the flowmux window and stops every running tab.")
+        .build();
+    dialog.set_transient_for(parent);
+    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+    let quit_button = dialog.add_button("Quit", gtk::ResponseType::Accept);
+    quit_button.add_css_class("destructive-action");
+    dialog.set_default_response(gtk::ResponseType::Cancel);
 
     let (tx, rx) = oneshot::channel::<bool>();
     let tx_cell: Rc<Cell<Option<oneshot::Sender<bool>>>> = Rc::new(Cell::new(Some(tx)));
     let tx_for_resp = tx_cell.clone();
-    dialog.connect_response(None, move |dialog, response| {
+    dialog.connect_response(move |dialog, response| {
         if let Some(tx) = tx_for_resp.take() {
-            let _ = tx.send(response == "quit");
+            let _ = tx.send(response == gtk::ResponseType::Accept);
         }
         dialog.close();
     });
@@ -674,17 +676,16 @@ mod tests {
     #[gtk::test]
     async fn quit_dialog_has_cancel_default_and_destructive_quit_response() {
         adw::init().expect("libadwaita should initialize in GTK test");
-        let (dialog, _rx) = build_quit_dialog();
-        assert_eq!(dialog.default_response().as_deref(), Some("cancel"));
-        assert_eq!(dialog.close_response(), "cancel");
-        assert_eq!(
-            dialog.response_appearance("quit"),
-            adw::ResponseAppearance::Destructive
-        );
+        let (dialog, _rx) = build_quit_dialog(None);
         // Both responses are enabled and exposed by id so the action
-        // handler can compare against the literal "quit"/"cancel" keys.
-        assert!(dialog.is_response_enabled("cancel"));
-        assert!(dialog.is_response_enabled("quit"));
+        // handler can compare against stable GTK response values.
+        assert!(dialog
+            .widget_for_response(gtk::ResponseType::Cancel)
+            .is_some());
+        let quit = dialog
+            .widget_for_response(gtk::ResponseType::Accept)
+            .expect("quit response button");
+        assert!(quit.has_css_class("destructive-action"));
     }
 
     /// Scenario: user presses Ctrl+Shift+W, the dialog appears,
@@ -697,16 +698,16 @@ mod tests {
     async fn quit_dialog_quit_response_resolves_true_cancel_resolves_false() {
         adw::init().expect("libadwaita should initialize in GTK test");
 
-        let (dialog, rx) = build_quit_dialog();
-        dialog.emit_by_name::<()>("response", &[&"quit"]);
+        let (dialog, rx) = build_quit_dialog(None);
+        dialog.response(gtk::ResponseType::Accept);
         let result = rx.await.expect("dialog must signal a response");
         assert!(
             result,
             "picking Quit must resolve to true so the action proceeds with window.close()"
         );
 
-        let (dialog2, rx2) = build_quit_dialog();
-        dialog2.emit_by_name::<()>("response", &[&"cancel"]);
+        let (dialog2, rx2) = build_quit_dialog(None);
+        dialog2.response(gtk::ResponseType::Cancel);
         let result2 = rx2.await.expect("dialog must signal a response");
         assert!(
             !result2,

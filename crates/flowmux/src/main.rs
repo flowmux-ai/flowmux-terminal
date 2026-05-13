@@ -184,7 +184,7 @@ fn main() -> anyhow::Result<()> {
         // this same provider so changes apply immediately.
         let initial_options = flowmux_config::options::load();
         let provider = gtk::CssProvider::new();
-        provider.load_from_string(&theme.css(
+        provider.load_from_data(&theme.css(
             initial_options.focus_border_color_or_default(),
             initial_options.focus_border_alpha(),
         ));
@@ -296,7 +296,6 @@ fn delegate_to_cli_if_needed() -> anyhow::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use adw::prelude::*;
     use gtk::gio::ApplicationFlags;
 
     /// Regression guard for cross-window workspace navigation: the bug was
@@ -306,15 +305,8 @@ mod tests {
     /// window B's workspace. The fix is `NON_UNIQUE` on the application
     /// builder; if a future refactor drops it, this test fails before
     /// the user does.
-    #[test]
+    #[gtk::test]
     fn application_uses_non_unique_so_each_window_runs_in_its_own_process() {
-        // libadwaita refuses to initialize without a display server.
-        // Skip silently on headless CI; the assertion below is a pure
-        // check against the configured GApplication flags and does not
-        // need a live GTK loop to be meaningful.
-        if adw::init().is_err() {
-            return;
-        }
         let app = build_application();
         assert!(
             app.flags().contains(ApplicationFlags::NON_UNIQUE),

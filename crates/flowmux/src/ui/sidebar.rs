@@ -956,12 +956,9 @@ mod tests {
     }
 
     /// Smoke test that row_widget can build a stable widget tree with a name
-    /// and subtitle lines. Requires GTK init, so headless environments skip it.
-    #[test]
+    /// and subtitle lines.
+    #[gtk::test]
     fn row_widget_builds_with_one_to_three_subtitle_lines() {
-        if gtk::init().is_err() {
-            return;
-        }
         let ws = ws_with_active_terminal_cwd(Some(PathBuf::from("/home/u/dev/os/flowmux")));
         let bridge = crate::bridge::Bridge::new().0;
         let on_close: Rc<dyn Fn(WorkspaceId)> = Rc::new(|_| {});

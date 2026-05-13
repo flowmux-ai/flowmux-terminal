@@ -15,6 +15,7 @@
 
 use flowmux_core::{PaneId, SurfaceId};
 use gtk::glib;
+use gtk::glib::translate::{from_glib_full, ToGlibPtr};
 use gtk::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
@@ -317,7 +318,7 @@ impl TerminalPane {
         // Wrap the shell argv with `flowmuxctl pty-tee` so OSC 9/99/777
         // emitted by terminal-side agents (Claude Code, Codex, …)
         // reach the desktop notification subsystem even on VTE
-        // versions (0.68 on Ubuntu 22.04, 0.76 on Ubuntu 24.04) that
+        // versions (0.68-compatible GTK4 builds, 0.76 on Ubuntu 24.04) that
         // silently drop those escapes. If the helper is missing we
         // fall back to a direct shell spawn so the terminal still
         // works — only the OSC sniffer is lost.
@@ -370,7 +371,7 @@ impl TerminalPane {
 /// Prepend `flowmuxctl pty-tee --pane <id> --surface <id> --` in front
 /// of the user's shell argv so OSC 9 / 99 / 777 escapes emitted by
 /// terminal-side agents (Claude Code, Codex, OpenCode, …) reach the
-/// daemon's `Request::Notify` path. VTE 0.68 (Ubuntu 22.04) and 0.76
+/// daemon's `Request::Notify` path. VTE 0.68-compatible GTK4 builds and 0.76
 /// (Ubuntu 24.04) both silently swallow those OSCs because they were
 /// only ever wired into the Konsole-private `notification-received`
 /// signal that upstream VTE compiles out — the tee is the only
@@ -484,16 +485,13 @@ fn install_url_link_handling(
             return;
         }
 
-        // Prefer OSC 8 hyperlinks, where the URL is attached by escape
-        // sequence, then fall back to regex matches. Links produced by ls,
-        // git, or build tools that support OSC 8 should win.
-        let url_raw: Option<String> = term_widget
-            .check_hyperlink_at(x, y)
-            .map(|g| g.to_string())
-            .or_else(|| {
-                let (m, _tag) = term_widget.check_match_at(x, y);
-                m.map(|g| g.to_string())
-            });
+        // VTE's point-based URL APIs are gated behind VTE 0.70. The
+        // Ubuntu 22.04-compatible feature floor is 0.66, so use the older
+        // cell-based `match_check` entry point and convert click pixels to
+        // terminal grid coordinates. This keeps regex URL activation on the
+        // downgraded backend; OSC 8 hyperlink activation remains a VTE 0.70+
+        // enhancement.
+        let url_raw = check_regex_match_at(&term_widget, x, y);
 
         let Some(raw) = url_raw else {
             // Ctrl was held, but the click was not on a URL. Treat it as a
@@ -515,6 +513,26 @@ fn install_url_link_handling(
     term.add_controller(click);
 }
 
+fn check_regex_match_at(term: &vte::Terminal, x: f64, y: f64) -> Option<String> {
+    let char_width = term.char_width();
+    let char_height = term.char_height();
+    if char_width <= 0 || char_height <= 0 {
+        return None;
+    }
+    let column = (x / char_width as f64).floor().max(0.0) as std::os::raw::c_long;
+    let row = (y / char_height as f64).floor().max(0.0) as std::os::raw::c_long;
+    let mut tag = 0;
+    let matched: Option<glib::GString> = unsafe {
+        from_glib_full(vte::ffi::vte_terminal_match_check(
+            term.to_glib_none().0,
+            column,
+            row,
+            &mut tag,
+        ))
+    };
+    matched.map(|g| g.to_string())
+}
+
 const ALT_ENTER_BYTES: &[u8] = b"\x1b\r";
 
 /// Intercept Shift+Enter on the VTE widget and translate it to ESC+CR — the
@@ -525,7 +543,7 @@ const ALT_ENTER_BYTES: &[u8] = b"\x1b\r";
 ///
 /// An earlier version of this hook used `gtk::EventControllerKey` in
 /// `PropagationPhase::Capture`. That sits in front of VTE's internal IM
-/// filter on every keystroke, and on Ubuntu 22.04's GTK 4.6 + VTE 0.68
+/// filter on every keystroke, and on GTK 4.6 + VTE 0.68-compatible builds
 /// combination the IBus Hangul preedit handler ends up desynchronized when
 /// any capture-phase key controller is attached to the VTE widget. The
 /// reported symptom is that Backspace and the arrow keys stop reacting

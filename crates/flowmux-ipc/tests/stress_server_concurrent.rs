@@ -19,13 +19,29 @@ use flowmux_core::WorkspaceId;
 use flowmux_ipc::protocol::{Envelope, Event, Payload, Request, Response, RpcError};
 use flowmux_ipc::server::{run, Handler};
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
+
+async fn connect_socket(socket: &Path) -> UnixStream {
+    let start = Instant::now();
+    loop {
+        match UnixStream::connect(socket).await {
+            Ok(stream) => return stream,
+            Err(_) if start.elapsed() < Duration::from_secs(5) => {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                if socket.exists() {
+                    tokio::task::yield_now().await;
+                }
+            }
+            Err(e) => panic!("failed to connect to {}: {e}", socket.display()),
+        }
+    }
+}
 
 struct CountingPing {
     handled: AtomicU64,
@@ -78,6 +94,7 @@ async fn spawn_server(handler: Arc<CountingPing>) -> (PathBuf, tokio::task::Join
         }
         tokio::task::yield_now().await;
     }
+    drop(connect_socket(&socket_path).await);
     (socket_path, task)
 }
 
@@ -98,7 +115,7 @@ async fn many_clients_ping_concurrently_without_id_crosstalk() {
     for client_idx in 0..CLIENTS {
         let socket = socket.clone();
         joins.push(tokio::spawn(async move {
-            let stream = UnixStream::connect(&socket).await.unwrap();
+            let stream = connect_socket(&socket).await;
             let (r, mut w) = stream.into_split();
             let mut reader = BufReader::new(r);
             for i in 0..PER_CLIENT {
@@ -151,7 +168,7 @@ async fn oversize_line_does_not_starve_other_clients() {
     // newline, then close. The server should drop that connection cleanly.
     let hostile_socket = socket.clone();
     let hostile = tokio::spawn(async move {
-        let mut stream = UnixStream::connect(&hostile_socket).await.unwrap();
+        let mut stream = connect_socket(&hostile_socket).await;
         // 2 MiB of garbage, no newline.
         let payload = vec![b'A'; 2 * 1024 * 1024];
         // write_all may either succeed (server has buffered) or error
@@ -164,7 +181,7 @@ async fn oversize_line_does_not_starve_other_clients() {
     // Healthy client in parallel: should still get answered.
     let healthy_socket = socket.clone();
     let healthy = tokio::spawn(async move {
-        let stream = UnixStream::connect(&healthy_socket).await.unwrap();
+        let stream = connect_socket(&healthy_socket).await;
         let (r, mut w) = stream.into_split();
         let mut reader = BufReader::new(r);
         for i in 0..10u64 {
@@ -198,7 +215,7 @@ async fn malformed_envelope_skipped_then_next_request_succeeds() {
     });
     let (socket, server) = spawn_server(handler.clone()).await;
 
-    let mut stream = UnixStream::connect(&socket).await.unwrap();
+    let mut stream = connect_socket(&socket).await;
     // Send malformed JSON, then a valid Ping. Server should log + skip the
     // first and answer the second.
     stream.write_all(b"{not json}\n").await.unwrap();
@@ -226,7 +243,7 @@ async fn client_sent_event_payload_is_rejected_with_invalid_argument() {
     });
     let (socket, server) = spawn_server(handler.clone()).await;
 
-    let mut stream = UnixStream::connect(&socket).await.unwrap();
+    let mut stream = connect_socket(&socket).await;
     let env = Envelope {
         id: 99,
         payload: Payload::Event(Event::NotificationRaised {

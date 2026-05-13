@@ -5,7 +5,7 @@
 //!
 //! * Global zoom percentage (10..=200% SpinButton)
 //! * Default web view engine for new browser tabs (DropDown: WebKit / Chrome / Firefox)
-//! * Focused-pane 1px border color (ColorDialogButton, default pale yellow)
+//! * Focused-pane 1px border color (ColorButton, default pale yellow)
 //! * Browser session persistence toggle (CheckButton, default checked) —
 //!   keeps cookies / localStorage / IndexedDB across flowmux restarts so
 //!   site logins survive a quit/relaunch.
@@ -149,18 +149,20 @@ fn build_dialog(
 
 fn show_about_popup(parent: &impl IsA<gtk::Widget>) {
     let body = about_body();
-    let dialog = adw::AlertDialog::builder()
-        .heading("About")
-        .body(body.as_str())
-        .body_use_markup(true)
-        .default_response("ok")
-        .close_response("ok")
+    let root = parent.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+    let dialog = gtk::MessageDialog::builder()
+        .modal(true)
+        .message_type(gtk::MessageType::Info)
+        .text("About")
+        .secondary_text(body.as_str())
+        .secondary_use_markup(true)
         .build();
-    dialog.add_response("ok", "OK");
-    dialog.connect_response(None, move |dialog, _| {
+    dialog.set_transient_for(root.as_ref());
+    dialog.add_button("OK", gtk::ResponseType::Ok);
+    dialog.connect_response(move |dialog, _| {
         dialog.close();
     });
-    dialog.present(Some(parent));
+    dialog.present();
 }
 
 fn about_body() -> String {
@@ -261,7 +263,7 @@ fn build_engine_drop(initial: &BrowserEngine) -> gtk::DropDown {
 fn collect_options(
     spin: &gtk::SpinButton,
     drop: &gtk::DropDown,
-    focus_color: &gtk::ColorDialogButton,
+    focus_color: &gtk::ColorButton,
     opacity_spin: &gtk::SpinButton,
     persist_check: &gtk::CheckButton,
 ) -> Options {
@@ -282,9 +284,9 @@ fn collect_options(
     }
 }
 
-/// Serialize the current gtk::ColorDialogButton RGBA as `#rrggbb`.
+/// Serialize the current gtk::ColorButton RGBA as `#rrggbb`.
 /// The alpha channel is ignored because opacity has its own option.
-fn color_button_hex(button: &gtk::ColorDialogButton) -> String {
+fn color_button_hex(button: &gtk::ColorButton) -> String {
     let rgba = button.rgba();
     let r = (rgba.red().clamp(0.0, 1.0) * 255.0).round() as u8;
     let g = (rgba.green().clamp(0.0, 1.0) * 255.0).round() as u8;
@@ -350,16 +352,16 @@ fn build_persist_check(initial: bool) -> gtk::CheckButton {
 }
 
 /// Parse `#rrggbb` or another hex form as GdkRGBA and seed the
-/// ColorDialogButton. Fall back to the default pale yellow on parse failure.
-fn build_focus_color_button(initial_hex: &str) -> gtk::ColorDialogButton {
-    let dialog = gtk::ColorDialog::new();
-    dialog.set_with_alpha(false);
-    let button = gtk::ColorDialogButton::new(Some(dialog));
+/// ColorButton. Fall back to the default pale yellow on parse failure.
+fn build_focus_color_button(initial_hex: &str) -> gtk::ColorButton {
     let parsed = gtk::gdk::RGBA::parse(initial_hex)
         .ok()
         .or_else(|| gtk::gdk::RGBA::parse("#fff4b3").ok())
         .expect("default focus color must be a valid RGBA literal");
-    button.set_rgba(&parsed);
+    let button = gtk::ColorButton::with_rgba(&parsed);
+    button.set_modal(true);
+    button.set_title("Focus Border Color");
+    button.set_use_alpha(false);
     button
 }
 
@@ -437,13 +439,9 @@ mod tests {
 
     /// The persistence checkbox should reflect the seeded value so the
     /// dialog opens in the correct state when the user reviews their
-    /// existing options. Headless environments without a display skip the
-    /// assertion; when GTK init succeeds, the active state must match.
-    #[test]
+    /// existing options.
+    #[gtk::test]
     fn persist_check_reflects_initial_value() {
-        if gtk::init().is_err() {
-            return;
-        }
         let check_on = build_persist_check(true);
         assert!(check_on.is_active());
         let check_off = build_persist_check(false);
@@ -455,11 +453,8 @@ mod tests {
     /// confirm the collected options match — including the new
     /// `persist_browser_session` flag — so a regression that drops the
     /// flag from `collect_options` would fail loudly.
-    #[test]
+    #[gtk::test]
     fn collect_options_round_trips_persist_browser_session() {
-        if gtk::init().is_err() {
-            return;
-        }
         let zoom = build_zoom_spin(120);
         let engine = build_engine_drop(&BrowserEngine::Firefox);
         let focus_color = build_focus_color_button("#abcdef");
@@ -477,13 +472,9 @@ mod tests {
     }
 
     /// GTK init is needed to verify that the slider and SpinButton share the
-    /// same Adjustment. Headless environments skip this; when GTK starts, the
-    /// test checks that the built widgets move together.
-    #[test]
+    /// same Adjustment.
+    #[gtk::test]
     fn focus_opacity_row_widgets_share_adjustment_and_clamp_initial() {
-        if gtk::init().is_err() {
-            return;
-        }
         // Out-of-range initial values clamp the spin button to 100.
         let widgets = build_focus_opacity_row(250);
         assert_eq!(widgets.spin.value_as_int(), 100);

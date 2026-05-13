@@ -98,7 +98,7 @@ flowmux/
 └── NOTICE                 Copyright + attribution
 ```
 
-## Build prerequisites (Ubuntu 24.04+)
+## Build prerequisites (Ubuntu 24.04 native)
 
 ```bash
 sudo apt install \
@@ -110,26 +110,52 @@ sudo apt install \
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-### Ubuntu 22.04 (jammy) — install via Flatpak
+### Ubuntu 22.04 (jammy) native build status
 
-> **Heads-up:** Ubuntu < 24.04 is **not recommended**. The Flatpak
-> path below works as a fallback, but because the terminal pane runs
-> the sandbox's own shell, host-installed tools (`git`, `tig`, `vim`,
-> `htop`, …) are **not visible** from inside the pane — only what
-> ships in the GNOME Platform runtime is reachable. Attempts to
-> escape the sandbox via `flatpak-spawn --host` fail to inherit a
-> controlling terminal cleanly (kernel rejects `TIOCSCTTY` on the
-> forwarded PTY), so this is a fundamental Flatpak limitation rather
-> than a configuration issue. If you need full host-tool access,
-> upgrade to Ubuntu 24.04+ and use the native apt build above.
+This branch lowers the GTK/libadwaita/VTE Rust feature floor to the
+newest APIs available on Ubuntu 22.04:
 
-The native apt build above needs GTK 4.12+ and `libwebkitgtk-6.0`,
-neither of which is in the 22.04 archive. On 22.04 the supported path
-is Flatpak: the GNOME 48 runtime brings GTK 4.18, libadwaita 1.8,
-libvte 0.78, and WebKitGTK 6.0 into the sandbox without touching the
-host system, so the same flowmux build runs unchanged. The matching
-`rust-stable//24.08` SDK extension ships a current Rust toolchain so
-the workspace's crate-level edition requirements are met.
+- GTK 4.6 (`libgtk-4-dev` 4.6.9 in jammy-updates)
+- libadwaita 1.1 (`libadwaita-1-dev` 1.1.7 in jammy-updates)
+- VTE API feature floor 0.66, which covers VTE 0.68
+
+The remaining blocker is packaging, not Rust API usage: Ubuntu 22.04
+ships VTE 0.68 only as the GTK3 package (`libvte-2.91-dev`). It does
+not ship `libvte-2.91-gtk4-dev`, so a pure apt-only GTK4+VTE native
+terminal pane cannot be built on jammy. WebKitGTK 6.0 is available from
+jammy-updates, so the browser pane is not the blocker anymore.
+
+Native jammy builds therefore need one of these terminal-provider paths:
+
+1. install/provide a GTK4 VTE build and expose its `vte-2.91-gtk4.pc`
+   through `PKG_CONFIG_PATH`, then run `cargo build -p flowmux`; or
+2. finish the libghostty GTK widget integration and remove the VTE
+   runtime dependency.
+
+`libghostty-vt` is the preferred long-term terminal core because it
+decouples terminal emulation from GTK packaging and has current Linux,
+macOS, Windows, and WebAssembly targets. It is not the default backend
+in this repository yet because the published Rust bindings currently
+require a newer Rust toolchain than the workspace MSRV and a Zig build
+of Ghostty's vendored C ABI. The existing runtime remains VTE-backed
+until that integration owns rendering, input, clipboard, cwd/title
+tracking, and PTY lifecycle parity.
+
+The minimum native package set for all non-VTE pieces on Ubuntu 22.04 is:
+
+```bash
+sudo apt install \
+    build-essential pkg-config \
+    libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev \
+    libssl-dev libssh2-1-dev libdbus-1-dev
+```
+
+### Ubuntu 22.04 (jammy) — Flatpak fallback
+
+Flatpak remains useful on jammy because the GNOME runtime supplies a
+GTK4-capable VTE build inside the sandbox without touching host
+packages. The in-pane shell is bridged back to the host with
+`flatpak-spawn --host`, so host tools remain visible.
 
 ```bash
 # 1. Install Flatpak, flatpak-builder, and the Flathub remote

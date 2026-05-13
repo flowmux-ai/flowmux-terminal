@@ -166,13 +166,15 @@ impl WindowController {
             .build();
 
         let content_overlay = gtk::Overlay::new();
+        content_overlay.set_hexpand(true);
+        content_overlay.set_vexpand(true);
         content_overlay.set_child(Some(&split));
         let clipboard_toast = ClipboardToast::new();
         content_overlay.add_overlay(clipboard_toast.widget());
 
-        let toolbar = adw::ToolbarView::new();
-        toolbar.add_top_bar(&adw::HeaderBar::new());
-        toolbar.set_content(Some(&content_overlay));
+        let window_root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        window_root.append(&adw::HeaderBar::new());
+        window_root.append(&content_overlay);
 
         // Restore saved window size/maximized state, otherwise default to 1280x800.
         let stored_window = store.window_layout_blocking();
@@ -191,7 +193,7 @@ impl WindowController {
             .icon_name(crate::APP_ID)
             .title("flowmux")
             .build();
-        window.set_content(Some(&toolbar));
+        window.set_content(Some(&window_root));
         if was_maximized {
             window.maximize();
         }
@@ -882,27 +884,29 @@ impl WindowController {
             Some(ws) => ws.display_title().to_string(),
             None => return true, // Already gone — nothing to confirm.
         };
-        let dialog = adw::AlertDialog::new(
-            Some("Close workspace?"),
-            Some(&format!("This will close “{title}” and stop its tabs.")),
-        );
-        dialog.add_response("cancel", "Cancel");
-        dialog.add_response("close", "Close");
-        dialog.set_default_response(Some("cancel"));
-        dialog.set_close_response("cancel");
-        dialog.set_response_appearance("close", adw::ResponseAppearance::Destructive);
+        let dialog = gtk::MessageDialog::builder()
+            .transient_for(&self.window)
+            .modal(true)
+            .message_type(gtk::MessageType::Question)
+            .text("Close workspace?")
+            .secondary_text(format!("This will close “{title}” and stop its tabs."))
+            .build();
+        dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+        let close_button = dialog.add_button("Close", gtk::ResponseType::Accept);
+        close_button.add_css_class("destructive-action");
+        dialog.set_default_response(gtk::ResponseType::Cancel);
 
         let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
         let tx_cell: Rc<Cell<Option<tokio::sync::oneshot::Sender<bool>>>> =
             Rc::new(Cell::new(Some(tx)));
         let tx_for_resp = tx_cell.clone();
-        dialog.connect_response(None, move |dialog, response| {
+        dialog.connect_response(move |dialog, response| {
             if let Some(tx) = tx_for_resp.take() {
-                let _ = tx.send(response == "close");
+                let _ = tx.send(response == gtk::ResponseType::Accept);
             }
             dialog.close();
         });
-        dialog.present(Some(&self.window));
+        dialog.present();
         rx.await.unwrap_or(false)
     }
 
@@ -1048,7 +1052,7 @@ impl WindowController {
                     }
                     // Focus border color/opacity apply by reloading one CSS string
                     // into the same CssProvider instance, so all widgets update automatically.
-                    css_provider.load_from_string(&theme.css(
+                    css_provider.load_from_data(&theme.css(
                         opts.focus_border_color_or_default(),
                         opts.focus_border_alpha(),
                     ));
@@ -2133,8 +2137,10 @@ impl WindowController {
         if desktop_ids.is_empty() {
             return;
         }
+        let Some(handle) = self.tokio_handle.clone() else {
+            return;
+        };
         let notifier_cell = self.notifier.clone();
-        let handle = self.tokio_handle.clone();
         glib::MainContext::default().spawn_local(async move {
             // `zbus` (tokio feature) needs an active Tokio runtime
             // context for every `await`. The GTK main thread is not a
@@ -2144,7 +2150,7 @@ impl WindowController {
             // leaving the OS notification center inflated and the dock
             // badge stuck. The guard lives for the entire async block,
             // covering connect + every `close().await`.
-            let _enter = handle.as_ref().map(|h| h.enter());
+            let _enter = handle.enter();
             let Some(notifier) = ensure_desktop_notifier(&notifier_cell).await else {
                 return;
             };
@@ -2174,6 +2180,9 @@ impl WindowController {
     /// converges to the freshest `unread_count()` regardless of how
     /// many overlapping callers fired the refresh.
     fn refresh_launcher_badge(&self) {
+        let Some(handle) = self.tokio_handle.clone() else {
+            return;
+        };
         if self.badge_publisher_busy.get() {
             // Another spawn_local is already publishing. Just signal it
             // to republish once it finishes its current await — the
@@ -2188,7 +2197,6 @@ impl WindowController {
         let store = self.notifications.clone();
         let busy = self.badge_publisher_busy.clone();
         let dirty = self.badge_dirty.clone();
-        let handle = self.tokio_handle.clone();
         glib::MainContext::default().spawn_local(async move {
             // See `close_desktop_notifications`: zbus's tokio executor
             // needs an active runtime context across every `await`.
@@ -2196,7 +2204,7 @@ impl WindowController {
             // `spawn_local` and the dock badge never updates. Holding
             // the enter guard for the whole async block (including the
             // republish loop) keeps the runtime in scope.
-            let _enter = handle.as_ref().map(|h| h.enter());
+            let _enter = handle.enter();
             // Drive the dock association through the same constant the
             // FDO `desktop-entry` hint uses; if the two ever drift the
             // launcher badge and the message-tray dot land on different
@@ -2666,7 +2674,7 @@ fn register_workspace_actions(
 ) {
     use gtk::gio;
 
-    // win.rename-workspace(<uuid>) — opens an adw::AlertDialog with an
+    // win.rename-workspace(<uuid>) — opens a GTK dialog with an
     // Entry for the new name and OK/Cancel responses.
     let store_for_rename = store.clone();
     let bridge_for_rename = bridge.clone();
@@ -2696,7 +2704,7 @@ fn register_workspace_actions(
         })
         .build();
 
-    // win.recolor-workspace(<uuid>) — opens a gtk::ColorDialog seeded
+    // win.recolor-workspace(<uuid>) — opens a gtk::ColorChooserDialog seeded
     // with the current color and writes the picked one back.
     let store_for_color = store.clone();
     let bridge_for_color = bridge.clone();
@@ -2757,24 +2765,38 @@ fn show_rename_dialog(
     current_name: &str,
     bridge: Bridge,
 ) {
-    let dialog = adw::AlertDialog::new(
-        Some("Rename Tab"),
-        Some("Leave empty and click OK to return to automatic mode."),
-    );
+    let dialog = gtk::Dialog::builder()
+        .transient_for(window)
+        .modal(true)
+        .title("Rename Tab")
+        .default_width(360)
+        .build();
+    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+    let ok_button = dialog.add_button("OK", gtk::ResponseType::Accept);
+    ok_button.add_css_class("suggested-action");
+    dialog.set_default_response(gtk::ResponseType::Accept);
+
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    body.set_margin_top(16);
+    body.set_margin_bottom(16);
+    body.set_margin_start(16);
+    body.set_margin_end(16);
+    let hint = gtk::Label::new(Some(
+        "Leave empty and click OK to return to automatic mode.",
+    ));
+    hint.set_wrap(true);
+    hint.set_xalign(0.0);
     let entry = gtk::Entry::new();
     entry.set_text(current_name);
     entry.set_activates_default(true);
     entry.set_hexpand(true);
-    dialog.set_extra_child(Some(&entry));
-    dialog.add_response("cancel", "Cancel");
-    dialog.add_response("ok", "OK");
-    dialog.set_default_response(Some("ok"));
-    dialog.set_close_response("cancel");
-    dialog.set_response_appearance("ok", adw::ResponseAppearance::Suggested);
+    body.append(&hint);
+    body.append(&entry);
+    dialog.content_area().append(&body);
 
     let entry_for_resp = entry.clone();
-    dialog.connect_response(None, move |dialog, response| {
-        if response == "ok" {
+    dialog.connect_response(move |dialog, response| {
+        if response == gtk::ResponseType::Accept {
             // Match cmux: pass empty or whitespace-only input through to the
             // daemon as the signal to reset custom_title to None. The daemon
             // trims and interprets meaningless input as returning to automatic mode.
@@ -2794,7 +2816,7 @@ fn show_rename_dialog(
         }
         dialog.close();
     });
-    dialog.present(Some(window));
+    dialog.present();
 }
 
 fn show_rename_surface_dialog(
@@ -2804,21 +2826,30 @@ fn show_rename_surface_dialog(
     current_title: &str,
     bridge: Bridge,
 ) {
-    let dialog = adw::AlertDialog::new(Some("Rename Pane Tab"), None);
+    let dialog = gtk::Dialog::builder()
+        .transient_for(window)
+        .modal(true)
+        .title("Rename Pane Tab")
+        .default_width(360)
+        .build();
+    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+    let ok_button = dialog.add_button("OK", gtk::ResponseType::Accept);
+    ok_button.add_css_class("suggested-action");
+    dialog.set_default_response(gtk::ResponseType::Accept);
+
     let entry = gtk::Entry::new();
     entry.set_text(current_title);
     entry.set_activates_default(true);
     entry.set_hexpand(true);
-    dialog.set_extra_child(Some(&entry));
-    dialog.add_response("cancel", "Cancel");
-    dialog.add_response("ok", "OK");
-    dialog.set_default_response(Some("ok"));
-    dialog.set_close_response("cancel");
-    dialog.set_response_appearance("ok", adw::ResponseAppearance::Suggested);
+    entry.set_margin_top(16);
+    entry.set_margin_bottom(16);
+    entry.set_margin_start(16);
+    entry.set_margin_end(16);
+    dialog.content_area().append(&entry);
 
     let entry_for_resp = entry.clone();
-    dialog.connect_response(None, move |dialog, response| {
-        if response == "ok" {
+    dialog.connect_response(move |dialog, response| {
+        if response == gtk::ResponseType::Accept {
             let new_title = entry_for_resp.text().trim().to_string();
             if !new_title.is_empty() {
                 let bridge = bridge.clone();
@@ -2838,7 +2869,7 @@ fn show_rename_surface_dialog(
         }
         dialog.close();
     });
-    dialog.present(Some(window));
+    dialog.present();
 }
 
 fn show_color_dialog(
@@ -2847,20 +2878,16 @@ fn show_color_dialog(
     current: Option<&str>,
     bridge: Bridge,
 ) {
-    let dialog = gtk::ColorDialog::builder()
-        .title("Tab Color")
-        .modal(true)
-        .with_alpha(false)
-        .build();
+    let dialog = gtk::ColorChooserDialog::new(Some("Tab Color"), Some(window));
+    dialog.set_modal(true);
+    dialog.set_use_alpha(false);
     let initial = current
         .and_then(|s| gtk::gdk::RGBA::parse(s).ok())
         .unwrap_or_else(|| gtk::gdk::RGBA::new(0.5, 0.5, 0.5, 1.0));
-    dialog.choose_rgba(
-        Some(window),
-        Some(&initial),
-        gtk::gio::Cancellable::NONE,
-        move |result| {
-            let Ok(rgba) = result else { return };
+    dialog.set_rgba(&initial);
+    dialog.connect_response(move |dialog, response| {
+        if response == gtk::ResponseType::Ok {
+            let rgba = dialog.rgba();
             let hex = format!(
                 "#{:02x}{:02x}{:02x}",
                 (rgba.red() * 255.0).clamp(0.0, 255.0) as u8,
@@ -2879,8 +2906,10 @@ fn show_color_dialog(
                     })
                     .await;
             });
-        },
-    );
+        }
+        dialog.close();
+    });
+    dialog.present();
 }
 
 /// Top-of-window "Copied to clipboard" toast. The generation counter
@@ -3060,9 +3089,9 @@ mod tests {
     #[gtk::test]
     async fn terminal_cwd_event_updates_rendered_tab_label_and_respects_manual_rename() {
         adw::init().expect("libadwaita should initialize in GTK test");
-        let root = std::env::temp_dir().join("flowmux-ui-cwd-one");
-        let next = std::env::temp_dir().join("flowmux-ui-cwd-two");
-        let fixed_next = std::env::temp_dir().join("flowmux-ui-cwd-three");
+        let root = std::env::temp_dir().join("fmux-cwd-one");
+        let next = std::env::temp_dir().join("fmux-cwd-two");
+        let fixed_next = std::env::temp_dir().join("fmux-cwd-three");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::create_dir_all(&next).unwrap();
         std::fs::create_dir_all(&fixed_next).unwrap();
@@ -3095,7 +3124,7 @@ mod tests {
                 .borrow()
                 .surface_title_text(surface)
                 .as_deref(),
-            Some("flowmux-ui-cwd-on...")
+            Some("fmux-cwd-one")
         );
 
         controller
@@ -3108,7 +3137,7 @@ mod tests {
 
         assert_eq!(
             store.surface_title(pane, surface).await.as_deref(),
-            Some("flowmux-ui-cwd-tw...")
+            Some("fmux-cwd-two")
         );
         assert_eq!(
             controller
@@ -3116,7 +3145,7 @@ mod tests {
                 .borrow()
                 .surface_title_text(surface)
                 .as_deref(),
-            Some("flowmux-ui-cwd-tw...")
+            Some("fmux-cwd-two")
         );
 
         assert_eq!(
@@ -3457,8 +3486,8 @@ mod tests {
         adw::init().expect("libadwaita should initialize in GTK test");
         // Use absolute paths under /tmp to avoid $HOME effects. Absolute-path
         // PS1 matching is sufficient to verify this flow.
-        let initial = std::env::temp_dir().join("flowmux-ui-cwd-flow-one");
-        let next = std::env::temp_dir().join("flowmux-ui-cwd-flow-two");
+        let initial = std::env::temp_dir().join("fmux-flow-one");
+        let next = std::env::temp_dir().join("fmux-flow-two");
         std::fs::create_dir_all(&initial).unwrap();
         std::fs::create_dir_all(&next).unwrap();
 
@@ -3489,7 +3518,7 @@ mod tests {
 
         // Initial: tab/window title is the workspace root folder name.
         let initial_title = store.surface_title(pane, surface).await.unwrap();
-        assert_eq!(initial_title, "flowmux-ui-cwd-fl...");
+        assert_eq!(initial_title, "fmux-flow-one");
         assert_eq!(
             controller.window.title().map(|s| s.to_string()),
             Some(format!("flowmux - {initial_title}"))
@@ -3507,12 +3536,12 @@ mod tests {
             .await;
         assert_eq!(
             store.surface_title(pane, surface).await.as_deref(),
-            Some("flowmux-ui-cwd-fl..."),
+            Some("fmux-flow-two"),
             "OSC 7 cwd changes update the tab label to the new folder name",
         );
         assert_eq!(
             controller.window.title().map(|s| s.to_string()),
-            Some("flowmux - flowmux-ui-cwd-fl...".into()),
+            Some("flowmux - fmux-flow-two".into()),
             "the window title follows the new tab name",
         );
 
@@ -3528,12 +3557,12 @@ mod tests {
             .await;
         assert_eq!(
             store.surface_title(pane, surface).await.as_deref(),
-            Some("flowmux-ui-cwd-fl..."),
+            Some("fmux-flow-two"),
             "shell PS1 OSC 0/2 must not overwrite cwd-driven labels",
         );
         assert_eq!(
             controller.window.title().map(|s| s.to_string()),
-            Some("flowmux - flowmux-ui-cwd-fl...".into()),
+            Some("flowmux - fmux-flow-two".into()),
         );
 
         // If bash draws another prompt without cd, such as after an empty Enter,
@@ -3548,7 +3577,7 @@ mod tests {
             .await;
         assert_eq!(
             store.surface_title(pane, surface).await.as_deref(),
-            Some("flowmux-ui-cwd-fl...")
+            Some("fmux-flow-two")
         );
 
         // External program titles, such as vi, still apply to both tab and window.
@@ -3958,7 +3987,7 @@ mod tests {
         );
 
         // After claude exits, moving to another folder naturally restores a folder label.
-        let next = std::env::temp_dir().join("flowmux-program-title-after");
+        let next = std::env::temp_dir().join("fmux-title-after");
         std::fs::create_dir_all(&next).unwrap();
         controller
             .dispatch(GtkCommand::TerminalCwdChanged {
@@ -3969,7 +3998,7 @@ mod tests {
             .await;
         assert_eq!(
             store.surface_title(pane, surface).await.as_deref(),
-            Some("flowmux-program-t...")
+            Some("fmux-title-afte...")
         );
     }
 
@@ -5403,9 +5432,7 @@ mod tests {
         let ws = store.get_workspace(ws_id).await.unwrap();
         let pane = ws.surfaces[0].root_pane.first_leaf_id().unwrap();
         let (bridge, _rx) = Bridge::new();
-        let app = adw::Application::builder()
-            .application_id(app_id)
-            .build();
+        let app = adw::Application::builder().application_id(app_id).build();
         app.register(None::<&gtk::gio::Cancellable>).unwrap();
         let controller = WindowController::new(
             &app,
@@ -5729,10 +5756,9 @@ mod tests {
     /// from the popover list while leaving every other entry alone.
     #[gtk::test]
     async fn delete_notification_dispatch_removes_only_targeted_unread_entry() {
-        let (controller, ws_id, pane) = build_single_workspace_controller(
-            "com.flowmux.App.UiTest.NotifTrashRemovesUnread",
-        )
-        .await;
+        let (controller, ws_id, pane) =
+            build_single_workspace_controller("com.flowmux.App.UiTest.NotifTrashRemovesUnread")
+                .await;
         let id_a = push_notification(&controller, Some(pane), Some(ws_id), "a")
             .await
             .expect("first push must record an entry");
@@ -5817,10 +5843,9 @@ mod tests {
     /// so a future refactor that removes it surfaces here.
     #[gtk::test]
     async fn delete_notification_dispatch_on_unknown_id_is_safe_noop() {
-        let (controller, ws_id, pane) = build_single_workspace_controller(
-            "com.flowmux.App.UiTest.NotifTrashUnknownIsNoop",
-        )
-        .await;
+        let (controller, ws_id, pane) =
+            build_single_workspace_controller("com.flowmux.App.UiTest.NotifTrashUnknownIsNoop")
+                .await;
         push_notification(&controller, Some(pane), Some(ws_id), "kept").await;
         let unread_before = controller.notifications.unread_count();
         let count_before = controller.notifications.entries().len();
@@ -5869,10 +5894,8 @@ mod tests {
     /// `update_launcher_count` call would carry `count = 0`.
     #[gtk::test]
     async fn popover_open_sequence_drains_single_notification_to_zero() {
-        let (controller, ws_id, pane) = build_single_workspace_controller(
-            "com.flowmux.App.UiTest.PopoverOpenSingle",
-        )
-        .await;
+        let (controller, ws_id, pane) =
+            build_single_workspace_controller("com.flowmux.App.UiTest.PopoverOpenSingle").await;
         let id = push_notification(&controller, Some(pane), Some(ws_id), "alarm")
             .await
             .expect("push must record an entry");
@@ -5903,9 +5926,7 @@ mod tests {
             })
             .await;
         // Step (3): refresh re-publishes the unread count to the dock.
-        controller
-            .dispatch(GtkCommand::RefreshLauncherBadge)
-            .await;
+        controller.dispatch(GtkCommand::RefreshLauncherBadge).await;
 
         assert_eq!(
             controller.notifications.unread_count(),
@@ -5932,10 +5953,8 @@ mod tests {
     /// its own. The ENTIRE story must end with `unread_count() = 0`.
     #[gtk::test]
     async fn popover_open_then_late_desktop_id_still_drains_badge() {
-        let (controller, ws_id, pane) = build_single_workspace_controller(
-            "com.flowmux.App.UiTest.PopoverLateRace",
-        )
-        .await;
+        let (controller, ws_id, pane) =
+            build_single_workspace_controller("com.flowmux.App.UiTest.PopoverLateRace").await;
         let id = push_notification(&controller, Some(pane), Some(ws_id), "alarm")
             .await
             .expect("push must record an entry");
@@ -5949,9 +5968,7 @@ mod tests {
             "no desktop_id was attached yet; the sweep must return an empty list \
              so the dispatcher does not send a CloseDesktopNotifications no-op",
         );
-        controller
-            .dispatch(GtkCommand::RefreshLauncherBadge)
-            .await;
+        controller.dispatch(GtkCommand::RefreshLauncherBadge).await;
         assert_eq!(controller.notifications.unread_count(), 0);
 
         // Daemon's reply arrives. set_desktop_id reports Stale; the
@@ -5983,10 +6000,8 @@ mod tests {
     /// reaches the dispatcher later as `Stale`.
     #[gtk::test]
     async fn popover_open_with_partial_desktop_ids_still_clears_badge() {
-        let (controller, ws_id, pane) = build_single_workspace_controller(
-            "com.flowmux.App.UiTest.PopoverPartial",
-        )
-        .await;
+        let (controller, ws_id, pane) =
+            build_single_workspace_controller("com.flowmux.App.UiTest.PopoverPartial").await;
         let a = push_notification(&controller, Some(pane), Some(ws_id), "a")
             .await
             .expect("push a");
@@ -6022,9 +6037,7 @@ mod tests {
                 desktop_ids: to_close,
             })
             .await;
-        controller
-            .dispatch(GtkCommand::RefreshLauncherBadge)
-            .await;
+        controller.dispatch(GtkCommand::RefreshLauncherBadge).await;
         assert_eq!(controller.notifications.unread_count(), 0);
 
         // Late reply for c → Stale → dispatcher closes 33 and refreshes.
@@ -6060,21 +6073,14 @@ mod tests {
     /// be marked read.
     #[gtk::test]
     async fn stress_many_notifications_with_periodic_sweeps_drains_to_zero() {
-        let (controller, ws_id, pane) = build_single_workspace_controller(
-            "com.flowmux.App.UiTest.StressManyNotif",
-        )
-        .await;
+        let (controller, ws_id, pane) =
+            build_single_workspace_controller("com.flowmux.App.UiTest.StressManyNotif").await;
         const TOTAL: usize = 200;
         let mut ids = Vec::with_capacity(TOTAL);
         for i in 0..TOTAL {
-            let id = push_notification(
-                &controller,
-                Some(pane),
-                Some(ws_id),
-                &format!("evt-{i}"),
-            )
-            .await
-            .expect("push must record an entry");
+            let id = push_notification(&controller, Some(pane), Some(ws_id), &format!("evt-{i}"))
+                .await
+                .expect("push must record an entry");
             ids.push(id);
             // Simulate the daemon's Notify reply for a subset of pushes
             // (mimicking real-world timing where some replies overtake
@@ -6140,10 +6146,8 @@ mod tests {
     /// badge" against batch arrival patterns.
     #[gtk::test]
     async fn stress_popover_open_drains_badge_across_repeated_batches() {
-        let (controller, ws_id, pane) = build_single_workspace_controller(
-            "com.flowmux.App.UiTest.StressPopoverBatches",
-        )
-        .await;
+        let (controller, ws_id, pane) =
+            build_single_workspace_controller("com.flowmux.App.UiTest.StressPopoverBatches").await;
         const BATCHES: usize = 10;
         const PER_BATCH: usize = 20;
         for batch in 0..BATCHES {
@@ -6179,9 +6183,7 @@ mod tests {
                     desktop_ids: to_close,
                 })
                 .await;
-            controller
-                .dispatch(GtkCommand::RefreshLauncherBadge)
-                .await;
+            controller.dispatch(GtkCommand::RefreshLauncherBadge).await;
             assert_eq!(
                 controller.notifications.unread_count(),
                 0,
@@ -6207,10 +6209,8 @@ mod tests {
     /// can be "ghost unread" or "ghost read".
     #[gtk::test]
     async fn stress_mixed_ack_channels_keep_unread_count_in_sync_with_entries() {
-        let (controller, ws_id, pane) = build_single_workspace_controller(
-            "com.flowmux.App.UiTest.StressMixedAcks",
-        )
-        .await;
+        let (controller, ws_id, pane) =
+            build_single_workspace_controller("com.flowmux.App.UiTest.StressMixedAcks").await;
 
         // The check we run after every dispatched command — the unread
         // count exposed to the dock must match the actual unread set.
@@ -6232,10 +6232,9 @@ mod tests {
         // Sequence a deliberately interleaved set of dispatches.
         let mut pushed = Vec::new();
         for i in 0usize..30 {
-            let id =
-                push_notification(&controller, Some(pane), Some(ws_id), &format!("x{i}"))
-                    .await
-                    .expect("push");
+            let id = push_notification(&controller, Some(pane), Some(ws_id), &format!("x{i}"))
+                .await
+                .expect("push");
             pushed.push(id);
             assert_invariant(&format!("after push {i}"));
 
@@ -6269,13 +6268,9 @@ mod tests {
                     // Popover open sweep mid-stream.
                     let ids = controller.notifications.mark_all_unread_read();
                     controller
-                        .dispatch(GtkCommand::CloseDesktopNotifications {
-                            desktop_ids: ids,
-                        })
+                        .dispatch(GtkCommand::CloseDesktopNotifications { desktop_ids: ids })
                         .await;
-                    controller
-                        .dispatch(GtkCommand::RefreshLauncherBadge)
-                        .await;
+                    controller.dispatch(GtkCommand::RefreshLauncherBadge).await;
                     assert_invariant(&format!("after popover sweep at i={i}"));
                 }
                 3 => {
@@ -6291,9 +6286,7 @@ mod tests {
                 _ => {
                     // Bare RefreshLauncherBadge — just exercise the
                     // coalescing path with no state change.
-                    controller
-                        .dispatch(GtkCommand::RefreshLauncherBadge)
-                        .await;
+                    controller.dispatch(GtkCommand::RefreshLauncherBadge).await;
                     assert_invariant(&format!("after bare refresh at i={i}"));
                 }
             }
@@ -6311,9 +6304,7 @@ mod tests {
                 desktop_ids: leftover,
             })
             .await;
-        controller
-            .dispatch(GtkCommand::RefreshLauncherBadge)
-            .await;
+        controller.dispatch(GtkCommand::RefreshLauncherBadge).await;
         assert_eq!(
             controller.notifications.unread_count(),
             0,
@@ -6333,19 +6324,15 @@ mod tests {
     /// drifts from the computed unread set.
     #[gtk::test]
     async fn stress_refresh_burst_is_safely_coalesced() {
-        let (controller, ws_id, pane) = build_single_workspace_controller(
-            "com.flowmux.App.UiTest.StressRefreshBurst",
-        )
-        .await;
+        let (controller, ws_id, pane) =
+            build_single_workspace_controller("com.flowmux.App.UiTest.StressRefreshBurst").await;
         push_notification(&controller, Some(pane), Some(ws_id), "x").await;
         // 100 back-to-back refresh commands. The publisher's internal
         // busy/dirty flag must coalesce these into "publish at most a
         // small fixed number of times" — but we don't peek at the
         // flags here; we only check the dispatcher itself stays sane.
         for _ in 0..100 {
-            controller
-                .dispatch(GtkCommand::RefreshLauncherBadge)
-                .await;
+            controller.dispatch(GtkCommand::RefreshLauncherBadge).await;
         }
         assert_eq!(
             controller.notifications.unread_count(),
@@ -6358,9 +6345,7 @@ mod tests {
             .dispatch(GtkCommand::ActivateWorkspace { id: ws_id })
             .await;
         for _ in 0..100 {
-            controller
-                .dispatch(GtkCommand::RefreshLauncherBadge)
-                .await;
+            controller.dispatch(GtkCommand::RefreshLauncherBadge).await;
         }
         assert_eq!(controller.notifications.unread_count(), 0);
     }

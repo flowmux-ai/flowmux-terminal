@@ -19,5 +19,5 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
-gtk = { package = "gtk4", version = "0.9", optional = true }
-vte = { package = "vte4", version = "0.8", optional = true }
+gtk = { package = "gtk4", version = "0.9", features = ["v4_6"], optional = true }
+vte = { package = "vte4", version = "0.8", features = ["v0_66"], optional = true }
