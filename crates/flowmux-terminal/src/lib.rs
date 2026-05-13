@@ -4,10 +4,12 @@
 //! flowmux renders panes through a [`TerminalBackend`] so we can swap
 //! implementations without touching the application or IPC layers:
 //!
-//! * `vte` (default) — the VTE 2.91 GTK4 widget used by GNOME Terminal,
-//!   Tilix, and Black Box. Mature, OSC sequences mostly handled.
-//! * `ghostty` (planned) — libghostty embedded into a GTK widget. Same
-//!   renderer cmux uses on macOS, for output parity.
+//! * `ghostty` (default) — the libghostty-oriented backend contract
+//!   used by flowmux's terminal model. It keeps process/PTY state out
+//!   of the GTK layer so the renderer can move to libghostty without
+//!   changing IPC or workspace code.
+//! * `vte` — compatibility registry for the current GTK/VTE widget
+//!   surface while Linux libghostty embedding remains in flux.
 //!
 //! See `docs/upstream-mapping/terminal.md` for the parity matrix.
 
@@ -78,7 +80,7 @@ pub fn agent_pty_env(
 }
 
 /// Convenience: collapse `[(k, v)]` env pairs into the `KEY=VALUE`
-/// strings expected by GLib / VTE `spawn_async` envv arrays.
+/// strings expected by terminal spawn APIs.
 pub fn env_to_kv_strings(env: &[(String, String)]) -> Vec<String> {
     env.iter().map(|(k, v)| format!("{k}={v}")).collect()
 }
@@ -228,11 +230,11 @@ mod tests {
         );
     }
 
-    /// Scenario: building the env we will pass to `vte_terminal_spawn_async`.
+    /// Scenario: building the env passed to terminal spawn APIs.
     /// Verifies the full pipeline (`agent_pty_env` → `env_to_kv_strings`)
     /// produces a valid envv array as VTE expects.
     #[test]
-    fn scenario_full_envv_array_is_well_formed_for_vte_spawn() {
+    fn scenario_full_envv_array_is_well_formed_for_terminal_spawn() {
         let pane = PaneId::new();
         let surface = SurfaceId::new();
         let ws = WorkspaceId::new();

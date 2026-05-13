@@ -841,15 +841,25 @@ mod tests {
 
     #[test]
     fn render_text_with_color_wraps_status_badges_in_sgr() {
-        let home = fake_home();
-        // Force a NeedsFix row so we exercise the red branch.
-        fs::create_dir_all(home.path().join(".claude")).unwrap();
-        let _lock = home_env_lock();
-        let _h = HomeOverride::set(home.path());
-        let report = collect_offline(home.path(), None);
+        let report = Report {
+            sections: vec![Section {
+                title: "Status colours".into(),
+                entries: vec![
+                    Entry {
+                        name: "installed row".into(),
+                        status: Status::Ok,
+                        detail: "ready".into(),
+                    },
+                    Entry {
+                        name: "repair row".into(),
+                        status: Status::NeedsFix,
+                        detail: "missing".into(),
+                    },
+                ],
+            }],
+        };
         let txt = render_text_with_color(&report, true);
-        // Green ok = 32, red fix = 31. At least one of each must be
-        // present given the staged scenario.
+        // Green ok = 32, red fix = 31.
         assert!(txt.contains("\x1b[32mok\x1b[0m"), "missing green ok: {txt}");
         assert!(txt.contains("\x1b[31mfix\x1b[0m"), "missing red fix: {txt}");
     }

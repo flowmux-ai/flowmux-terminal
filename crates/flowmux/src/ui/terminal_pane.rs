@@ -70,6 +70,30 @@ impl TerminalPane {
         }
         None
     }
+
+    pub fn root_widget(&self) -> gtk::Widget {
+        self.widget.clone().upcast::<gtk::Widget>()
+    }
+
+    pub fn grab_focus(&self) {
+        self.widget.grab_focus();
+    }
+
+    pub fn set_font_scale(&self, scale: f64) {
+        self.widget.set_font_scale(scale);
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.widget.has_selection()
+    }
+
+    pub fn copy_selection_to_clipboard(&self) {
+        self.widget.copy_clipboard_format(vte::Format::Text);
+    }
+
+    pub fn paste_clipboard(&self) {
+        self.widget.paste_clipboard();
+    }
 }
 
 fn uri_to_path(uri: &str) -> Option<PathBuf> {
@@ -364,6 +388,33 @@ impl TerminalPane {
 
     pub fn feed(&self, bytes: &[u8]) {
         self.widget.feed_child(bytes);
+    }
+
+    pub fn add_controller(&self, controller: impl IsA<gtk::EventController>) {
+        self.widget.add_controller(controller);
+    }
+
+    pub fn connect_current_dir_notify(
+        &self,
+        callback: impl Fn(&Self) + Clone + 'static,
+    ) -> glib::SignalHandlerId {
+        let pane = self.clone();
+        self.widget
+            .connect_current_directory_uri_notify(move |_| callback(&pane))
+    }
+
+    pub fn connect_title_notify(
+        &self,
+        callback: impl Fn(&Self, String) + Clone + 'static,
+    ) -> glib::SignalHandlerId {
+        let pane = self.clone();
+        self.widget.connect_window_title_notify(move |widget| {
+            let title = widget
+                .window_title()
+                .map(|t| t.to_string())
+                .unwrap_or_default();
+            callback(&pane, title);
+        })
     }
 }
 

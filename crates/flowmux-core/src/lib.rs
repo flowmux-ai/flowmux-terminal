@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-const TERMINAL_TAB_TITLE_MAX_CHARS: usize = 15;
+const TERMINAL_TAB_TITLE_MAX_CHARS: usize = 17;
 const FALLBACK_TERMINAL_TAB_TITLE: &str = "Terminal";
 
 pub fn terminal_tab_title_for_cwd(cwd: Option<&Path>) -> String {
@@ -1404,8 +1404,8 @@ mod tests {
             "project"
         );
         assert_eq!(
-            terminal_tab_title_for_cwd(Some(Path::new("/tmp/1234567890123456"))),
-            "123456789012345..."
+            terminal_tab_title_for_cwd(Some(Path::new("/tmp/1234567890123456789"))),
+            "12345678901234567..."
         );
         assert_eq!(terminal_tab_title_for_cwd(Some(Path::new("/"))), "Terminal");
     }

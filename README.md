@@ -80,7 +80,7 @@ flowmux/
 │   ├── flowmux-core/       Domain types: Workspace, Surface, Pane, Notification
 │   ├── flowmux-config/     cmux.json + ~/.config/ghostty/config readers
 │   ├── flowmux-state/      Persistent workspace/session state on disk
-│   ├── flowmux-terminal/   Terminal backend trait + vte4 / libghostty backends
+│   ├── flowmux-terminal/   libghostty-first terminal backend trait + VTE compatibility
 │   ├── flowmux-browser/    WebKitGTK 6.0 browser surface + scriptable refs
 │   ├── flowmux-cookies/    Browser cookie/session import (libsecret + sqlite)
 │   ├── flowmux-notify/     OSC 9/99/777 parser + libnotify D-Bus sender

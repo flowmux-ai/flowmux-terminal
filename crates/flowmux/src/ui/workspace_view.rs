@@ -18,7 +18,6 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use vte::prelude::*;
 use webkit6::prelude::*;
 
 #[derive(Default)]
@@ -1079,15 +1078,13 @@ fn build_panel(
             );
             theme.apply_to_vte(&pane.widget);
             // Start the new terminal widget with the current zoom option.
-            pane.widget
-                .set_font_scale((callbacks.read_options)().zoom_factor());
+            pane.set_font_scale((callbacks.read_options)().zoom_factor());
 
             {
                 let cb = callbacks.on_terminal_cwd_changed.clone();
-                let pane_for_cwd = pane.clone();
                 let surface_id = surface.id;
-                pane.widget.connect_current_directory_uri_notify(move |_| {
-                    if let Some(cwd) = pane_for_cwd.current_dir() {
+                pane.connect_current_dir_notify(move |pane| {
+                    if let Some(cwd) = pane.current_dir() {
                         (cb.borrow_mut())(pane_id, surface_id, cwd);
                     }
                 });
@@ -1099,22 +1096,15 @@ fn build_panel(
             {
                 let cb = callbacks.on_terminal_title_changed.clone();
                 let surface_id = surface.id;
-                let widget_for_title = pane.widget.clone();
-                widget_for_title
-                    .clone()
-                    .connect_window_title_notify(move |_| {
-                        let title = widget_for_title
-                            .window_title()
-                            .map(|t| t.to_string())
-                            .unwrap_or_default();
-                        tracing::debug!(
-                            %pane_id,
-                            %surface_id,
-                            title = %title,
-                            "VTE window-title notify"
-                        );
-                        (cb.borrow_mut())(pane_id, surface_id, title);
-                    });
+                pane.connect_title_notify(move |_pane, title| {
+                    tracing::debug!(
+                        %pane_id,
+                        %surface_id,
+                        title = %title,
+                        "terminal title notify"
+                    );
+                    (cb.borrow_mut())(pane_id, surface_id, title);
+                });
             }
 
             // Toggle the .focused class on frame focus enter/leave. theme.rs
@@ -1131,13 +1121,13 @@ fn build_panel(
             focus.connect_leave(move |_| {
                 frame_out.remove_css_class("focused");
             });
-            pane.widget.add_controller(focus);
+            pane.add_controller(focus);
 
             // The bare VTE widget is the pane's root — never wrap it in
             // a one-child layout container before inserting it into the
             // surface stack. See the doc comment on TerminalPane.widget
             // for why (Paned split sizing regression).
-            let widget = pane.widget.clone().upcast::<gtk::Widget>();
+            let widget = pane.root_widget();
             let mut r = registry.borrow_mut();
             r.terminals.insert(surface.id, pane);
             r.surface_workspace.insert(surface.id, workspace);

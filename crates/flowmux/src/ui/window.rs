@@ -25,7 +25,6 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::oneshot;
-use vte::prelude::*;
 use webkit6::prelude::*;
 
 #[derive(Clone)]
@@ -458,7 +457,7 @@ impl WindowController {
         glib::idle_add_local_once(move || {
             let r = registry.borrow();
             if let Some(term) = r.active_terminal(target) {
-                term.widget.grab_focus();
+                term.grab_focus();
             } else if let Some(browser) = r.active_browser(target) {
                 browser.web_view.grab_focus();
             }
@@ -605,7 +604,7 @@ impl WindowController {
                 glib::idle_add_local_once(move || {
                     let r = registry.borrow();
                     if let Some(term) = r.terminals.get(&surface_id) {
-                        term.widget.grab_focus();
+                        term.grab_focus();
                     } else if let Some(browser) = r.browsers.get(&surface_id) {
                         browser.web_view.grab_focus();
                     }
@@ -970,7 +969,7 @@ impl WindowController {
         glib::idle_add_local_once(move || {
             let r = registry.borrow();
             if let Some(term) = r.active_terminal(pane) {
-                term.widget.grab_focus();
+                term.grab_focus();
             } else if let Some(browser) = r.active_browser(pane) {
                 browser.web_view.grab_focus();
             } else {
@@ -992,7 +991,7 @@ impl WindowController {
         glib::idle_add_local_once(move || {
             let r = registry.borrow();
             if let Some(term) = r.active_terminal(leaf_id) {
-                term.widget.grab_focus();
+                term.grab_focus();
             } else if let Some(browser) = r.active_browser(leaf_id) {
                 browser.web_view.grab_focus();
             }
@@ -1041,7 +1040,7 @@ impl WindowController {
                     // Apply zoom immediately to all existing widgets.
                     let registry = registry.borrow();
                     for terminal in registry.terminals.values() {
-                        terminal.widget.set_font_scale(opts.zoom_factor());
+                        terminal.set_font_scale(opts.zoom_factor());
                     }
                     for browser in registry.browsers.values() {
                         browser.web_view.set_zoom_level(opts.zoom_factor());
@@ -1098,7 +1097,7 @@ impl WindowController {
                         glib::idle_add_local_once(move || {
                             let r = registry.borrow();
                             if let Some(term) = r.active_terminal(new_pane) {
-                                term.widget.grab_focus();
+                                term.grab_focus();
                             } else if let Some(browser) = r.active_browser(new_pane) {
                                 browser.web_view.grab_focus();
                             }
@@ -1215,7 +1214,7 @@ impl WindowController {
                 glib::idle_add_local_once(move || {
                     let r = registry.borrow();
                     if let Some(term) = r.terminals.get(&surface) {
-                        term.widget.grab_focus();
+                        term.grab_focus();
                     } else if let Some(browser) = r.browsers.get(&surface) {
                         browser.web_view.grab_focus();
                     }
@@ -2082,7 +2081,7 @@ impl WindowController {
             // Previously only active_terminal was tried, so browser panes could
             // not be reached with Alt+arrow.
             if let Some(term) = registry.active_terminal(id) {
-                term.widget.grab_focus();
+                term.grab_focus();
             } else if let Some(browser) = registry.active_browser(id) {
                 browser.web_view.grab_focus();
             } else {

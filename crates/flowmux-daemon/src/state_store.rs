@@ -1516,7 +1516,7 @@ mod tests {
         let pane = first_pane(&ws);
 
         store
-            .add_terminal_surface_to_pane(pane, Some("/tmp/1234567890123456".into()))
+            .add_terminal_surface_to_pane(pane, Some("/tmp/1234567890123456789".into()))
             .await
             .unwrap();
 
@@ -1532,7 +1532,7 @@ mod tests {
             .iter()
             .find(|surface| surface.id == *active)
             .expect("expected active surface");
-        assert_eq!(active.title, "123456789012345...");
+        assert_eq!(active.title, "12345678901234567...");
         assert!(!active.title_locked);
     }
 

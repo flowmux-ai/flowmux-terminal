@@ -19,13 +19,10 @@ use crate::bridge::{Bridge, FocusDir, GtkCommand, WsNav};
 use crate::ui::window::ClipboardToast;
 use adw::prelude::*;
 use flowmux_core::SplitDirection;
-use gtk::gio::prelude::*;
 use gtk::glib;
-use gtk::prelude::*;
 use std::cell::Cell;
 use std::rc::Rc;
 use tokio::sync::oneshot;
-use vte::prelude::*;
 
 /// Tracks which pane currently has keyboard focus so split / close /
 /// focus-direction shortcuts know where to operate.
@@ -92,7 +89,7 @@ pub fn install_accels(app: &adw::Application) {
     }
 }
 
-/// Pane registry handle so copy/paste can call into the focused VTE
+/// Pane registry handle so copy/paste can call into the focused
 /// terminal on the GTK main thread.
 pub type TerminalRegistry = Rc<std::cell::RefCell<crate::ui::workspace_view::PaneRegistry>>;
 
@@ -537,10 +534,10 @@ fn make_copy_action(
             // No selection means there is nothing to copy, and we want
             // to leave whatever is already on the clipboard untouched
             // (e.g. text the user copied from another app).
-            if !term.widget.has_selection() {
+            if !term.has_selection() {
                 return;
             }
-            term.widget.copy_clipboard_format(vte::Format::Text);
+            term.copy_selection_to_clipboard();
             clipboard_toast.show();
         })
         .build()
@@ -557,7 +554,7 @@ fn make_paste_action(
             let Some(term) = r.active_terminal(pane) else {
                 return;
             };
-            term.widget.paste_clipboard();
+            term.paste_clipboard();
         })
         .build()
 }

@@ -957,7 +957,7 @@ mod tests {
 
     /// Smoke test that row_widget can build a stable widget tree with a name
     /// and subtitle lines. Requires GTK init, so headless environments skip it.
-    #[test]
+    #[gtk::test]
     fn row_widget_builds_with_one_to_three_subtitle_lines() {
         if gtk::init().is_err() {
             return;
