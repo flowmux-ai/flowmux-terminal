@@ -1190,6 +1190,11 @@ mod tests {
 
     #[test]
     fn browser_open_with_right_is_vertical_split() {
+        let _g = flowmux_pane_env_lock();
+        unsafe {
+            std::env::remove_var("FLOWMUX_PANE_ID");
+        }
+
         let req = build_request(Cmd::Browser {
             url: "https://a.test".into(),
             right: true,
@@ -1208,6 +1213,11 @@ mod tests {
 
     #[test]
     fn browser_open_with_down_is_horizontal_split() {
+        let _g = flowmux_pane_env_lock();
+        unsafe {
+            std::env::remove_var("FLOWMUX_PANE_ID");
+        }
+
         let req = build_request(Cmd::Browser {
             url: "https://a.test".into(),
             right: false,

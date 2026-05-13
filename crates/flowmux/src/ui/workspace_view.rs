@@ -45,6 +45,14 @@ pub struct PaneRegistry {
     split_workspace: HashMap<PaneId, WorkspaceId>,
 }
 
+pub struct TornOffSurface {
+    pub pane: PaneId,
+    pub surface: SurfaceId,
+    pub title: String,
+    pub content: gtk::Widget,
+    pub focus: gtk::Widget,
+}
+
 impl PaneRegistry {
     pub fn active_terminal(&self, pane: PaneId) -> Option<&TerminalPane> {
         self.active_terminal_by_pane
@@ -330,6 +338,63 @@ impl PaneRegistry {
         if self.active_browser_by_pane.get(&pane) == Some(&surface) {
             self.active_browser_by_pane.remove(&pane);
         }
+    }
+
+    /// Remove one surface from its pane and return the live widget so it can be
+    /// re-parented into a standalone window. Unlike detach_surface_widget, this
+    /// preserves the surface panel instead of dropping it.
+    pub fn take_surface_for_tearoff(
+        &mut self,
+        pane: PaneId,
+        surface: SurfaceId,
+        fallback_title: &str,
+    ) -> Option<TornOffSurface> {
+        let stack = self.surface_stacks.get(&pane)?.clone();
+        let content = stack.child_by_name(&surface.to_string())?;
+        let title = self
+            .surface_tab_labels
+            .get(&surface)
+            .map(|label| label.text().to_string())
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_else(|| fallback_title.to_string());
+
+        if let Some(tabs) = self.surface_tabs.get_mut(&pane) {
+            if let Some(idx) = tabs.iter().position(|(id, _)| *id == surface) {
+                let (_, tab_widget) = tabs.remove(idx);
+                if let Some(parent) = tab_widget.parent() {
+                    if let Some(b) = parent.downcast_ref::<gtk::Box>() {
+                        b.remove(&tab_widget);
+                    } else {
+                        tab_widget.unparent();
+                    }
+                }
+            }
+        }
+        stack.remove(&content);
+
+        let focus = if let Some(terminal) = self.terminals.remove(&surface) {
+            terminal.root_widget()
+        } else if let Some(browser) = self.browsers.remove(&surface) {
+            browser.web_view.clone().upcast::<gtk::Widget>()
+        } else {
+            content.clone()
+        };
+        self.surface_tab_labels.remove(&surface);
+        self.surface_workspace.remove(&surface);
+        if self.active_terminal_by_pane.get(&pane) == Some(&surface) {
+            self.active_terminal_by_pane.remove(&pane);
+        }
+        if self.active_browser_by_pane.get(&pane) == Some(&surface) {
+            self.active_browser_by_pane.remove(&pane);
+        }
+
+        Some(TornOffSurface {
+            pane,
+            surface,
+            title,
+            content,
+            focus,
+        })
     }
 }
 
@@ -804,6 +869,47 @@ mod tab_dnd_tests {
     #[test]
     fn parse_tab_dnd_payload_rejects_plain_text() {
         assert!(parse_tab_dnd_payload("not a tab drag").is_err());
+    }
+
+    #[gtk::test]
+    fn take_surface_for_tearoff_moves_widget_out_of_source_pane() {
+        let pane = PaneId::new();
+        let surface = SurfaceId::new();
+        let workspace = WorkspaceId::new();
+        let stack = gtk::Stack::new();
+        let content = gtk::Label::new(Some("live content")).upcast::<gtk::Widget>();
+        stack.add_named(&content, Some(&surface.to_string()));
+
+        let tab_bar = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        let tab_widget = gtk::Button::new().upcast::<gtk::Widget>();
+        tab_bar.append(&tab_widget);
+        let label = gtk::Label::new(Some("dragged tab"));
+
+        let mut registry = PaneRegistry::default();
+        registry.surface_stacks.insert(pane, stack.clone());
+        registry
+            .surface_tabs
+            .insert(pane, vec![(surface, tab_widget.clone())]);
+        registry.pane_tab_containers.insert(pane, tab_bar);
+        registry.surface_tab_labels.insert(surface, label);
+        registry.surface_workspace.insert(surface, workspace);
+        registry.active_terminal_by_pane.insert(pane, surface);
+
+        let torn = registry
+            .take_surface_for_tearoff(pane, surface, "fallback")
+            .expect("surface widget should be detached for tear-off");
+
+        assert_eq!(torn.pane, pane);
+        assert_eq!(torn.surface, surface);
+        assert_eq!(torn.title, "dragged tab");
+        assert!(torn.content.parent().is_none());
+        assert!(torn.focus.parent().is_none());
+        assert!(stack.child_by_name(&surface.to_string()).is_none());
+        assert!(tab_widget.parent().is_none());
+        assert!(registry.surface_tabs.get(&pane).unwrap().is_empty());
+        assert!(registry.surface_tab_labels.get(&surface).is_none());
+        assert!(registry.surface_workspace.get(&surface).is_none());
+        assert!(registry.active_surface(pane).is_none());
     }
 }
 

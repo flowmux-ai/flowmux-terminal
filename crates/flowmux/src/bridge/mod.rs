@@ -170,6 +170,10 @@ pub enum GtkCommand {
         target_index: usize,
         ack: oneshot::Sender<Result<(), String>>,
     },
+    /// Tear a pane-local surface tab out into its own top-level window. The
+    /// existing GTK widget is moved, so the running terminal/browser state is
+    /// preserved and the source pane loses that tab.
+    TearOffSurface { pane: PaneId, surface: SurfaceId },
     /// VTE reported a cwd change for a terminal surface.
     TerminalCwdChanged {
         pane: PaneId,

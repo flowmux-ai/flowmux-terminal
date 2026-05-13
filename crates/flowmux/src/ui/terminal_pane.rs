@@ -160,7 +160,8 @@ pub struct PaneCallbacks {
     /// is the final 0-based index after the move, clamped if it exceeds length.
     pub on_reorder_surface: Rc<RefCell<dyn FnMut(PaneId, SurfaceId, usize)>>,
     /// A tab drag ended without landing on another tab drop target. The caller
-    /// opens a new top-level flowmux window, matching the Ctrl+Shift+N path.
+    /// moves that live surface into a new top-level window and removes it from
+    /// the source pane.
     pub on_tab_drag_to_new_window: Rc<RefCell<dyn FnMut(PaneId, SurfaceId)>>,
     /// Shared across all surface tabs in one window for the duration of a drag.
     /// The source tab uses this to distinguish a true no-target drag from a

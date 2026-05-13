@@ -13,7 +13,7 @@ use crate::ui::sidebar::Sidebar;
 use crate::ui::terminal_pane::PaneCallbacks;
 use crate::ui::workspace_view::{
     attach_surface_to_pane, build_surface, split_pane_incremental, IncrementalSplitOutcome,
-    PaneRegistry,
+    PaneRegistry, TornOffSurface,
 };
 use adw::prelude::*;
 use flowmux_core::{PaneId, PlacementStrategy, SplitDirection, SurfaceId, Workspace, WorkspaceId};
@@ -614,6 +614,92 @@ impl WindowController {
         }
         self.rerender_workspace(&ws);
         self.refresh_window_title().await;
+    }
+
+    fn present_torn_off_surface(&self, app: &gtk::Application, torn: TornOffSurface) {
+        let title = match torn.title.trim() {
+            "" => "flowmux".to_string(),
+            title => title.to_string(),
+        };
+        let window_title = format!("flowmux - {title}");
+        let toolbar = adw::ToolbarView::new();
+        toolbar.add_top_bar(&adw::HeaderBar::new());
+        toolbar.set_content(Some(&torn.content));
+
+        let window = adw::ApplicationWindow::builder()
+            .application(app)
+            .default_width(1000)
+            .default_height(700)
+            .icon_name(crate::APP_ID)
+            .title(&window_title)
+            .build();
+        window.set_content(Some(&toolbar));
+        window.present();
+
+        let focus = torn.focus.clone();
+        glib::idle_add_local_once(move || {
+            focus.grab_focus();
+        });
+        tracing::info!(
+            pane = %torn.pane,
+            surface = %torn.surface,
+            title = %title,
+            "tore tab off into standalone window"
+        );
+    }
+
+    async fn tear_off_surface(&self, pane: PaneId, surface: SurfaceId) {
+        let Some(app) = self.window.application() else {
+            tracing::warn!(%pane, %surface, "tab tear-off skipped: window has no application");
+            return;
+        };
+        let Some(title) = self.store.surface_title(pane, surface).await else {
+            tracing::warn!(%pane, %surface, "tab tear-off skipped: surface not found in store");
+            return;
+        };
+        let Some(torn) = self
+            .pane_registry
+            .borrow_mut()
+            .take_surface_for_tearoff(pane, surface, &title)
+        else {
+            tracing::warn!(%pane, %surface, "tab tear-off skipped: surface widget not found");
+            return;
+        };
+
+        self.present_torn_off_surface(&app, torn);
+        match self.store.close_surface(pane, surface).await {
+            None => {
+                tracing::warn!(
+                    %pane,
+                    %surface,
+                    "tab tear-off moved widget but store no longer had the surface"
+                );
+            }
+            Some(flowmux_daemon::CloseOutcome::WorkspaceRemoved { workspace }) => {
+                self.drop_workspace(workspace);
+                self.activate_active_or_show_empty().await;
+            }
+            Some(flowmux_daemon::CloseOutcome::SurfaceRemoved { workspace }) => {
+                if let Some(ws) = self.store.get_workspace(workspace).await {
+                    if let Some(active) = ws
+                        .surfaces
+                        .iter()
+                        .find_map(|s| s.root_pane.active_surface_id(pane))
+                    {
+                        self.pane_registry
+                            .borrow_mut()
+                            .activate_surface(pane, active);
+                    }
+                }
+                self.refresh_window_title().await;
+                self.sync_workspace_label(workspace).await;
+            }
+            Some(flowmux_daemon::CloseOutcome::PaneRemoved { workspace }) => {
+                self.apply_close_pane_incremental_or_rerender(workspace, pane)
+                    .await;
+                self.focus_after_close(workspace, pane).await;
+            }
+        }
     }
 
     /// Shared pane registry — exposed so the keybindings module can
@@ -1347,6 +1433,9 @@ impl WindowController {
                     );
                 }
                 let _ = ack.send(Ok(()));
+            }
+            GtkCommand::TearOffSurface { pane, surface } => {
+                self.tear_off_surface(pane, surface).await;
             }
             GtkCommand::TerminalCwdChanged { pane, surface, cwd } => {
                 let ws_id = self.update_terminal_cwd(pane, surface, cwd).await;
@@ -2550,37 +2639,19 @@ fn make_callbacks(
                 });
             }))
         },
-        on_tab_drag_to_new_window: Rc::new(RefCell::new(move |pane, surface| {
-            tracing::debug!(%pane, %surface, "tab drag requested new window");
-            let exe = match std::env::current_exe() {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "tab drag new-window: could not resolve current_exe()"
-                    );
-                    return;
-                }
-            };
-            match std::process::Command::new(&exe).spawn() {
-                Ok(child) => {
-                    tracing::info!(
-                        pid = child.id(),
-                        exe = %exe.display(),
-                        %pane,
-                        %surface,
-                        "tab drag spawned new flowmux window"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        exe = %exe.display(),
-                        "tab drag new-window: failed to spawn"
-                    );
-                }
-            }
-        })),
+        on_tab_drag_to_new_window: {
+            let bridge = bridge.clone();
+            Rc::new(RefCell::new(move |pane, surface| {
+                tracing::debug!(%pane, %surface, "tab drag requested tear-off window");
+                let bridge = bridge.clone();
+                glib::MainContext::default().spawn_local(async move {
+                    let _ = bridge
+                        .tx
+                        .send(GtkCommand::TearOffSurface { pane, surface })
+                        .await;
+                });
+            }))
+        },
         tab_drag_drop_seen: Rc::new(Cell::new(false)),
         on_terminal_cwd_changed: {
             let bridge = bridge.clone();
