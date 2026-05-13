@@ -1,17 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Terminal backend abstraction.
+//! Libghostty-oriented terminal backend abstraction.
 //!
-//! flowmux renders panes through a [`TerminalBackend`] so we can swap
-//! implementations without touching the application or IPC layers:
-//!
-//! * `ghostty` (default) — the libghostty-oriented backend contract
-//!   used by flowmux's terminal model. It keeps process/PTY state out
-//!   of the GTK layer so the renderer can move to libghostty without
-//!   changing IPC or workspace code.
-//! * `vte` — compatibility registry for the current GTK/VTE widget
-//!   surface while Linux libghostty embedding remains in flux.
-//!
-//! See `docs/upstream-mapping/terminal.md` for the parity matrix.
+//! flowmux keeps process/PTY state behind a [`TerminalBackend`] so the
+//! GTK layer can adopt libghostty rendering without changing IPC,
+//! workspace, or agent-environment plumbing.
 
 use flowmux_core::{PaneId, SurfaceId, WorkspaceId};
 use std::path::{Path, PathBuf};
@@ -22,9 +14,6 @@ pub enum TerminalError {
     Spawn(String),
     #[error("pane not found: {0}")]
     NotFound(PaneId),
-    #[cfg(feature = "vte")]
-    #[error("glib: {0}")]
-    Glib(String),
 }
 
 #[derive(Debug, Clone)]
@@ -140,11 +129,10 @@ pub trait TerminalBackend {
     fn close(&mut self, pane: PaneId) -> Result<(), TerminalError>;
 }
 
-#[cfg(feature = "vte")]
-pub mod vte_backend;
-
-#[cfg(feature = "ghostty")]
 pub mod ghostty_backend;
+pub mod key_modes;
+
+pub use key_modes::TerminalInputModes;
 
 #[cfg(test)]
 mod tests {
@@ -232,7 +220,7 @@ mod tests {
 
     /// Scenario: building the env passed to terminal spawn APIs.
     /// Verifies the full pipeline (`agent_pty_env` → `env_to_kv_strings`)
-    /// produces a valid envv array as VTE expects.
+    /// produces a valid envv array.
     #[test]
     fn scenario_full_envv_array_is_well_formed_for_terminal_spawn() {
         let pane = PaneId::new();

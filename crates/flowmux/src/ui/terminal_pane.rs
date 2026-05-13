@@ -646,14 +646,14 @@ fn install_shift_enter_newline_handling(term: &vte::Terminal) {
 /// application side.
 ///
 /// Approach: install a capture-phase `ShortcutController` on the
-/// VTE widget for the affected plain keys. When one matches we
-/// feed the equivalent terminal byte sequence straight to the PTY
-/// and consume the event so VTE's own IM-aware handler never sees
-/// it — exactly the path a plain key takes on a working host
-/// (IBus says "not for me", GTK passes the event through, VTE
-/// feeds the PTY). Letter / number / punctuation keys are not
-/// intercepted, so Korean composition itself still goes through
-/// IBus and preedit keeps working for character input.
+/// VTE widget for the affected plain keys. When one matches we feed
+/// a normal-mode terminal byte sequence straight to the PTY and
+/// consume the event so VTE's own IM-aware handler never sees it.
+/// `flowmuxctl pty-tee` observes smkx/rmkx on the terminal output
+/// side and rewrites cursor keys to application mode when foreground
+/// programs such as tig request it. Letter / number / punctuation
+/// keys are not intercepted, so Korean composition itself still goes
+/// through IBus and preedit keeps working for character input.
 ///
 /// What is intentionally **not** intercepted:
 ///   * Space. Its natural role inside IBus is "commit the current
@@ -703,10 +703,8 @@ fn install_flatpak_ibus_nav_workaround(term: &vte::Terminal) {
         controller.add_shortcut(gtk::Shortcut::new(Some(trigger), Some(action)));
     };
 
-    // Standard xterm encodings — same bytes VTE itself would write
-    // to the PTY when its key handler reached the forward-to-PTY
-    // branch on a working IM path. We are not changing semantics,
-    // only skipping the broken IBus round trip.
+    // Normal-mode xterm encodings. `flowmuxctl pty-tee` adjusts the
+    // cursor-key subset to application mode while DECCKM is active.
     bind(gtk::gdk::Key::BackSpace, b"\x7f");
     bind(gtk::gdk::Key::Delete, b"\x1b[3~");
     bind(gtk::gdk::Key::Tab, b"\t");

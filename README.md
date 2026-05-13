@@ -12,7 +12,9 @@
 
 ### A terminal for AI agent workflows, browser control, and task signals.
 
-flowmux is a Linux/GTK4 terminal with tabs and notifications for AI coding agents.
+flowmux is a Linux/GTK4 terminal for AI coding agents. Its terminal backend
+contract is libghostty-oriented, while the GTK app still uses an embeddable
+GTK terminal widget until libghostty exposes a stable Linux surface.
 
 > It is an unofficial GPL-3.0-or-later reimplementation inspired by [cmux](https://cmux.com/ko), a macOS/AppKit app, and is not affiliated with cmux.
   
@@ -80,7 +82,7 @@ flowmux/
 │   ├── flowmux-core/       Domain types: Workspace, Surface, Pane, Notification
 │   ├── flowmux-config/     cmux.json + ~/.config/ghostty/config readers
 │   ├── flowmux-state/      Persistent workspace/session state on disk
-│   ├── flowmux-terminal/   libghostty-first terminal backend trait + VTE compatibility
+│   ├── flowmux-terminal/   libghostty-oriented terminal backend + PTY env helpers
 │   ├── flowmux-browser/    WebKitGTK 6.0 browser surface + scriptable refs
 │   ├── flowmux-cookies/    Browser cookie/session import (libsecret + sqlite)
 │   ├── flowmux-notify/     OSC 9/99/777 parser + libnotify D-Bus sender
@@ -98,7 +100,7 @@ flowmux/
 └── NOTICE                 Copyright + attribution
 ```
 
-## Build prerequisites (Ubuntu 24.04+)
+## Build prerequisites (Ubuntu 24.04 native)
 
 ```bash
 sudo apt install \
@@ -110,26 +112,24 @@ sudo apt install \
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-### Ubuntu 22.04 (jammy) — install via Flatpak
+`flowmux-terminal` is the libghostty-oriented process/PTY contract. The GTK
+application still links `libvte-2.91-gtk4` for the current embeddable terminal
+widget, so the native GUI build needs the VTE development package for now.
 
-> **Heads-up:** Ubuntu < 24.04 is **not recommended**. The Flatpak
-> path below works as a fallback, but because the terminal pane runs
-> the sandbox's own shell, host-installed tools (`git`, `tig`, `vim`,
-> `htop`, …) are **not visible** from inside the pane — only what
-> ships in the GNOME Platform runtime is reachable. Attempts to
-> escape the sandbox via `flatpak-spawn --host` fail to inherit a
-> controlling terminal cleanly (kernel rejects `TIOCSCTTY` on the
-> forwarded PTY), so this is a fundamental Flatpak limitation rather
-> than a configuration issue. If you need full host-tool access,
-> upgrade to Ubuntu 24.04+ and use the native apt build above.
+### Ubuntu 22.04 (jammy) support
 
-The native apt build above needs GTK 4.12+ and `libwebkitgtk-6.0`,
-neither of which is in the 22.04 archive. On 22.04 the supported path
-is Flatpak: the GNOME 48 runtime brings GTK 4.18, libadwaita 1.8,
-libvte 0.78, and WebKitGTK 6.0 into the sandbox without touching the
-host system, so the same flowmux build runs unchanged. The matching
-`rust-stable//24.08` SDK extension ships a current Rust toolchain so
-the workspace's crate-level edition requirements are met.
+The current supported jammy path is Flatpak. Ubuntu 22.04 does not ship
+`libvte-2.91-gtk4-dev`, so an apt-only native GTK4 terminal build still
+needs either a separately provided GTK4 VTE build or the future
+libghostty renderer path that removes the VTE runtime dependency.
+
+The Flatpak build supplies a GTK4-capable VTE inside the GNOME runtime,
+while flowmux bridges the terminal shell back to the host with
+`flatpak-spawn --host`, so host tools such as `git`, `tig`, `vim`, and
+`htop` stay visible. The terminal input path tracks smkx/rmkx
+application cursor mode in `flowmuxctl pty-tee`, so ncurses tools such
+as `tig` receive the correct Up/Down key bytes even when the Ubuntu
+22.04 IBus workaround is active.
 
 ```bash
 # 1. Install Flatpak, flatpak-builder, and the Flathub remote
@@ -200,8 +200,8 @@ will be degraded unless gst-plugins-bad is installed.`
 ## Build
 
 ```bash
-# release build of the GUI app and the CLI helper
-cargo build --release -p flowmux -p flowmux-cli -p flowmux-core -p flowmux-daemon
+# release build of the full workspace
+cargo build --release --workspace
 ```
 
 The release profile produces two binaries under `target/release/`:

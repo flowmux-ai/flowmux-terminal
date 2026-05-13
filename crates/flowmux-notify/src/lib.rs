@@ -13,9 +13,6 @@
 //! * OSC 9    — iTerm2 single-line notification
 //! * OSC 99   — Konsole / KDE notification with options
 //! * OSC 777  — rxvt-unicode `notify;<summary>;<body>`
-//!
-//! See `docs/upstream-mapping/notifications.md` for the cmux behavioral
-//! spec we mirror (level inference, "Claude is waiting" detection, etc.).
 
 pub mod osc;
 pub mod sender;

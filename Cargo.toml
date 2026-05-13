@@ -7,6 +7,7 @@ members = ["crates/*"]
 default-members = [
     "crates/flowmux-core",
     "crates/flowmux-config",
+    "crates/flowmux-terminal",
     "crates/flowmux-notify",
     "crates/flowmux-ipc",
     "crates/flowmux-cli",

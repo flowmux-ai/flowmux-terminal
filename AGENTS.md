@@ -21,7 +21,7 @@ from the user and breaks parity with how flowmux is intended to be used.
 
 ```
 FLOWMUX_PANE_ID         <uuid>
-FLOWMUX_SURFACE_ID      <uuid>     (alias of FLOWMUX_PANE_ID)
+FLOWMUX_SURFACE_ID      <uuid>     (specific tab surface inside the pane)
 FLOWMUX_WORKSPACE_ID    <uuid>
 FLOWMUX_TAB_ID          <uuid>     (alias of FLOWMUX_WORKSPACE_ID)
 FLOWMUX_SOCKET_PATH     /run/user/.../flowmux.sock
@@ -116,4 +116,3 @@ the user can see what the agent is doing.
 - Skill: `.claude/skills/flowmux-browser/SKILL.md` (this same workflow,
   Claude Code's local format).
 - Project rules: [`CLAUDE.md`](CLAUDE.md).
-- Upstream tracking: [`docs/UPSTREAM.md`](docs/UPSTREAM.md).

@@ -5,20 +5,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "Terminal backend abstraction for flowmux. Backends: libghostty-first core, vte4 compatibility."
-
-[features]
-default = ["ghostty"]
-# Libghostty-oriented backend contract. The GTK renderer is still owned by
-# `flowmux` until libghostty exposes a stable embeddable GTK surface.
-ghostty = []
-vte = ["dep:gtk", "dep:vte"]
+description = "Libghostty-oriented terminal backend contract for flowmux."
 
 [dependencies]
 flowmux-core = { workspace = true }
-anyhow = { workspace = true }
 thiserror = { workspace = true }
-tracing = { workspace = true }
-
-gtk = { package = "gtk4", version = "0.9", optional = true }
-vte = { package = "vte4", version = "0.8", optional = true }

@@ -4,9 +4,6 @@
 //! Types here are deliberately backend-agnostic: they describe the shape
 //! of a workspace, a surface (terminal/browser pane), a notification, and
 //! the IPC verbs — not how any of them are rendered or executed.
-//!
-//! Mapping to cmux concepts is documented in
-//! `docs/upstream-mapping/domain-model.md`.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};

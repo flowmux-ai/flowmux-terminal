@@ -85,9 +85,8 @@ fn sanitize(s: &str) -> String {
         .to_string()
 }
 
-/// Heuristic level inference. cmux's documented behavior is that any
-/// agent message containing "waiting" / "input" promotes to attention.
-/// See docs/upstream-mapping/notifications.md.
+/// Heuristic level inference. Agent messages containing "waiting" /
+/// "input" promote to attention.
 fn infer_level(text: &str) -> NotificationLevel {
     let t = text.to_ascii_lowercase();
     if t.contains("error") || t.contains("failed") {

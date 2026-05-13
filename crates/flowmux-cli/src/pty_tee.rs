@@ -19,11 +19,13 @@
 //!                                                  +--> OscExtractor --> Request::Notify
 //! ```
 //!
-//! Bytes flow verbatim in both directions; the inner-to-outer half is
-//! also fed to `flowmux_notify::OscExtractor`, and any parsed OSC
-//! notification is forwarded to the daemon over the existing IPC
-//! socket. The shell's view (its `tty`, its termios, its environment)
-//! is unchanged from a direct VTE spawn.
+//! Bytes flow verbatim except for cursor-key normalization while a
+//! foreground TUI has enabled application cursor mode (`smkx` /
+//! DECCKM). The inner-to-outer half is also fed to
+//! `flowmux_notify::OscExtractor`, and any parsed OSC notification is
+//! forwarded to the daemon over the existing IPC socket. The shell's
+//! view (its `tty`, its termios, its environment) is unchanged from a
+//! direct VTE spawn.
 //!
 //! ## Why a separate process
 //!
@@ -38,6 +40,7 @@ use anyhow::{anyhow, Context};
 use flowmux_core::{NotificationLevel, PaneId, SurfaceId};
 use flowmux_ipc::{client::Client, protocol::Request};
 use flowmux_notify::{osc::parse_osc, OscExtractor};
+use flowmux_terminal::TerminalInputModes;
 use nix::libc;
 use nix::pty::{openpty, OpenptyResult};
 use nix::sys::signal::{self, SigHandler, Signal};
@@ -195,6 +198,7 @@ fn run_pty_pump(
     let mut extractor = OscExtractor::new(move |payload| {
         pending_for_cb.borrow_mut().push(payload.to_string());
     });
+    let mut input_modes = TerminalInputModes::default();
 
     // 7. Pump loop.
     let mut buf = [0u8; 8192];
@@ -261,7 +265,8 @@ fn run_pty_pump(
         if fds[0].revents & libc::POLLIN != 0 {
             match read_some(libc::STDIN_FILENO, &mut buf) {
                 ReadOutcome::Data(slice) => {
-                    if let Err(e) = write_all(master_fd, slice) {
+                    let input = input_modes.rewrite_input(slice);
+                    if let Err(e) = write_all(master_fd, input.as_ref()) {
                         tracing::warn!(error = %e, "write to inner master failed; exiting");
                         let _ = signal::kill(child_pid, Signal::SIGHUP);
                         drain_inner(master_fd, &mut extractor);
@@ -289,6 +294,7 @@ fn run_pty_pump(
         if fds[1].revents & libc::POLLIN != 0 {
             match read_some(master_fd, &mut buf) {
                 ReadOutcome::Data(slice) => {
+                    input_modes.observe_output(slice);
                     extractor.feed(slice);
                     if let Err(e) = write_all(libc::STDOUT_FILENO, slice) {
                         tracing::warn!(error = %e, "write to outer stdout failed; exiting");

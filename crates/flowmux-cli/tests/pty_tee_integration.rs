@@ -11,7 +11,7 @@
 //! This is the regression guard the user asked for after we discovered
 //! VTE 0.68 / 0.76 silently swallow these escapes.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -164,6 +164,80 @@ fn run_tee_with_osc(osc_payloads: &[&str]) -> Vec<String> {
     }
 
     envelopes
+}
+
+#[test]
+fn application_cursor_mode_rewrites_normal_up_arrow_for_tig() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let socket = tmp.path().join("flowmux.sock");
+    let _rx = spawn_fake_daemon(socket.clone());
+    let script = r#"
+import os, termios, tty
+
+fd = 0
+old = termios.tcgetattr(fd)
+tty.setraw(fd)
+try:
+    os.write(1, b'\x1b[?1h\x1b=READY\n')
+    data = os.read(0, 3)
+    os.write(1, b'KEY:' + data.hex().encode('ascii') + b'\n')
+finally:
+    termios.tcsetattr(fd, termios.TCSANOW, old)
+"#;
+
+    let mut cmd = Command::new(flowmuxctl_path());
+    cmd.arg("pty-tee")
+        .arg("--pane")
+        .arg("11111111-1111-1111-1111-111111111111")
+        .arg("--surface")
+        .arg("22222222-2222-2222-2222-222222222222")
+        .arg("--")
+        .arg("python3")
+        .arg("-c")
+        .arg(script)
+        .env("FLOWMUX_SOCKET_PATH", &socket)
+        .env("FLOWMUX_LOG", "off")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().expect("spawn flowmuxctl pty-tee");
+    let mut stdin = child.stdin.take().expect("pty-tee stdin");
+    let mut stdout = child.stdout.take().expect("pty-tee stdout");
+    let mut stderr = child.stderr.take().expect("pty-tee stderr");
+
+    let mut seen = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !seen.ends_with(b"READY\n") {
+        assert!(
+            Instant::now() < deadline,
+            "pty child did not announce READY; saw {seen:?}"
+        );
+        let mut byte = [0u8; 1];
+        stdout.read_exact(&mut byte).expect("read READY byte");
+        seen.push(byte[0]);
+    }
+
+    stdin
+        .write_all(b"\x1b[A")
+        .expect("send normal-mode Up arrow");
+
+    let mut rest = Vec::new();
+    stdout.read_to_end(&mut rest).expect("read pty output");
+    let status = child.wait().expect("wait pty-tee");
+    drop(stdin);
+    let mut stderr_text = String::new();
+    let _ = stderr.read_to_string(&mut stderr_text);
+    assert!(
+        status.success(),
+        "pty-tee failed with {status:?}; stderr: {stderr_text}"
+    );
+
+    let output = String::from_utf8_lossy(&rest);
+    assert!(
+        output.contains("KEY:1b4f41"),
+        "expected application-mode Up (ESC O A) after smkx, got output {output:?}"
+    );
 }
 
 #[test]

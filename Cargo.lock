@@ -1011,6 +1011,7 @@ dependencies = [
  "flowmux-core",
  "flowmux-ipc",
  "flowmux-notify",
+ "flowmux-terminal",
  "libc",
  "nix",
  "serde",
@@ -1152,12 +1153,8 @@ dependencies = [
 name = "flowmux-terminal"
 version = "0.2.5"
 dependencies = [
- "anyhow",
  "flowmux-core",
- "gtk4",
  "thiserror 1.0.69",
- "tracing",
- "vte4",
 ]
 
 [[package]]
