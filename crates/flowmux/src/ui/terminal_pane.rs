@@ -233,7 +233,7 @@ impl TerminalPane {
 
         let pid: Rc<Cell<Option<i32>>> = Rc::new(Cell::new(child_pid.map(|pid| pid.as_raw())));
 
-        let mut terminal = Terminal::new(TerminalOptions {
+        let terminal = Terminal::new(TerminalOptions {
             cols: DEFAULT_COLS,
             rows: DEFAULT_ROWS,
             max_scrollback: MAX_SCROLLBACK,
@@ -241,20 +241,6 @@ impl TerminalPane {
         .expect("libghostty terminal should initialize");
 
         let master_for_pty = master.as_raw_fd();
-        terminal
-            .on_pty_write(move |_term, data| {
-                write_fd(master_for_pty, data);
-            })
-            .expect("libghostty pty callback should install");
-
-        {
-            let cb = callbacks.on_bell.clone();
-            terminal
-                .on_bell(move |_term| {
-                    (cb.borrow_mut())(id);
-                })
-                .expect("libghostty bell callback should install");
-        }
 
         let state = TerminalState {
             terminal,
@@ -290,6 +276,30 @@ impl TerminalPane {
             title_handlers: RefCell::new(Vec::new()),
             cwd_handlers: RefCell::new(Vec::new()),
         });
+
+        // Register libghostty callbacks only after the Terminal lives at a
+        // stable heap address inside the Rc. libghostty-vt stores
+        // `&terminal.vtable` as the C-side userdata pointer; if we
+        // registered before this point the pointer would dangle as soon
+        // as Terminal was moved into TerminalState / RefCell / Rc, and
+        // the next pty-write or bell callback would dereference freed
+        // stack memory.
+        {
+            let mut state = runtime.state.borrow_mut();
+            state
+                .terminal
+                .on_pty_write(move |_term, data| {
+                    write_fd(master_for_pty, data);
+                })
+                .expect("libghostty pty callback should install");
+            let bell_cb = callbacks.on_bell.clone();
+            state
+                .terminal
+                .on_bell(move |_term| {
+                    (bell_cb.borrow_mut())(id);
+                })
+                .expect("libghostty bell callback should install");
+        }
 
         {
             let weak = Rc::downgrade(&runtime);
