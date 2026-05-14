@@ -26,6 +26,13 @@ modules:
     build-options:
       build-args:
         - --share=network
+      env:
+        # Use the pre-fetched ghostty checkout instead of cloning from
+        # github.com during the build (the build sandbox can't always
+        # reach github.com, and even when it can the clone is fragile).
+        # The commit must match GHOSTTY_COMMIT in libghostty-vt-sys's
+        # build.rs.
+        GHOSTTY_SOURCE_DIR: /run/build/flowmux/ghostty-src
     build-commands:
       - bash packaging/flatpak/bootstrap-toolchain.sh cargo build --release --manifest-path Cargo.toml -p flowmux -p flowmux-cli
       - install -Dm755 target/release/flowmux    /app/bin/flowmux
@@ -48,3 +55,12 @@ modules:
     sources:
       - type: dir
         path: ../..
+      # Pre-fetched ghostty source. Must match the GHOSTTY_COMMIT pin in
+      # libghostty-vt-sys 0.1.1's build.rs so cargo's checked-in
+      # bindings line up with the C ABI. flatpak-builder downloads
+      # this during its prepare phase (host network) so the in-sandbox
+      # build never needs github.com.
+      - type: git
+        url: https://github.com/ghostty-org/ghostty.git
+        commit: bebca84668947bfc92b9a30ed58712e1c34eee1d
+        dest: ghostty-src
