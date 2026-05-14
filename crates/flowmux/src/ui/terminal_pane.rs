@@ -781,23 +781,52 @@ fn snapshot_terminal(
         // for the row guarantees no later flush paints on top of an
         // already-rendered grapheme — the structural reason we now
         // use Snapshot rather than cairo's z-ordered command stream.
+        //
+        // Contiguous narrow cells sharing the same foreground color
+        // are merged into a single TextNode so one Pango shape +
+        // append_layout serves the whole run. Wide cells (CJK and
+        // similar) stay per-cell because batching them across cells
+        // would defeat the per-column anchoring that keeps the
+        // grapheme glyph aligned to the grid. Empty cells break the
+        // run — a hard break is cheaper than padding the layout text
+        // with trailing spaces and keeps cell positions exact.
+        let mut text_run: Option<(u16, gtk::gdk::RGBA, String)> = None;
         for info in &row_buf {
-            let Some(text) = info.text.as_ref() else {
+            if info.is_spacer_tail {
+                continue;
+            }
+            if info.span > 1 {
+                if let Some((start_x, fg, text)) = text_run.take() {
+                    flush_text_run(snapshot, &layout, &metrics, y, start_x, &fg, &text);
+                }
+                if let Some(text) = info.text.as_ref() {
+                    flush_text_run(snapshot, &layout, &metrics, y, info.x, &info.fg, text);
+                }
+                continue;
+            }
+            let Some(cell_text) = info.text.as_deref() else {
+                if let Some((start_x, fg, text)) = text_run.take() {
+                    flush_text_run(snapshot, &layout, &metrics, y, start_x, &fg, &text);
+                }
                 continue;
             };
-            layout.set_text(text);
-            // Align this layout's own baseline to the row baseline.
-            // Appending every layout from its own top-left would make
-            // fallback-font scripts like Hangul render with a visibly
-            // different baseline from monospace Latin because each
-            // font reports its own ascent.
-            let layout_baseline = layout.baseline() as f64 / gtk::pango::SCALE as f64;
-            let px = info.x as f64 * metrics.width;
-            let py = y as f64 * metrics.height + metrics.baseline - layout_baseline;
-            snapshot.save();
-            snapshot.translate(&graphene::Point::new(px as f32, py as f32));
-            snapshot.append_layout(&layout, &info.fg);
-            snapshot.restore();
+            match text_run.as_mut() {
+                Some((start_x, fg, buf))
+                    if *fg == info.fg
+                        && (*start_x as usize + buf.chars().count()) == info.x as usize =>
+                {
+                    buf.push_str(cell_text);
+                }
+                _ => {
+                    if let Some((start_x, fg, text)) = text_run.take() {
+                        flush_text_run(snapshot, &layout, &metrics, y, start_x, &fg, &text);
+                    }
+                    text_run = Some((info.x, info.fg, cell_text.to_string()));
+                }
+            }
+        }
+        if let Some((start_x, fg, text)) = text_run.take() {
+            flush_text_run(snapshot, &layout, &metrics, y, start_x, &fg, &text);
         }
 
         y = y.saturating_add(1);
@@ -2119,6 +2148,37 @@ struct RowCell {
     bg: gtk::gdk::RGBA,
     text: Option<String>,
     is_spacer_tail: bool,
+}
+
+/// Emit one TextNode for a run of cells starting at `start_x`. The
+/// caller batches contiguous narrow cells sharing the same foreground
+/// color so a row of ASCII characters becomes one Pango shape + one
+/// append_layout call instead of N. Wide cells call this directly
+/// with a single-cell run.
+fn flush_text_run(
+    snapshot: &gtk::Snapshot,
+    layout: &gtk::pango::Layout,
+    metrics: &CellMetrics,
+    y: u16,
+    start_x: u16,
+    fg: &gtk::gdk::RGBA,
+    text: &str,
+) {
+    if text.is_empty() {
+        return;
+    }
+    layout.set_text(text);
+    // Align the layout's own baseline to the row baseline. Appending
+    // every layout from its own top-left would make fallback-font
+    // scripts like Hangul render with a visibly different baseline
+    // from monospace Latin because each font reports its own ascent.
+    let layout_baseline = layout.baseline() as f64 / gtk::pango::SCALE as f64;
+    let px = start_x as f64 * metrics.width;
+    let py = y as f64 * metrics.height + metrics.baseline - layout_baseline;
+    snapshot.save();
+    snapshot.translate(&graphene::Point::new(px as f32, py as f32));
+    snapshot.append_layout(layout, fg);
+    snapshot.restore();
 }
 
 /// Append a ColorNode covering columns `start..end` on row `y` with
