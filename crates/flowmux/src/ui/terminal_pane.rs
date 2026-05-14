@@ -15,6 +15,10 @@ use libghostty_vt::key::{
     Action as KeyAction, Encoder as KeyEncoder, Event as KeyEvent, Key as GhosttyKey,
     Mods as GhosttyMods,
 };
+use libghostty_vt::mouse::{
+    Action as MouseAction, Button as MouseButton, Encoder as MouseEncoder,
+    EncoderSize as MouseEncoderSize, Event as MouseEvent, Position as MousePosition,
+};
 use libghostty_vt::render::{CellIterator, CursorVisualStyle, RenderState, RowIterator};
 use libghostty_vt::screen::{CellContentTag, CellWide};
 use libghostty_vt::style::{RgbColor, Style, StyleColor};
@@ -64,6 +68,13 @@ struct TerminalRuntime {
     /// state — see [`TerminalRuntime::refresh_scrollbar`].
     scroll_adjustment: gtk::Adjustment,
     im_context: gtk::IMMulticontext,
+    /// Single `pango::Layout` reused across every snapshot so heavy
+    /// TUIs (tig, opencode, vim, htop) avoid re-fetching the
+    /// PangoContext from the widget on every frame. Pango Layouts are
+    /// glib Objects; cloning shares the same instance via refcount,
+    /// which is what we want — the layout's font/text are mutated in
+    /// place between cells inside `snapshot_terminal`.
+    pango_layout: gtk::pango::Layout,
     master: OwnedFd,
     pid: Rc<Cell<Option<i32>>>,
     state: RefCell<TerminalState>,
@@ -77,6 +88,17 @@ struct TerminalState {
     terminal: Terminal<'static, 'static>,
     render: RenderState<'static>,
     key_encoder: KeyEncoder<'static>,
+    /// Lazy mouse-event encoder reused across all scroll/click events.
+    /// Allocating a new encoder per event would burn memory on every
+    /// scroll wheel notch; reusing keeps the hot path allocation-free.
+    mouse_encoder: MouseEncoder<'static>,
+    /// Pointer position in surface-space pixels. Updated by the motion
+    /// controller installed in `install_scroll_input` so the scroll
+    /// handler can place mouse-tracking wheel events at the right cell
+    /// when forwarding them to apps that opted into reporting (tig,
+    /// htop, opencode, fzf, …). The mouse encoder converts pixel
+    /// coordinates into protocol-specific cell coordinates internally.
+    pointer_px: (f32, f32),
     metrics: CellMetrics,
     visuals: TerminalVisuals,
     last_title: String,
@@ -261,6 +283,8 @@ impl TerminalPane {
             terminal,
             render: RenderState::new().expect("libghostty render state should initialize"),
             key_encoder: KeyEncoder::new().expect("libghostty key encoder should initialize"),
+            mouse_encoder: MouseEncoder::new().expect("libghostty mouse encoder should initialize"),
+            pointer_px: (0.0, 0.0),
             metrics: CellMetrics {
                 width: DEFAULT_CELL_WIDTH,
                 height: DEFAULT_CELL_HEIGHT,
@@ -278,6 +302,9 @@ impl TerminalPane {
 
         let im_context = gtk::IMMulticontext::new();
         im_context.set_use_preedit(true);
+
+        let pango_layout = widget.create_pango_layout(None::<&str>);
+        pango_layout.set_font_description(Some(&state.metrics.font));
 
         // Wrap the terminal surface in a `gtk::Overlay` so we can pin
         // a vertical scrollback scrollbar to the right edge without
@@ -312,6 +339,7 @@ impl TerminalPane {
             container: container.clone(),
             scroll_adjustment: scroll_adjustment.clone(),
             im_context: im_context.clone(),
+            pango_layout: pango_layout.clone(),
             master,
             pid: pid.clone(),
             state: RefCell::new(state),
@@ -511,12 +539,23 @@ impl TerminalRuntime {
             .configure(offset, 0.0, upper, 1.0, page, page);
     }
 
-    fn process_output(self: &Rc<Self>, bytes: &[u8]) {
+    /// Feed one PTY chunk into the VT state machine. Cheap hot path —
+    /// nothing here issues GTK redraws or fires title/pwd handlers, so
+    /// alt-screen TUIs that flood the PTY with many small chunks per
+    /// frame (tig, htop, vim) only pay for the libghostty parser per
+    /// chunk. Pair every call with a later [`Self::finalize_batch`]
+    /// that runs the post-batch work exactly once.
+    fn feed_bytes(self: &Rc<Self>, bytes: &[u8]) {
         let mut state = self.state.borrow_mut();
         state.terminal.vt_write(bytes);
-        // Compare title/pwd as &str first so heavy TUIs that never
-        // touch the window title (the common case for opencode, vim,
-        // less, …) avoid two String allocations per 8 KiB chunk.
+    }
+
+    /// Post-batch work after the io watch drains every available chunk:
+    /// check title/pwd transitions, fire registered handlers, and queue
+    /// one widget redraw. Title and pwd are compared as `&str` first so
+    /// the common case (no change) avoids any String allocation.
+    fn finalize_batch(self: &Rc<Self>) {
+        let mut state = self.state.borrow_mut();
         let title_str = state.terminal.title().unwrap_or_default();
         let title_changed = title_str != state.last_title;
         let new_title: Option<String> = if title_changed {
@@ -644,6 +683,11 @@ fn snapshot_terminal(
     let visuals = state.visuals.clone();
     let metrics = state.metrics.clone();
     let selection = state.selection;
+    // Reuse the cached layout instead of asking the widget for a new
+    // one every frame. The font description is refreshed in case it
+    // changed since the previous snapshot (zoom / theme switch).
+    let layout = runtime.pango_layout.clone();
+    layout.set_font_description(Some(&metrics.font));
 
     // Whole-widget background. The Snapshot pipeline does not auto-
     // clear because each frame is composited against the parent's
@@ -662,8 +706,6 @@ fn snapshot_terminal(
     let Ok(render_snapshot) = render.update(terminal) else {
         return;
     };
-    let layout = widget.create_pango_layout(None::<&str>);
-    layout.set_font_description(Some(&metrics.font));
 
     let mut row_iter = match RowIterator::new() {
         Ok(iter) => iter,
@@ -1198,12 +1240,45 @@ fn page_action_for_key(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> Opti
 }
 
 fn install_scroll_input(pane: &TerminalPane) {
+    // Pointer motion controller keeps `pointer_cell` in sync with the
+    // current cursor position so the scroll handler can forward
+    // mouse-tracking wheel events at the right grid coordinate. Apps
+    // like tig/htop/opencode enable mouse reporting and expect to see
+    // button-4/button-5 events at the pointer's cell.
+    let motion_weak = Rc::downgrade(&pane.runtime);
+    let motion = gtk::EventControllerMotion::new();
+    motion.connect_motion(move |_motion, x, y| {
+        let Some(runtime) = motion_weak.upgrade() else {
+            return;
+        };
+        let mut state = runtime.state.borrow_mut();
+        state.pointer_px = (x as f32, y as f32);
+    });
+    pane.widget.add_controller(motion);
+
     let weak = Rc::downgrade(&pane.runtime);
     let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
     scroll.connect_scroll(move |_scroll, _dx, dy| {
         let Some(runtime) = weak.upgrade() else {
             return glib::Propagation::Proceed;
         };
+        // Mouse-tracking apps (tig, htop, vim with `mouse=a`, opencode,
+        // fzf, …) toggle the terminal into a reporting mode where the
+        // wheel must be forwarded as a button-4/button-5 mouse event.
+        // Falling back to viewport scrollback in that mode breaks the
+        // app's own scroll bindings.
+        let mouse_tracking = runtime
+            .state
+            .borrow()
+            .terminal
+            .is_mouse_tracking()
+            .unwrap_or(false);
+        if mouse_tracking {
+            if let Some(bytes) = encode_wheel_event(&runtime, dy) {
+                runtime.write_child(&bytes);
+            }
+            return glib::Propagation::Stop;
+        }
         {
             let mut state = runtime.state.borrow_mut();
             let delta = if dy > 0.0 { 3 } else { -3 };
@@ -1214,6 +1289,57 @@ fn install_scroll_input(pane: &TerminalPane) {
         glib::Propagation::Stop
     });
     pane.widget.add_controller(scroll);
+}
+
+/// Encode a wheel notch into a mouse-tracking event so apps that
+/// turned on the reporting mode see button 4 (wheel up) or button 5
+/// (wheel down). Skips when the encoder fails or produces no bytes.
+fn encode_wheel_event(runtime: &Rc<TerminalRuntime>, dy: f64) -> Option<Vec<u8>> {
+    if dy == 0.0 {
+        return None;
+    }
+    let button = if dy < 0.0 {
+        MouseButton::Four
+    } else {
+        MouseButton::Five
+    };
+    let mut state = runtime.state.borrow_mut();
+    let (px, py) = state.pointer_px;
+    let cell_w = state.metrics.width.max(1.0) as u32;
+    let cell_h = state.metrics.height.max(1.0) as u32;
+    let cols = state.metrics.cols.max(1) as u32;
+    let rows = state.metrics.rows.max(1) as u32;
+    let size = MouseEncoderSize {
+        screen_width: cols * cell_w,
+        screen_height: rows * cell_h,
+        cell_width: cell_w,
+        cell_height: cell_h,
+        padding_top: 0,
+        padding_bottom: 0,
+        padding_right: 0,
+        padding_left: 0,
+    };
+    let TerminalState {
+        terminal,
+        mouse_encoder,
+        ..
+    } = &mut *state;
+    let mut event = MouseEvent::new().ok()?;
+    event
+        .set_action(MouseAction::Press)
+        .set_button(Some(button))
+        .set_mods(GhosttyMods::empty())
+        .set_position(MousePosition { x: px, y: py });
+    mouse_encoder
+        .set_options_from_terminal(terminal)
+        .set_size(size);
+    let mut out = Vec::with_capacity(16);
+    mouse_encoder.encode_to_vec(&event, &mut out).ok()?;
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 fn install_selection(pane: &TerminalPane) {
@@ -1320,28 +1446,32 @@ fn install_io_watch(pane: &TerminalPane, on_child_exited: Rc<RefCell<dyn FnMut(P
             let Some(runtime) = weak.upgrade() else {
                 return glib::ControlFlow::Break;
             };
-            // Pump every available chunk before yielding. Refresh the
-            // scrollbar exactly once per batch instead of after every
-            // 8 KiB read — TUIs like opencode flood the PTY with many
-            // short chunks per frame, and `terminal.scrollbar()` plus
-            // `gtk::Adjustment::configure` per chunk was the dominant
-            // cost of the io watch on that workload.
+            // Pump every available chunk before yielding. The hot
+            // path (`feed_bytes`) only forwards the bytes to the VT
+            // parser. Title/pwd detection, handler dispatch, queue
+            // redraw, and the scrollbar refresh all run once at the
+            // end of the batch — alt-screen TUIs like tig, vim, and
+            // opencode flood the PTY with many short chunks per
+            // frame, and doing those expensive steps per chunk was
+            // the dominant cost on slower hosts.
             let mut buf = [0u8; 8192];
             let mut received_any = false;
             loop {
                 match read_fd(fd, &mut buf) {
                     ReadResult::Data(n) => {
-                        runtime.process_output(&buf[..n]);
+                        runtime.feed_bytes(&buf[..n]);
                         received_any = true;
                     }
                     ReadResult::WouldBlock => {
                         if received_any {
+                            runtime.finalize_batch();
                             runtime.refresh_scrollbar();
                         }
                         return glib::ControlFlow::Continue;
                     }
                     ReadResult::Eof | ReadResult::Error => {
                         if received_any {
+                            runtime.finalize_batch();
                             runtime.refresh_scrollbar();
                         }
                         return glib::ControlFlow::Break;
