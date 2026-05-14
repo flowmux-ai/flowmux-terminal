@@ -565,16 +565,31 @@ fn draw_terminal(
 
             let px = x as f64 * metrics.width;
             let py = y as f64 * metrics.height;
-            if bg != visuals.bg {
+            // Wide cells (e.g. Hangul) span two columns: the head holds the
+            // grapheme and renders its glyph across both, the tail acts as
+            // a placeholder. Stretch the head's background fill across both
+            // columns and skip the tail's fill so the tail does not paint
+            // over the right half of the head's glyph.
+            let wide = raw.map(|c| c.wide().ok()).flatten();
+            let is_spacer_tail = matches!(wide, Some(CellWide::SpacerTail));
+            let cell_span = if matches!(wide, Some(CellWide::Wide)) {
+                2.0
+            } else {
+                1.0
+            };
+            if !is_spacer_tail && bg != visuals.bg {
                 set_source_rgba(cr, &bg);
-                cr.rectangle(px, py, metrics.width.ceil(), metrics.height.ceil());
+                cr.rectangle(
+                    px,
+                    py,
+                    (metrics.width * cell_span).ceil(),
+                    metrics.height.ceil(),
+                );
                 let _ = cr.fill();
             }
 
             let graphemes = cell.graphemes().unwrap_or_default();
-            if !graphemes.is_empty()
-                && raw.map(|c| c.wide().ok()) != Some(Some(CellWide::SpacerTail))
-            {
+            if !graphemes.is_empty() && !is_spacer_tail {
                 let text: String = graphemes.into_iter().collect();
                 layout.set_text(&text);
                 set_source_rgba(cr, &fg);
