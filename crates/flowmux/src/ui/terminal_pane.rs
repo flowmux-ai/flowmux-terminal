@@ -578,7 +578,14 @@ fn draw_terminal(
                 let text: String = graphemes.into_iter().collect();
                 layout.set_text(&text);
                 set_source_rgba(cr, &fg);
-                cr.move_to(px, py + (metrics.height - metrics.baseline).max(0.0) * 0.5);
+                // Align this layout's own baseline to the row baseline.
+                // Drawing every glyph from the layout's top-left makes
+                // fallback-font scripts like Hangul render with a
+                // visibly different baseline from monospace Latin
+                // because each font reports its own ascent.
+                let layout_baseline =
+                    layout.baseline() as f64 / gtk::pango::SCALE as f64;
+                cr.move_to(px, py + metrics.baseline - layout_baseline);
                 pangocairo::functions::show_layout(cr, &layout);
             }
             x = x.saturating_add(1);
