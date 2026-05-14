@@ -57,9 +57,27 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config \
-            libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev \
+            libgtk-4-dev libadwaita-1-dev \
             libwebkitgtk-6.0-dev libssl-dev \
             libssh2-1-dev libdbus-1-dev libsecret-1-dev
+
+      - name: Install Zig
+        # libghostty-vt-sys builds the embedded ghostty source with
+        # `zig build`, so the runner needs a Zig toolchain on PATH. The
+        # version is kept in lockstep with packaging/flatpak/bootstrap-
+        # toolchain.sh so local, Flatpak, and CI builds all compile the
+        # same ghostty revision against the same compiler.
+        env:
+          ZIG_VERSION: 0.15.2
+        run: |
+          set -euxo pipefail
+          tarball="zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          curl -L --fail "https://ziglang.org/download/${ZIG_VERSION}/${tarball}" \
+            -o /tmp/zig.tar.xz
+          sudo mkdir -p /opt/zig
+          sudo tar -C /opt/zig --strip-components=1 -xJf /tmp/zig.tar.xz
+          echo "/opt/zig" >> "$GITHUB_PATH"
+          /opt/zig/zig version
 
       - name: Install cargo-deb
         run: cargo install cargo-deb --locked
