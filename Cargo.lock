@@ -980,6 +980,7 @@ dependencies = [
  "libadwaita",
  "libc",
  "libghostty-vt",
+ "libghostty-vt-sys",
  "nix",
  "pangocairo",
  "serde_json",

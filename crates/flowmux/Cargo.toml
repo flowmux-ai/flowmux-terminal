@@ -65,4 +65,5 @@ webkit6 = "0.4"
 nix = { workspace = true }
 libc = { workspace = true }
 libghostty-vt = { workspace = true }
+libghostty-vt-sys = { workspace = true }
 pangocairo = "0.20"
