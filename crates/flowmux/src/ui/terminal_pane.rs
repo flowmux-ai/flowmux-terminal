@@ -456,7 +456,32 @@ impl TerminalPane {
 
 impl TerminalRuntime {
     fn write_child(&self, bytes: &[u8]) {
+        // Mirror common terminal behavior: any input destined for the
+        // PTY snaps the viewport back to the live cursor row, so users
+        // who scrolled up to inspect history are not silently typing
+        // off-screen. Skips when the viewport is already at the bottom
+        // to avoid a redundant redraw on every keystroke.
+        self.snap_viewport_to_bottom();
         write_fd(self.master.as_raw_fd(), bytes);
+    }
+
+    fn snap_viewport_to_bottom(&self) {
+        let already_at_bottom = {
+            let state = self.state.borrow();
+            match state.terminal.scrollbar() {
+                Ok(sb) => sb.offset + sb.len >= sb.total,
+                Err(_) => return,
+            }
+        };
+        if already_at_bottom {
+            return;
+        }
+        {
+            let mut state = self.state.borrow_mut();
+            state.terminal.scroll_viewport(ScrollViewport::Bottom);
+        }
+        self.widget.queue_draw();
+        self.refresh_scrollbar();
     }
 
     /// Resync the scrollbar adjustment from libghostty's current viewport.
