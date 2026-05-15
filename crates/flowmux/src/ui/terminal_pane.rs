@@ -475,9 +475,16 @@ impl TerminalPane {
         let layout = self.widget.create_pango_layout(Some("W"));
         let mut state = self.runtime.state.borrow_mut();
         layout.set_font_description(Some(&state.metrics.font));
-        let (w, h) = layout.pixel_size();
-        let width = (w.max(1) as f64).max(DEFAULT_CELL_WIDTH);
-        let height = (h.max(1) as f64).max(DEFAULT_CELL_HEIGHT);
+        // Read the layout's size in Pango units (1/1024 of a pixel) so
+        // the cell width keeps the font's actual advance with sub-pixel
+        // precision. `pixel_size()` rounds to whole pixels, which made
+        // text-run batching drift one fractional pixel per cell — the
+        // accumulated drift was visible as wider-than-expected gaps
+        // inside a run of characters.
+        let (w_units, h_units) = layout.size();
+        let scale = gtk::pango::SCALE as f64;
+        let width = (w_units as f64 / scale).max(DEFAULT_CELL_WIDTH);
+        let height = (h_units as f64 / scale).max(DEFAULT_CELL_HEIGHT);
         state.metrics.width = width;
         state.metrics.height = height;
         state.metrics.baseline = (height * 0.78).round();

@@ -90,6 +90,18 @@ fn main() -> anyhow::Result<()> {
         std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
     }
 
+    // GSK ships the new "ngl" renderer as its default on GTK 4.14+. On
+    // older Mesa stacks (notably the 22.04 host that Flatpak builds
+    // run against) ngl can fall back to software composition or spend
+    // significant time uploading textures per frame, which shows up as
+    // visible lag in TUIs that redraw a lot (tig, opencode, htop,
+    // vim with `mouse=a`). The classic "gl" renderer has been around
+    // since GTK 4.0 and runs smoothly on the same hosts. Pick it as a
+    // default unless the user has already chosen a renderer.
+    if std::env::var_os("GSK_RENDERER").is_none() {
+        std::env::set_var("GSK_RENDERER", "gl");
+    }
+
     // One socket per GUI process so several flowmux windows can run
     // side-by-side without their notifications crossing over. The
     // `FLOWMUX_SOCKET_PATH` env we inject into every PTY carries this
