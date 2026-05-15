@@ -668,6 +668,30 @@ fn install_shift_enter_newline_handling(term: &vte::Terminal) {
     term.add_controller(controller);
 }
 
+/// Force VTE's internal IMContext to commit any pending preedit text
+/// (e.g. a Hangul syllable still being composed) to the PTY before
+/// we inject a bypass byte. Without this, the 22.04 Flatpak IBus
+/// path emits the bypass byte ahead of the deferred preedit commit,
+/// so "안녕?" arrives at the foreground app as "안?녕".
+///
+/// VTE does not expose its IMContext, so the only public-API hook
+/// that triggers a commit is a focus cycle on the widget — the
+/// IMContext flushes preedit on focus-out by GTK convention. The
+/// cycle defocuses the parent window then immediately re-grabs
+/// focus on the terminal, which is fast enough to leave the cursor
+/// blink and selection state visually unchanged but does run the
+/// IMContext's commit handler in between.
+fn flush_pending_preedit(term: &vte::Terminal) {
+    let Some(root) = term.root() else {
+        return;
+    };
+    let Some(window) = root.dynamic_cast_ref::<gtk::Window>() else {
+        return;
+    };
+    gtk::prelude::GtkWindowExt::set_focus(window, gtk::Widget::NONE);
+    term.grab_focus();
+}
+
 /// Smart paging for PgUp / PgDn / Shift+PgUp / Shift+PgDn.
 ///
 /// VTE's default binding for plain PgUp/Dn is to send the cursor-key
@@ -807,6 +831,7 @@ fn install_flatpak_ibus_nav_workaround(term: &vte::Terminal) {
     let bind = |keyval: gtk::gdk::Key, bytes: &'static [u8]| {
         let term_widget = term.clone();
         let action = gtk::CallbackAction::new(move |_, _| {
+            flush_pending_preedit(&term_widget);
             term_widget.feed_child(bytes);
             glib::Propagation::Stop
         });
@@ -855,9 +880,16 @@ fn install_flatpak_ibus_nav_workaround(term: &vte::Terminal) {
     // foreground app receives it regardless of preedit state. The
     // shortcut trigger matches the exact modifier set, so
     // Ctrl/Alt-combined variants stay on the regular IM path.
+    //
+    // Before feeding the byte we cycle focus on the terminal so VTE's
+    // internal IMContext commits any pending Hangul preedit ("녕")
+    // ahead of the bypass byte ("?"). Without this the PTY ends up
+    // receiving "? 녕" instead of "녕 ?", and the user sees the symbol
+    // appear in front of the syllable.
     let bind_byte = |keyval: gtk::gdk::Key, mods: gtk::gdk::ModifierType, byte: u8| {
         let term_widget = term.clone();
         let action = gtk::CallbackAction::new(move |_, _| {
+            flush_pending_preedit(&term_widget);
             term_widget.feed_child(&[byte]);
             glib::Propagation::Stop
         });
@@ -952,6 +984,7 @@ fn install_flatpak_ibus_nav_workaround(term: &vte::Terminal) {
     let bind_bytes = |keyval: gtk::gdk::Key, mods: gtk::gdk::ModifierType, bytes: &'static [u8]| {
         let term_widget = term.clone();
         let action = gtk::CallbackAction::new(move |_, _| {
+            flush_pending_preedit(&term_widget);
             term_widget.feed_child(bytes);
             glib::Propagation::Stop
         });
