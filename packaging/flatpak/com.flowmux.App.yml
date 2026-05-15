@@ -21,10 +21,13 @@ finish-args:
   - --talk-name=org.freedesktop.Flatpak
 
 modules:
-  # Build VTE 0.80 from source. The GNOME 48 runtime ships a newer VTE,
-  # but pinning a known release keeps the GTK4 binding's `v0_70` feature
-  # set well within the runtime's available symbols even when the
-  # upstream runtime is bumped between flowmux releases.
+  # Build VTE 0.78 from source. VTE 0.80 added a hard dependency on
+  # the `fast_float` C++ library, which the GNOME 48 SDK does not
+  # ship as a system package; meson's fallback path then tries to
+  # `git clone` it from github inside the build sandbox where DNS is
+  # unavailable, and configuration aborts. 0.78 still exposes every
+  # symbol the rust binding's `v0_70` feature set needs (hyperlink
+  # match, regex match, scroll-on-keystroke, …) so we pin there.
   - name: vte
     buildsystem: meson
     config-opts:
@@ -46,7 +49,7 @@ modules:
     sources:
       - type: git
         url: https://gitlab.gnome.org/GNOME/vte.git
-        tag: '0.80.0'
+        tag: '0.78.4'
 
   - name: flowmux
     buildsystem: simple
