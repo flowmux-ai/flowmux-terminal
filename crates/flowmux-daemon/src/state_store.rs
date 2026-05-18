@@ -673,6 +673,48 @@ impl StateStore {
         None
     }
 
+    /// Find a leaf pane whose currently-active tab title starts with
+    /// `needle` (ASCII case-insensitive). Used by the Notify dispatcher
+    /// as a fallback when the hook source couldn't pass pane/surface
+    /// info — e.g. the Flatpak OpenCode plugin path, where `flatpak
+    /// run` resets env before the in-sandbox CLI can read
+    /// `FLOWMUX_PANE_ID`, so the hook-driven Notify arrives with
+    /// `pane=None`. Without recovery the daemon stores the entry with
+    /// no workspace, so the sidebar can't blink (`mark_attention`
+    /// needs a workspace id) and the bell click can't navigate
+    /// (`focus_pane` needs a pane id). With this lookup the daemon
+    /// rebuilds the routing context from the pane title flowmux
+    /// already tracks (e.g. the active tab in pane 86ff5134 has title
+    /// "OpenCode" once the agent attaches its PTY, which matches the
+    /// "OpenCode" prefix of the Notify's `title="OpenCode ready"`).
+    ///
+    /// Returns the first matching `(workspace, pane, surface)` tuple.
+    /// First-match policy is intentional: when only one pane runs the
+    /// agent the answer is unambiguous, and when several do, blinking
+    /// one of them still beats blinking none. We never invent
+    /// associations across workspaces — the candidate must actually
+    /// own a leaf whose active surface title matches.
+    pub async fn find_pane_by_active_title_prefix(
+        &self,
+        needle: &str,
+    ) -> Option<(WorkspaceId, PaneId, SurfaceId)> {
+        if needle.is_empty() {
+            return None;
+        }
+        let needle_lower = needle.to_ascii_lowercase();
+        let s = self.inner.lock().await;
+        for ws in &s.workspaces {
+            for surface in &ws.surfaces {
+                if let Some((pane_id, surface_id)) =
+                    find_active_title_prefix(&surface.root_pane, &needle_lower)
+                {
+                    return Some((ws.id, pane_id, surface_id));
+                }
+            }
+        }
+        None
+    }
+
     pub async fn get_workspace(&self, id: WorkspaceId) -> Option<Workspace> {
         let s = self.inner.lock().await;
         s.workspaces.iter().find(|w| w.id == id).cloned()
@@ -922,6 +964,28 @@ fn pane_tree_contains(tree: &Pane, target: PaneId) -> bool {
         Pane::Split { first, second, .. } => {
             pane_tree_contains(first, target) || pane_tree_contains(second, target)
         }
+    }
+}
+
+/// Walk the pane tree and return the first leaf whose currently
+/// active tab title (ASCII lowercased) starts with `needle_lower`.
+/// Returns `(pane_id, active_surface_id)`. Used by
+/// [`StateStore::find_pane_by_active_title_prefix`] as a fallback
+/// route for Notify events that arrive with no pane info.
+fn find_active_title_prefix(tree: &Pane, needle_lower: &str) -> Option<(PaneId, SurfaceId)> {
+    match tree {
+        Pane::Leaf { id, content } => match content {
+            PaneContent::Tabs { active, surfaces } => surfaces
+                .iter()
+                .find(|s| s.id == *active)
+                .filter(|s| s.title.to_ascii_lowercase().starts_with(needle_lower))
+                .map(|s| (*id, s.id)),
+            // Legacy leaf shapes carry no per-tab title; they should
+            // have been normalised on load, but stay defensive.
+            PaneContent::Terminal { .. } | PaneContent::Browser { .. } => None,
+        },
+        Pane::Split { first, second, .. } => find_active_title_prefix(first, needle_lower)
+            .or_else(|| find_active_title_prefix(second, needle_lower)),
     }
 }
 
@@ -2914,6 +2978,143 @@ mod tests {
         let snap = store.snapshot().await;
         assert_eq!(snap.workspaces.len(), 1);
         assert_eq!(snap.workspaces[0].id, id);
+    }
+
+    // --- Title-prefix fallback resolver -----------------------------
+    //
+    // Pins the Flatpak hook recovery path: when a Notify arrives with
+    // `pane=None surface=None` because the host->sandbox transition
+    // stripped FLOWMUX_PANE_ID, the daemon must rebuild the routing
+    // context by matching the notification title against the pane's
+    // active tab title (which flowmux flips to the agent name as
+    // soon as the agent attaches its PTY).
+
+    #[tokio::test]
+    async fn title_prefix_resolver_finds_pane_after_rename() {
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("demo".into()), std::path::PathBuf::from("/tmp/demo"))
+            .await;
+        let pane = first_pane(&store.get_workspace(ws_id).await.unwrap());
+        let surface = first_pane_active_surface(&store.get_workspace(ws_id).await.unwrap());
+        // workspace_view::terminal_title_notify renames the active
+        // surface to the agent name. Re-create that pre-condition here.
+        assert_eq!(
+            store
+                .rename_surface(pane, surface, "OpenCode".into())
+                .await,
+            Some(ws_id)
+        );
+
+        let hit = store
+            .find_pane_by_active_title_prefix("OpenCode")
+            .await
+            .expect("rename must make the pane discoverable by title");
+        assert_eq!(hit, (ws_id, pane, surface));
+    }
+
+    #[tokio::test]
+    async fn title_prefix_resolver_is_case_insensitive() {
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("demo".into()), std::path::PathBuf::from("/tmp/demo"))
+            .await;
+        let pane = first_pane(&store.get_workspace(ws_id).await.unwrap());
+        let surface = first_pane_active_surface(&store.get_workspace(ws_id).await.unwrap());
+        store
+            .rename_surface(pane, surface, "OPENCODE".into())
+            .await;
+
+        assert!(store
+            .find_pane_by_active_title_prefix("opencode")
+            .await
+            .is_some());
+        assert!(store
+            .find_pane_by_active_title_prefix("OPENcode")
+            .await
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn title_prefix_resolver_rejects_empty_needle() {
+        let store = StateStore::new_lazy(State::default());
+        let _ws_id = store
+            .create_workspace(Some("demo".into()), std::path::PathBuf::from("/tmp/demo"))
+            .await;
+        // A blank `title.split_whitespace().next()` must not collapse
+        // into an everything-matches starts_with on every leaf, or the
+        // daemon would attribute random Notifications to whatever pane
+        // happens to be first in the workspace list.
+        assert!(store.find_pane_by_active_title_prefix("").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn title_prefix_resolver_returns_none_when_no_pane_matches() {
+        let store = StateStore::new_lazy(State::default());
+        let _ws_id = store
+            .create_workspace(Some("demo".into()), std::path::PathBuf::from("/tmp/demo"))
+            .await;
+        // Title is the default "demo" — Notify("OpenCode ready")
+        // must not match it, even after the lowercasing.
+        assert!(store
+            .find_pane_by_active_title_prefix("OpenCode")
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn title_prefix_resolver_walks_split_pane_trees() {
+        // Split the workspace into two leaves, only one of which has
+        // the agent attached. The resolver must walk into the split
+        // tree (both halves) and pick the leaf whose active tab
+        // matches.
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("demo".into()), std::path::PathBuf::from("/tmp/demo"))
+            .await;
+        let original = first_pane(&store.get_workspace(ws_id).await.unwrap());
+        let (_, sibling) = store
+            .split_pane(original, SplitDirection::Vertical)
+            .await
+            .expect("split must succeed");
+
+        let original_surface = store
+            .get_workspace(ws_id)
+            .await
+            .unwrap()
+            .surfaces[0]
+            .root_pane
+            .active_surface_id(original)
+            .unwrap();
+        let sibling_surface = store
+            .get_workspace(ws_id)
+            .await
+            .unwrap()
+            .surfaces[0]
+            .root_pane
+            .active_surface_id(sibling)
+            .unwrap();
+
+        // Rename only the sibling pane's active tab. The resolver must
+        // skip `original` and land on `sibling`.
+        store
+            .rename_surface(sibling, sibling_surface, "OpenCode".into())
+            .await;
+        let hit = store
+            .find_pane_by_active_title_prefix("OpenCode")
+            .await
+            .unwrap();
+        assert_eq!(hit, (ws_id, sibling, sibling_surface));
+
+        // Sanity: `original` is still a valid pane and its active
+        // surface title is unchanged.
+        let original_ws = store.get_workspace(ws_id).await.unwrap();
+        assert_eq!(
+            original_ws.surfaces[0]
+                .root_pane
+                .surface_title(original, original_surface),
+            Some("demo")
+        );
     }
 
     /// Horizontal split (split_down) does not place the browser to the

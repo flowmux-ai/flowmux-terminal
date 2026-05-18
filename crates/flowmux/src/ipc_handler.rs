@@ -397,17 +397,51 @@ impl Handler for GuiHandler {
                     ref body,
                     level,
                 } => {
+                    // Try to recover pane/surface from the pane title
+                    // when the hook source could not pass them. The
+                    // Flatpak OpenCode plugin path is the trigger: the
+                    // host->sandbox transition strips env, so the
+                    // in-sandbox CLI cannot read FLOWMUX_PANE_ID and
+                    // the request lands with `pane=None surface=None`.
+                    // The pane that actually ran the agent already has
+                    // its tab title flipped to the agent name by
+                    // workspace_view's terminal title hook, so we can
+                    // resolve back to it by matching on the first
+                    // whitespace-delimited token of `title` (e.g.
+                    // "OpenCode" out of "OpenCode ready"). When both
+                    // pane and surface arrive as None, this fallback
+                    // is the only path that lets `mark_attention`
+                    // (sidebar blink) and `focus_pane` (bell-click
+                    // navigation) work for the Flatpak hook.
+                    let (resolved_pane, resolved_surface, fallback_used) =
+                        if pane.is_none() && surface.is_none() {
+                            let needle = title.split_whitespace().next().unwrap_or("");
+                            match self
+                                .inner
+                                .store()
+                                .find_pane_by_active_title_prefix(needle)
+                                .await
+                            {
+                                Some((_ws_id, p, s)) => (Some(p), Some(s), true),
+                                None => (pane, surface, false),
+                            }
+                        } else {
+                            (pane, surface, false)
+                        };
                     // Pre-resolve the workspace here so the GTK side
                     // can route the click without a second store
                     // lookup (the dispatcher still falls back to a
                     // late lookup if it sees `workspace = None`).
-                    let workspace = match pane {
+                    let workspace = match resolved_pane {
                         Some(p) => self.inner.store().workspace_for_pane(p).await,
                         None => None,
                     };
                     tracing::info!(
                         ?pane,
                         ?surface,
+                        resolved_pane = ?resolved_pane,
+                        resolved_surface = ?resolved_surface,
+                        fallback_used,
                         ?workspace,
                         title = %title,
                         ?level,
@@ -415,8 +449,10 @@ impl Handler for GuiHandler {
                     );
                     flowmux_config::notify_debug!(
                         "gui/ipc",
-                        "Notify received pane={pane:?} surface={surface:?} workspace={workspace:?} title={title:?} level={level:?}"
+                        "Notify received pane_in={pane:?} surface_in={surface:?} resolved_pane={resolved_pane:?} resolved_surface={resolved_surface:?} fallback_used={fallback_used} workspace={workspace:?} title={title:?} level={level:?}"
                     );
+                    let pane = resolved_pane;
+                    let surface = resolved_surface;
                     // Ask the GTK side to record the entry. The ack
                     // returns `None` when the source pane+surface is
                     // already focused — in that case we also skip the
