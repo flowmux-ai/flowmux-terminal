@@ -1830,13 +1830,20 @@ impl WindowController {
                 // cmux's `shouldSuppressExternalDelivery` policy: don't
                 // toast or grow the bell list for an event the user is
                 // literally watching.
+                let window_active = self.window.is_active();
+                let focused = self.focused_pane.get();
                 let suppress = self.is_source_focused(pane, surface);
+                tracing::info!(
+                    ?pane,
+                    ?surface,
+                    ?workspace,
+                    ?level,
+                    ?focused,
+                    window_active,
+                    suppress,
+                    "AddNotification: suppress decision"
+                );
                 if suppress {
-                    tracing::debug!(
-                        ?pane,
-                        ?surface,
-                        "notification suppressed: source pane+surface already focused"
-                    );
                     let _ = ack.send(None);
                     return;
                 }
@@ -1849,21 +1856,29 @@ impl WindowController {
                     // hook both fired for the same Stop event. Ack
                     // with None so the IPC handler also skips the
                     // desktop toast — one row, one toast per event.
-                    tracing::debug!(
+                    tracing::info!(
                         ?pane,
                         ?surface,
                         ?level,
-                        "notification deduplicated against recent entry"
+                        "AddNotification: deduplicated against recent entry — skipping both in-app and desktop"
                     );
                     let _ = ack.send(None);
                     return;
                 };
                 self.sidebar.bump_notification_badge();
+                let mut marked_attention = false;
                 if matches!(level, flowmux_core::NotificationLevel::AttentionNeeded) {
                     if let Some(ws_id) = workspace {
                         self.sidebar.mark_attention(ws_id);
+                        marked_attention = true;
                     }
                 }
+                tracing::info!(
+                    ?entry_id,
+                    marked_attention,
+                    workspace_known = workspace.is_some(),
+                    "AddNotification: in-app entry stored, badges updated"
+                );
                 self.refresh_launcher_badge();
                 let _ = ack.send(Some(entry_id));
             }

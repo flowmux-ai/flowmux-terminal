@@ -405,6 +405,14 @@ impl Handler for GuiHandler {
                         Some(p) => self.inner.store().workspace_for_pane(p).await,
                         None => None,
                     };
+                    tracing::info!(
+                        ?pane,
+                        ?surface,
+                        ?workspace,
+                        title = %title,
+                        ?level,
+                        "Notify request received — routing to GTK"
+                    );
                     // Ask the GTK side to record the entry. The ack
                     // returns `None` when the source pane+surface is
                     // already focused — in that case we also skip the
