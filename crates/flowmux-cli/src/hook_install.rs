@@ -857,11 +857,35 @@ import {{ spawn }} from "node:child_process";
 const FLOWMUX_BIN = {bin_literal};
 const FLOWMUX_ARGS_PREFIX = {trailing_literal};
 
+// Env vars flowmux's PTY exports so the in-sandbox CLI can attribute
+// a hook event to its source pane/surface. `flatpak run` resets env
+// to a minimal sandbox set, so without explicit forwarding the
+// re-entered flowmuxctl sees pane=None and the daemon's notification
+// arrives with no workspace context — the sidebar can't blink and
+// the bell click can't navigate. Forwarded as `--env=K=V` flags
+// inserted right after the `run` verb.
+const FLOWMUX_FORWARD_ENV = ["FLOWMUX_PANE_ID", "FLOWMUX_SURFACE_ID"];
+
+function buildSpawnArgs(event, payload) {{
+  const args = [...FLOWMUX_ARGS_PREFIX];
+  if (FLOWMUX_BIN === "flatpak") {{
+    const envFlags = [];
+    for (const k of FLOWMUX_FORWARD_ENV) {{
+      const v = process.env[k];
+      if (v) envFlags.push("--env=" + k + "=" + v);
+    }}
+    const runIdx = args.indexOf("run");
+    if (runIdx >= 0) args.splice(runIdx + 1, 0, ...envFlags);
+    else args.unshift(...envFlags);
+  }}
+  args.push("hooks", "opencode", event);
+  if (payload) args.push(payload);
+  return args;
+}}
+
 function fireFlowmuxHook(event, payload) {{
   try {{
-    const args = [...FLOWMUX_ARGS_PREFIX, "hooks", "opencode", event];
-    if (payload) args.push(payload);
-    spawn(FLOWMUX_BIN, args, {{
+    spawn(FLOWMUX_BIN, buildSpawnArgs(event, payload), {{
       stdio: "ignore",
       detached: true,
     }}).unref();
@@ -1236,6 +1260,29 @@ hooks = true
         // Must be an ESM module so OpenCode 1.14+ loads it.
         assert!(src.contains("import"));
         assert!(src.contains("export const server"));
+    }
+
+    #[test]
+    fn opencode_plugin_source_forwards_flowmux_env_across_flatpak_boundary() {
+        // `flatpak run` resets env to a minimal sandbox set, so without
+        // explicit `--env=K=V` flags the in-sandbox flowmuxctl loses
+        // FLOWMUX_PANE_ID / FLOWMUX_SURFACE_ID and the daemon receives
+        // a context-less Notify. Pin the JS-side forwarding so the
+        // sidebar workspace can mark attention and the bell click can
+        // navigate to the source pane.
+        let src = opencode_plugin_source_with_argv(&[
+            "flatpak".to_string(),
+            "run".to_string(),
+            "--command=flowmuxctl".to_string(),
+            "com.flowmux.App".to_string(),
+        ]);
+        assert!(src.contains("FLOWMUX_PANE_ID"));
+        assert!(src.contains("FLOWMUX_SURFACE_ID"));
+        assert!(src.contains("--env="));
+        assert!(src.contains("FLOWMUX_BIN === \"flatpak\""));
+        // Splice point must be just after the `run` verb so the
+        // `--env=` flags reach flatpak before the `--command=` switch.
+        assert!(src.contains("indexOf(\"run\")"));
     }
 
     #[test]
