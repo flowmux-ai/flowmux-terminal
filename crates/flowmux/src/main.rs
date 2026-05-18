@@ -109,6 +109,13 @@ fn main() -> anyhow::Result<()> {
     // back to the GUI that spawned them.
     let socket = paths::runtime_socket_for_pid(std::process::id());
     info!(?socket, "flowmux starting");
+    flowmux_config::notify_debug!(
+        "daemon/startup",
+        "binding socket={socket:?} flatpak={} HOME={:?} XDG_RUNTIME_DIR={:?}",
+        flowmux_config::paths::is_flatpak_sandbox(),
+        std::env::var_os("HOME"),
+        std::env::var_os("XDG_RUNTIME_DIR")
+    );
     // Make sure the parent directory exists. Inside Flatpak
     // `runtime_socket_for_pid` returns `$HOME/.cache/flowmux/…` which
     // is not auto-created by the runtime, so the IPC server's bind
@@ -116,6 +123,10 @@ fn main() -> anyhow::Result<()> {
     if let Some(parent) = socket.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
             tracing::warn!(error = %e, path = %parent.display(), "could not create socket parent dir");
+            flowmux_config::notify_debug!(
+                "daemon/startup",
+                "could not create socket parent dir {parent:?}: {e}"
+            );
         }
     }
     // Refresh the "current" socket pointer so a host-side process

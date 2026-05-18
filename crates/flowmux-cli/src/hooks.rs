@@ -13,7 +13,6 @@
 //! so we resolve the workspace eagerly via the daemon (already done by
 //! `Request::Notify`) and otherwise do minimal work.
 
-use anyhow::Context;
 use flowmux_core::{NotificationLevel, PaneId, SurfaceId};
 use flowmux_ipc::{
     client::Client,
@@ -21,6 +20,7 @@ use flowmux_ipc::{
 };
 use serde::{de::DeserializeOwned, Deserialize};
 use std::io::{IsTerminal, Read};
+use anyhow::Context;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
@@ -175,16 +175,32 @@ pub async fn send_best_effort(client: &Client, req: Request) {
 }
 
 async fn send_best_effort_with_timeout(client: &Client, req: Request, timeout: Duration) {
+    let summary = match &req {
+        Request::Notify {
+            pane,
+            surface,
+            title,
+            level,
+            ..
+        } => format!("Notify(title={title:?}, pane={pane:?}, surface={surface:?}, level={level:?})"),
+        other => format!("{other:?}"),
+    };
+    flowmux_config::notify_debug!("cli/hook", "sending {summary}");
     match tokio::time::timeout(timeout, client.call(req)).await {
         Ok(Ok(Response::Error(e))) => {
             tracing::debug!(?e, "hook notify rejected by daemon");
+            flowmux_config::notify_debug!("cli/hook", "daemon rejected: {e:?}");
         }
-        Ok(Ok(_)) => {}
+        Ok(Ok(resp)) => {
+            flowmux_config::notify_debug!("cli/hook", "daemon replied: {resp:?}");
+        }
         Ok(Err(e)) => {
             tracing::debug!(error = %e, "hook notify failed");
+            flowmux_config::notify_debug!("cli/hook", "rpc transport error: {e}");
         }
         Err(_) => {
             tracing::debug!(?timeout, "hook notify timed out");
+            flowmux_config::notify_debug!("cli/hook", "rpc timed out after {timeout:?}");
         }
     }
 }
@@ -198,23 +214,95 @@ pub async fn connect_daemon(socket: Option<PathBuf>) -> Option<Client> {
 }
 
 async fn connect_daemon_with_timeout(socket: Option<PathBuf>, timeout: Duration) -> Option<Client> {
-    let socket = socket
+    let env_socket = socket
         .or_else(|| std::env::var_os("FLOWMUX_SOCKET_PATH").map(PathBuf::from))
-        .or_else(|| std::env::var_os("FLOWMUX_SOCKET").map(PathBuf::from))
-        .unwrap_or_else(flowmux_config::paths::runtime_socket);
-    match tokio::time::timeout(timeout, Client::connect(&socket)).await {
-        Ok(Ok(c)) => Some(c),
+        .or_else(|| std::env::var_os("FLOWMUX_SOCKET").map(PathBuf::from));
+    let env_source = env_socket
+        .as_ref()
+        .map(|_| "FLOWMUX_SOCKET_PATH/env")
+        .unwrap_or("runtime_socket fallback");
+    let primary = env_socket.unwrap_or_else(flowmux_config::paths::runtime_socket);
+    flowmux_config::notify_debug!(
+        "cli/hook",
+        "connect_daemon: primary={primary:?} source={env_source} flatpak={} HOME={:?}",
+        flowmux_config::paths::is_flatpak_sandbox(),
+        std::env::var_os("HOME")
+    );
+
+    if let Some(client) = try_connect(&primary, timeout).await {
+        return Some(client);
+    }
+
+    // Fallback: a stale `current.sock` symlink, a never-written
+    // pointer, or an env that references a dead daemon all leave the
+    // primary attempt with ENOENT/ECONNREFUSED. Scan
+    // `$HOME/.cache/flowmux/flowmux-*.sock` for any per-PID socket
+    // an active daemon may have bound and try each. Outside Flatpak
+    // the same dir is still safe to scan (it is created on demand);
+    // it is just empty by default so the fallback is a no-op.
+    if let Some(candidates) = scan_pid_sockets() {
+        flowmux_config::notify_debug!(
+            "cli/hook",
+            "primary unreachable; scanning {} per-PID candidates",
+            candidates.len()
+        );
+        for path in candidates {
+            if path == primary {
+                continue;
+            }
+            if let Some(client) = try_connect(&path, timeout).await {
+                flowmux_config::notify_debug!(
+                    "cli/hook",
+                    "fallback connected via per-PID socket {path:?}"
+                );
+                return Some(client);
+            }
+        }
+    }
+    None
+}
+
+async fn try_connect(socket: &PathBuf, timeout: Duration) -> Option<Client> {
+    let exists = socket.exists();
+    flowmux_config::notify_debug!(
+        "cli/hook",
+        "try_connect path={socket:?} exists={exists}"
+    );
+    match tokio::time::timeout(timeout, Client::connect(socket)).await {
+        Ok(Ok(c)) => {
+            flowmux_config::notify_debug!("cli/hook", "connected to {socket:?}");
+            Some(c)
+        }
         Ok(Err(e)) => {
             let e = e.context(format!("connect daemon at {}", socket.display()));
             tracing::debug!(error = %e, "hook: daemon not reachable, skipping notify");
+            flowmux_config::notify_debug!("cli/hook", "connect error {socket:?}: {e}");
             None
         }
         Err(e) => {
             let e = anyhow::anyhow!("timed out after {:?}", e);
             tracing::debug!(error = %e, "hook: daemon not reachable, skipping notify");
+            flowmux_config::notify_debug!("cli/hook", "connect timeout {socket:?}: {e}");
             None
         }
     }
+}
+
+/// Enumerate `$HOME/.cache/flowmux/flowmux-*.sock` entries. Returns
+/// None when the dir does not exist; an empty list when the dir is
+/// there but contains no per-PID sockets.
+fn scan_pid_sockets() -> Option<Vec<PathBuf>> {
+    let dir = flowmux_config::paths::host_visible_cache_dir()?;
+    let entries = std::fs::read_dir(&dir).ok()?;
+    let mut out = Vec::new();
+    for e in entries.flatten() {
+        let name = e.file_name();
+        let name_s = name.to_string_lossy();
+        if name_s.starts_with("flowmux-") && name_s.ends_with(".sock") {
+            out.push(e.path());
+        }
+    }
+    Some(out)
 }
 
 #[cfg(test)]

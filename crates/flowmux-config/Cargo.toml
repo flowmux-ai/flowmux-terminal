@@ -11,6 +11,7 @@ description = "Config loaders for flowmux: cmux.json + ghostty config compatibil
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
+chrono = { workspace = true }
 dirs = { workspace = true }
 thiserror = { workspace = true }
 

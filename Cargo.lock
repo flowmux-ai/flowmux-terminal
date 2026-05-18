@@ -1030,6 +1030,7 @@ name = "flowmux-config"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "dirs",
  "serde",
  "serde_json",

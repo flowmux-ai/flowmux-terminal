@@ -392,7 +392,7 @@ enum ClaudeHookEvent {
     PromptSubmit,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 enum AgentHookEvent {
     /// Agent finished a turn. Trailing args carry an optional JSON
     /// payload — Codex's `notify` config delivers the event JSON this
@@ -685,7 +685,7 @@ fn build_request(cmd: Cmd) -> anyhow::Result<Request> {
 /// only touch user config files and never need the daemon. The runtime
 /// hook events (Claude/Codex/Opencode) talk to the daemon themselves.
 async fn run_hooks_op(op: &HooksOp, socket: Option<PathBuf>) -> anyhow::Result<()> {
-    use hook_install::{HookInstallStatus, HookTarget};
+    use hook_install::HookInstallStatus;
     match op {
         HooksOp::Setup { agent, flowmux_bin } => {
             let bin = flowmux_bin
@@ -712,17 +712,10 @@ async fn run_hooks_op(op: &HooksOp, socket: Option<PathBuf>) -> anyhow::Result<(
             Ok(())
         }
         HooksOp::Doctor => {
-            for t in HookTarget::ALL {
-                let label = match t {
-                    HookTarget::Claude => "claude",
-                    HookTarget::Codex => "codex",
-                    HookTarget::OpenCode => "opencode",
-                };
-                println!("{label:8}  (run `flowmux hooks setup` to install)");
-            }
-            // Doctor is intentionally minimal today; cmux's full doctor
-            // walks each marker and reports drift, which we can add
-            // once we have real-world drift to debug.
+            run_hooks_doctor(socket.clone()).await;
+            // The `let _` pin is intentional: it forces the compiler
+            // to keep the `HookInstallStatus` variants reachable so a
+            // future refactor cannot silently drop them.
             let _ = HookInstallStatus::Installed;
             Ok(())
         }
@@ -731,6 +724,115 @@ async fn run_hooks_op(op: &HooksOp, socket: Option<PathBuf>) -> anyhow::Result<(
         HooksOp::Opencode { event } => {
             run_generic_agent_hook_event("OpenCode", event, socket).await
         }
+    }
+}
+
+/// Full diagnostic dump that one command captures: sandbox state,
+/// resolved socket + connect outcome, per-agent install status, hook
+/// plugin checksums, and the tail of `notify-debug.log`. The single
+/// goal is "run this once on the failing host and paste the output."
+async fn run_hooks_doctor(socket: Option<PathBuf>) {
+    use hook_install::HookTarget;
+
+    println!("=== flowmux hooks doctor ===");
+
+    // 1. Sandbox + env
+    let sandbox = flowmux_config::paths::is_flatpak_sandbox();
+    println!(
+        "sandbox          : {} (FLATPAK_ID={:?})",
+        sandbox,
+        std::env::var_os("FLATPAK_ID")
+    );
+    println!("HOME             : {:?}", std::env::var_os("HOME"));
+    println!(
+        "XDG_RUNTIME_DIR  : {:?}",
+        std::env::var_os("XDG_RUNTIME_DIR")
+    );
+    println!(
+        "XDG_CONFIG_HOME  : {:?}",
+        std::env::var_os("XDG_CONFIG_HOME")
+    );
+
+    // 2. Socket resolution + reachability
+    let env_socket = socket
+        .clone()
+        .or_else(|| std::env::var_os("FLOWMUX_SOCKET_PATH").map(PathBuf::from))
+        .or_else(|| std::env::var_os("FLOWMUX_SOCKET").map(PathBuf::from));
+    let resolved = env_socket
+        .clone()
+        .unwrap_or_else(flowmux_config::paths::runtime_socket);
+    println!("socket primary   : {resolved:?} (source={})",
+        if env_socket.is_some() { "env" } else { "fallback" }
+    );
+    println!(
+        "  exists?        : {} symlink_target?={:?}",
+        resolved.exists(),
+        std::fs::read_link(&resolved).ok()
+    );
+
+    if let Some(cache) = flowmux_config::paths::host_visible_cache_dir() {
+        println!("cache dir        : {cache:?} exists={}", cache.exists());
+        if let Ok(entries) = std::fs::read_dir(&cache) {
+            for e in entries.flatten() {
+                let name = e.file_name();
+                let name_s = name.to_string_lossy();
+                if name_s.starts_with("flowmux-") && name_s.ends_with(".sock") {
+                    println!("  per-pid sock   : {:?}", e.path());
+                }
+            }
+        }
+    }
+
+    // Live connect probe through the same path the OpenCode plugin
+    // would take (envless, fallback resolver, scan included).
+    println!("daemon ping      : ...");
+    match hooks::connect_daemon(socket).await {
+        Some(client) => match client.call(flowmux_ipc::protocol::Request::Ping).await {
+            Ok(resp) => println!("  -> ok ({resp:?})"),
+            Err(e) => println!("  -> connected but rpc failed: {e}"),
+        },
+        None => println!("  -> UNREACHABLE (see notify-debug.log tail)"),
+    }
+
+    // 3. Per-agent install state
+    println!();
+    println!("--- agents ---");
+    for t in HookTarget::ALL {
+        let label = match t {
+            HookTarget::Claude => "claude",
+            HookTarget::Codex => "codex",
+            HookTarget::OpenCode => "opencode",
+        };
+        let entry = hook_install::check(*t);
+        println!("{label:8}  status={:?}", entry.status);
+        for p in &entry.paths {
+            let info = if p.exists() {
+                let len = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+                format!("exists len={len}B")
+            } else {
+                "missing".into()
+            };
+            println!("           {p:?} ({info})");
+        }
+    }
+
+    // 4. Tail the unified debug log
+    println!();
+    println!("--- notify-debug.log (last 60 lines) ---");
+    if let Some(log_path) = flowmux_config::debug_log::log_path() {
+        println!("path: {log_path:?}");
+        match std::fs::read_to_string(&log_path) {
+            Ok(body) => {
+                let lines: Vec<&str> = body.lines().collect();
+                let start = lines.len().saturating_sub(60);
+                for line in &lines[start..] {
+                    println!("  {line}");
+                }
+            }
+            Err(e) => println!("  (could not read: {e})"),
+        }
+    } else {
+        println!("  (no HOME — debug log disabled)");
     }
 }
 
@@ -815,6 +917,10 @@ async fn run_generic_agent_hook_event(
     use hooks::*;
     let pane = pane_from_env();
     let surface = surface_from_env();
+    flowmux_config::notify_debug!(
+        "cli/hook",
+        "entry agent={agent:?} event={event:?} pane={pane:?} surface={surface:?} socket_arg={socket:?}"
+    );
     let req = match event {
         AgentHookEvent::Stop { args } => {
             let input = read_codex_hook_input(args);
@@ -826,10 +932,21 @@ async fn run_generic_agent_hook_event(
             let msg = input.message.as_deref();
             build_notification_notify(agent, msg, pane, surface)
         }
-        AgentHookEvent::SessionStart { .. } => return Ok(()),
+        AgentHookEvent::SessionStart { .. } => {
+            flowmux_config::notify_debug!("cli/hook", "session-start: no-op, exiting");
+            return Ok(());
+        }
     };
-    if let Some(client) = hooks::connect_daemon(socket).await {
-        hooks::send_best_effort(&client, req).await;
+    match hooks::connect_daemon(socket).await {
+        Some(client) => {
+            hooks::send_best_effort(&client, req).await;
+        }
+        None => {
+            flowmux_config::notify_debug!(
+                "cli/hook",
+                "daemon not reachable — request dropped"
+            );
+        }
     }
     Ok(())
 }
