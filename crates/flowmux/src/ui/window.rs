@@ -1830,9 +1830,24 @@ impl WindowController {
                 // cmux's `shouldSuppressExternalDelivery` policy: don't
                 // toast or grow the bell list for an event the user is
                 // literally watching.
+                //
+                // Exception: AttentionNeeded (agent paused, waiting for
+                // the user) and Error notifications always pierce the
+                // suppression. "Same pane focused" is not the same as
+                // "user is reading right now" — they may have scrolled
+                // past the prompt, be on a different monitor, or have
+                // their eyes off the screen entirely. Silencing the
+                // bell for the only event class that exists to say
+                // "stop typing and look here" defeats its purpose.
                 let window_active = self.window.is_active();
                 let focused = self.focused_pane.get();
-                let suppress = self.is_source_focused(pane, surface);
+                let pierces_focus = matches!(
+                    level,
+                    flowmux_core::NotificationLevel::AttentionNeeded
+                        | flowmux_core::NotificationLevel::Error
+                );
+                let suppress =
+                    !pierces_focus && self.is_source_focused(pane, surface);
                 tracing::info!(
                     ?pane,
                     ?surface,
@@ -1840,12 +1855,13 @@ impl WindowController {
                     ?level,
                     ?focused,
                     window_active,
+                    pierces_focus,
                     suppress,
                     "AddNotification: suppress decision"
                 );
                 flowmux_config::notify_debug!(
                     "gui/add",
-                    "AddNotification pane={pane:?} surface={surface:?} workspace={workspace:?} level={level:?} focused={focused:?} window_active={window_active} suppress={suppress}"
+                    "AddNotification pane={pane:?} surface={surface:?} workspace={workspace:?} level={level:?} focused={focused:?} window_active={window_active} pierces_focus={pierces_focus} suppress={suppress}"
                 );
                 if suppress {
                     flowmux_config::notify_debug!(
