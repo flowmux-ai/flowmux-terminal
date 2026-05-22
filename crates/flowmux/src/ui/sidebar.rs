@@ -823,6 +823,25 @@ fn row_widget(
         });
         v.append(&show_btn);
 
+        // Copy the focused-pane text identifier — cwd for terminal,
+        // URL for browser — to the clipboard. The dispatcher routes
+        // based on the active surface kind, so one item covers both
+        // cases without forcing the user to pick.
+        let copy_btn = mk("Copy path");
+        let bridge_for_copy = bridge.clone();
+        let pop = popover.clone();
+        copy_btn.connect_clicked(move |_| {
+            pop.popdown();
+            let bridge = bridge_for_copy.clone();
+            gtk::glib::MainContext::default().spawn_local(async move {
+                let _ = bridge
+                    .tx
+                    .send(GtkCommand::CopyFocusedPaneText { workspace: id })
+                    .await;
+            });
+        });
+        v.append(&copy_btn);
+
         popover.set_child(Some(&v));
         popover.set_parent(&row_for_click);
         popover.set_has_arrow(false);

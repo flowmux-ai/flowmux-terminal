@@ -155,6 +155,11 @@ pub struct PaneCallbacks {
     /// terminal surface's current working directory. Only invoked from
     /// terminal tab popovers; browser tabs skip the menu entirely.
     pub on_show_surface_folder: Rc<RefCell<dyn FnMut(PaneId, SurfaceId)>>,
+    /// Per-surface "Copy path" / "Copy URL" handler. The dispatcher
+    /// reads the surface kind and copies cwd or URL accordingly, so
+    /// the same callback is reused by both terminal and browser
+    /// right-click menus.
+    pub on_copy_surface_text: Rc<RefCell<dyn FnMut(PaneId, SurfaceId)>>,
     /// Reorder a tab within the same pane by drag and drop. The third argument
     /// is the final 0-based index after the move, clamped if it exceeds length.
     pub on_reorder_surface: Rc<RefCell<dyn FnMut(PaneId, SurfaceId, usize)>>,
@@ -316,6 +321,8 @@ impl TerminalPane {
             let on_split_right = callbacks.on_split_right.clone();
             let on_split_down = callbacks.on_split_down.clone();
             let on_close_pane = callbacks.on_close_pane.clone();
+            let on_copy_text = callbacks.on_copy_surface_text.clone();
+            let surface_for_menu = surface;
             let id = id;
             let term_widget = term.clone();
             let click = gtk::GestureClick::new();
@@ -356,6 +363,17 @@ impl TerminalPane {
                     (cb.borrow_mut())(id);
                 });
                 v.append(&split_d);
+
+                v.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+
+                let copy_path = mk("Copy path");
+                let pop = popover.clone();
+                let cb = on_copy_text.clone();
+                copy_path.connect_clicked(move |_| {
+                    pop.popdown();
+                    (cb.borrow_mut())(id, surface_for_menu);
+                });
+                v.append(&copy_path);
 
                 v.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
 

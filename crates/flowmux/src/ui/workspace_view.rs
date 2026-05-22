@@ -853,17 +853,16 @@ fn build_surface_tab_widget(
         let surface_id = surface.id;
         close.connect_clicked(move |_| (cb.borrow_mut())(pane_id, surface_id));
     }
-    // Right-click on a terminal tab opens a small "Show in folder"
-    // menu. Browser tabs have no cwd to point at, so they don't get
-    // the menu at all (no empty popover with disabled items).
-    if matches!(surface.kind, SurfaceKind::Terminal { .. }) {
-        attach_tab_context_menu(&tab, pane_id, surface.id, callbacks);
-    }
+    // Right-click on a tab opens a small context menu. Terminal tabs
+    // get "Show in folder" + "Copy path"; browser tabs get just
+    // "Copy URL". Browser tabs have no cwd so "Show in folder" is
+    // intentionally absent rather than disabled.
+    attach_tab_context_menu(&tab, pane_id, surface, callbacks);
     attach_tab_dnd_handlers(&tab, pane_id, surface.id, callbacks);
     (tab, label)
 }
 
-/// Build the secondary-click popover used by terminal tabs. Mirrors the
+/// Build the secondary-click popover used by surface tabs. Mirrors the
 /// pattern used by `terminal_pane.rs` and `sidebar.rs`: plain `Popover`
 /// + `Button` rows whose `connect_clicked` closures route directly to
 /// the per-pane callbacks. PopoverMenu + `win.*` actions have been
@@ -871,33 +870,61 @@ fn build_surface_tab_widget(
 fn attach_tab_context_menu(
     tab: &gtk::Box,
     pane_id: PaneId,
-    surface_id: SurfaceId,
+    surface: &PaneSurface,
     callbacks: &PaneCallbacks,
 ) {
     let click = gtk::GestureClick::new();
     click.set_button(gtk::gdk::BUTTON_SECONDARY);
     let tab_for_click = tab.clone();
     let on_show = callbacks.on_show_surface_folder.clone();
+    let on_copy = callbacks.on_copy_surface_text.clone();
+    let surface_id = surface.id;
+    let is_terminal = matches!(surface.kind, SurfaceKind::Terminal { .. });
     click.connect_pressed(move |gesture, _n_press, x, y| {
         let popover = gtk::Popover::new();
         let v = gtk::Box::new(gtk::Orientation::Vertical, 0);
         v.set_margin_top(4);
         v.set_margin_bottom(4);
 
-        let show_btn = gtk::Button::with_label("Show in folder");
-        show_btn.add_css_class("flat");
-        show_btn.set_halign(gtk::Align::Fill);
-        show_btn.set_hexpand(true);
-        if let Some(label) = show_btn.child().and_downcast::<gtk::Label>() {
-            label.set_xalign(0.0);
+        let mk = |label: &str| -> gtk::Button {
+            let b = gtk::Button::with_label(label);
+            b.add_css_class("flat");
+            b.set_halign(gtk::Align::Fill);
+            b.set_hexpand(true);
+            if let Some(label) = b.child().and_downcast::<gtk::Label>() {
+                label.set_xalign(0.0);
+            }
+            b
+        };
+
+        if is_terminal {
+            let show_btn = mk("Show in folder");
+            let pop = popover.clone();
+            let cb = on_show.clone();
+            show_btn.connect_clicked(move |_| {
+                pop.popdown();
+                (cb.borrow_mut())(pane_id, surface_id);
+            });
+            v.append(&show_btn);
+
+            let copy_btn = mk("Copy path");
+            let pop = popover.clone();
+            let cb = on_copy.clone();
+            copy_btn.connect_clicked(move |_| {
+                pop.popdown();
+                (cb.borrow_mut())(pane_id, surface_id);
+            });
+            v.append(&copy_btn);
+        } else {
+            let copy_btn = mk("Copy URL");
+            let pop = popover.clone();
+            let cb = on_copy.clone();
+            copy_btn.connect_clicked(move |_| {
+                pop.popdown();
+                (cb.borrow_mut())(pane_id, surface_id);
+            });
+            v.append(&copy_btn);
         }
-        let pop = popover.clone();
-        let cb = on_show.clone();
-        show_btn.connect_clicked(move |_| {
-            pop.popdown();
-            (cb.borrow_mut())(pane_id, surface_id);
-        });
-        v.append(&show_btn);
 
         popover.set_child(Some(&v));
         popover.set_parent(&tab_for_click);

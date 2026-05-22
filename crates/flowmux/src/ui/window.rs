@@ -2039,6 +2039,71 @@ impl WindowController {
                     }
                 }
             }
+            GtkCommand::CopySurfaceText { pane, surface } => {
+                let text = {
+                    let r = self.pane_registry.borrow();
+                    if let Some(term) = r.terminals.get(&surface) {
+                        term.current_dir().map(|p| ("path", p.display().to_string()))
+                    } else {
+                        r.browsers
+                            .get(&surface)
+                            .map(|b| ("URL", b.current_url()))
+                            .filter(|(_, s)| !s.is_empty())
+                    }
+                };
+                match text {
+                    Some((kind, value)) => {
+                        self.window.clipboard().set_text(&value);
+                        self.clipboard_toast
+                            .show_with_message(&format!("Copied {kind}: {value}"));
+                    }
+                    None => {
+                        tracing::info!(%pane, %surface, "copy-surface-text: no path/url");
+                        self.clipboard_toast
+                            .show_with_message("Nothing to copy");
+                    }
+                }
+            }
+            GtkCommand::CopyFocusedPaneText { workspace } => {
+                let ws = self.store.get_workspace(workspace).await;
+                let Some(ws) = ws else {
+                    tracing::info!(%workspace, "copy-focused-pane-text: workspace not found");
+                    return;
+                };
+                let focused = self.focused_pane.get().filter(|p| {
+                    self.pane_registry.borrow().workspace_of_pane(*p) == Some(workspace)
+                });
+                let candidate_panes: Vec<PaneId> = focused
+                    .into_iter()
+                    .chain(
+                        ws.surfaces
+                            .first()
+                            .and_then(|s| s.root_pane.first_leaf_id()),
+                    )
+                    .collect();
+                let resolved = {
+                    let r = self.pane_registry.borrow();
+                    candidate_panes.iter().find_map(|p| {
+                        if let Some(term) = r.active_terminal(*p) {
+                            return term
+                                .current_dir()
+                                .map(|cwd| ("path", cwd.display().to_string()));
+                        }
+                        if let Some(browser) = r.active_browser(*p) {
+                            let url = browser.current_url();
+                            if !url.is_empty() {
+                                return Some(("URL", url));
+                            }
+                        }
+                        None
+                    })
+                };
+                let (kind, value) = resolved
+                    .unwrap_or_else(|| ("path", ws.root_dir.display().to_string()));
+                self.window.clipboard().set_text(&value);
+                self.clipboard_toast
+                    .show_with_message(&format!("Copied {kind}: {value}"));
+            }
             GtkCommand::ShowFocusedPaneFolder { workspace } => {
                 // Resolution order:
                 //   1. Globally focused pane, if it belongs to this workspace —
@@ -2945,6 +3010,18 @@ fn make_callbacks(
                     let _ = bridge
                         .tx
                         .send(GtkCommand::ShowSurfaceFolder { pane, surface })
+                        .await;
+                });
+            }))
+        },
+        on_copy_surface_text: {
+            let bridge = bridge.clone();
+            Rc::new(RefCell::new(move |pane, surface| {
+                let bridge = bridge.clone();
+                glib::MainContext::default().spawn_local(async move {
+                    let _ = bridge
+                        .tx
+                        .send(GtkCommand::CopySurfaceText { pane, surface })
                         .await;
                 });
             }))

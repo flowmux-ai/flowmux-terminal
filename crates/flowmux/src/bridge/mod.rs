@@ -359,6 +359,18 @@ pub enum GtkCommand {
     /// by the pane tab right-click "Show in folder" item. Only meaningful
     /// for terminal surfaces; the caller skips browser tabs before sending.
     ShowSurfaceFolder { pane: PaneId, surface: SurfaceId },
+    /// Copy a single surface's text identifier to the clipboard — the
+    /// cwd for terminal surfaces, the current URL for browser surfaces.
+    /// Fired by per-pane and per-tab "Copy path" / "Copy URL"
+    /// right-click items. The dispatcher resolves which one based on
+    /// the surface kind so the caller does not need to branch.
+    CopySurfaceText { pane: PaneId, surface: SurfaceId },
+    /// Copy the workspace's currently-focused pane's text identifier
+    /// (terminal cwd or browser URL) to the clipboard. Used by the
+    /// sidebar workspace right-click "Copy path" item; uses the same
+    /// focused-pane → first-leaf-pane → workspace.root_dir resolution
+    /// as ShowFocusedPaneFolder.
+    CopyFocusedPaneText { workspace: WorkspaceId },
 }
 
 #[derive(Clone)]
