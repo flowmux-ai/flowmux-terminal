@@ -11,3 +11,13 @@ Categories=System;TerminalEmulator;Utility;Development;
 Keywords=terminal;tabs;agent;claude;codex;
 StartupWMClass=com.flowmux.App
 StartupNotify=true
+# Dock / app-launcher right-click menu entries.
+# Each id below must have a matching [Desktop Action <id>] group.
+Actions=new-window;
+
+[Desktop Action new-window]
+Name=New Window
+# `flowmux` with no arguments boots the GUI; build_application() sets
+# `ApplicationFlags::NON_UNIQUE`, so each launch is its own OS process
+# and its own window. No new flag is needed.
+Exec=flowmux
