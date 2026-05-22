@@ -163,6 +163,13 @@ impl BrowserPane {
         let address = gtk::Entry::new();
         address.set_hexpand(true);
         address.set_placeholder_text(Some("Enter URL — e.g. http://localhost:3000"));
+        // Tool icon on the right side of the URL bar opens the WebKit
+        // Web Inspector as a detached (separate-window) popup.
+        // applications-utilities-symbolic ships with Adwaita and reads
+        // as a "toolbox / dev tools" glyph in both light and dark.
+        let inspector = gtk::Button::from_icon_name("applications-utilities-symbolic");
+        inspector.add_css_class("flat");
+        inspector.set_tooltip_text(Some("Open Web Inspector"));
 
         let chrome = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         chrome.set_margin_top(4);
@@ -173,6 +180,7 @@ impl BrowserPane {
         chrome.append(&forward);
         chrome.append(&reload);
         chrome.append(&address);
+        chrome.append(&inspector);
 
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.set_hexpand(true);
@@ -200,6 +208,17 @@ impl BrowserPane {
         {
             let v = web_view.clone();
             reload.connect_clicked(move |_| v.reload());
+        }
+        {
+            let v = web_view.clone();
+            inspector.connect_clicked(move |_| {
+                if let Some(insp) = v.inspector() {
+                    insp.show();
+                    insp.detach();
+                } else {
+                    tracing::warn!("WebKit Web Inspector not available on this build");
+                }
+            });
         }
         {
             let v = web_view.clone();
