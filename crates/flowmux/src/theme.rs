@@ -260,6 +260,33 @@ paned > separator {{
 .navigation-sidebar row label.caption {{
     color: {fg};
 }}
+/* Suppress libadwaita selected-row tint on workspace rows. The ListBox
+   keeps SelectionMode::Single so navigation helpers can read
+   selected_workspace(), but flowmux does not paint active-workspace
+   as a separate visual state — focus and .flowmux-attention are the
+   only highlights users see. libadwaita ships rules whose selectors
+   include row.activatable plus :selected combined with :hover, :active,
+   .has-open-popup, and a child-combinator variant with a 1px inset
+   box-shadow border. Plain row:selected loses on specificity, so each
+   variant is matched explicitly with .activatable below and the inset
+   border is cleared too. */
+.navigation-sidebar row.activatable:selected,
+.navigation-sidebar row.activatable:selected:hover,
+.navigation-sidebar row.activatable:selected:focus,
+.navigation-sidebar row.activatable:selected:active,
+.navigation-sidebar row.activatable:selected.has-open-popup,
+.navigation-sidebar > row.activatable:selected,
+.navigation-sidebar > row.activatable:selected:hover,
+.navigation-sidebar > row.activatable:selected:active,
+.navigation-sidebar > row.activatable:selected.has-open-popup {{
+    background-color: transparent;
+    box-shadow: none;
+}}
+.navigation-sidebar row.activatable:selected label,
+.navigation-sidebar row.activatable:selected label.heading,
+.navigation-sidebar row.activatable:selected label.caption {{
+    color: {fg};
+}}
 .navigation-sidebar row.flowmux-attention {{
     background-color: rgba(245, 158, 11, 0.18);
     box-shadow: inset 3px 0 0 rgba(245, 158, 11, 0.85);
