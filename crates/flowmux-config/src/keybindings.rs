@@ -65,6 +65,9 @@ pub enum ActionId {
     NewBrowserSurface,
     NewWorkspace,
     NewWindow,
+    /// Copy the focused pane's current working directory to the system
+    /// clipboard and surface a toast confirming what was copied.
+    CopyPanePath,
 }
 
 impl ActionId {
@@ -96,6 +99,7 @@ impl ActionId {
             Self::NewBrowserSurface => "new-browser-surface",
             Self::NewWorkspace => "new-workspace",
             Self::NewWindow => "new-window",
+            Self::CopyPanePath => "copy-pane-path",
         }
     }
 
@@ -128,6 +132,7 @@ impl ActionId {
             Self::NewBrowserSurface => "New browser tab",
             Self::NewWorkspace => "New workspace",
             Self::NewWindow => "New window",
+            Self::CopyPanePath => "Copy focused pane path",
         }
     }
 
@@ -163,6 +168,7 @@ impl ActionId {
             Self::NewBrowserSurface,
             Self::NewWorkspace,
             Self::NewWindow,
+            Self::CopyPanePath,
         ]
     }
 
@@ -220,6 +226,7 @@ const DEFAULTS: &[(ActionId, &[&str])] = &[
     (ActionId::NewBrowserSurface, &["<Ctrl><Shift>b"]),
     (ActionId::NewWorkspace, &["<Ctrl>n"]),
     (ActionId::NewWindow, &["<Ctrl><Shift>n"]),
+    (ActionId::CopyPanePath, &["<Ctrl><Shift>k"]),
 ];
 
 /// Built-in default accelerators. The first install path reads this and

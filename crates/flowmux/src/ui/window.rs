@@ -3320,12 +3320,15 @@ fn show_color_dialog(
 #[derive(Clone)]
 pub struct ClipboardToast {
     revealer: gtk::Revealer,
+    label: gtk::Label,
     generation: Rc<Cell<u64>>,
 }
 
 impl ClipboardToast {
+    pub const DEFAULT_MESSAGE: &'static str = "Copied to clipboard";
+
     pub fn new() -> Self {
-        let label = gtk::Label::new(Some("Copied to clipboard"));
+        let label = gtk::Label::new(Some(Self::DEFAULT_MESSAGE));
         label.set_xalign(0.5);
 
         let toast = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -3345,6 +3348,7 @@ impl ClipboardToast {
 
         Self {
             revealer,
+            label,
             generation: Rc::new(Cell::new(0)),
         }
     }
@@ -3353,7 +3357,15 @@ impl ClipboardToast {
         &self.revealer
     }
 
+    /// Show the toast with the default "Copied to clipboard" message.
     pub fn show(&self) {
+        self.show_with_message(Self::DEFAULT_MESSAGE);
+    }
+
+    /// Show the toast with a caller-supplied message. Used by the
+    /// "copy pane path" chord so the user sees what was copied.
+    pub fn show_with_message(&self, message: &str) {
+        self.label.set_text(message);
         let current = self.generation.get().wrapping_add(1);
         self.generation.set(current);
         self.revealer.set_reveal_child(true);
@@ -3365,6 +3377,11 @@ impl ClipboardToast {
                 revealer.set_reveal_child(false);
             }
         });
+    }
+
+    #[cfg(test)]
+    pub fn current_message(&self) -> String {
+        self.label.text().to_string()
     }
 }
 
