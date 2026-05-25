@@ -136,21 +136,31 @@ impl AsrController {
     /// already in the cell with the right signature, or when a
     /// preload is already in flight.
     pub fn schedule_preload(&self) {
-        if !self.is_ready_to_record() {
+        // Resolve the active entry via the fallback first — a
+        // persisted `active_model_id` from the whisper era would
+        // make `is_ready_to_record` return false even though
+        // SenseVoice was downloaded and `start()` would still pick
+        // it up through `active_entry`.
+        if !self.options.enabled {
             return;
         }
-        let target_signature = self.signature();
+        let Some(entry) = self.active_entry() else {
+            return;
+        };
+        if !self.store.is_installed(&entry) {
+            return;
+        }
+        // Honour the user's literal language setting — `Auto` means
+        // "let SenseVoice ID the language" and the picked code wins
+        // whenever the user explicitly chose one.
+        let lang_code = self.options.language.as_code().to_string();
+        let target_signature = format!("{}::{}", entry.id.as_str(), lang_code);
         if self.engine_signature.lock().unwrap().as_deref() == Some(target_signature.as_str()) {
             return;
         }
         if self.preload_in_flight.swap(true, Ordering::SeqCst) {
             return;
         }
-        let Some(entry) = self.active_entry() else {
-            self.preload_in_flight.store(false, Ordering::SeqCst);
-            return;
-        };
-        let lang_code = self.options.language.as_code().to_string();
         let store = self.store.clone();
         let cell = self.engine_cell.clone();
         let sig_cell = self.engine_signature.clone();
@@ -185,11 +195,10 @@ impl AsrController {
     }
 
     pub fn is_ready_to_record(&self) -> bool {
-        if !self.options.is_ready() {
+        if !self.options.enabled {
             return false;
         }
-        let id = &self.options.active_model_id;
-        let Some(entry) = catalog::entries().into_iter().find(|e| e.id.as_str() == id) else {
+        let Some(entry) = self.active_entry() else {
             return false;
         };
         self.store.is_installed(&entry)
@@ -265,33 +274,30 @@ impl AsrController {
         const TICK: Duration = Duration::from_millis(1500);
         const MIN_SECONDS: f32 = 0.6;
         self.runtime.spawn(async move {
-            // Wait one tick before the first snapshot so there is
-            // actual audio to transcribe.
+            eprintln!("[flowmux-asr] pump: started");
             tokio::time::sleep(TICK).await;
             loop {
                 if cancel.load(Ordering::Relaxed) {
+                    eprintln!("[flowmux-asr] pump: cancelled");
                     break;
                 }
-                // Pull the engine into an owned Option in its own
-                // statement so the MutexGuard does not live across
-                // the `await` below — otherwise the future is !Send
-                // and tokio refuses to schedule it.
                 let engine_snapshot = engine_cell.lock().unwrap().clone();
                 let engine = match engine_snapshot {
                     Some(e) => e,
                     None => {
-                        // Preload still running — skip this tick.
+                        eprintln!("[flowmux-asr] pump: engine not loaded yet, skip");
                         tokio::time::sleep(TICK).await;
                         continue;
                     }
                 };
-                let pcm = {
+                let (pcm, dur) = {
                     let buf = buffer_arc.lock().unwrap();
+                    let d = buf.duration_seconds();
                     if buf.sample_rate == 0
                         || buf.channels == 0
-                        || buf.duration_seconds() < MIN_SECONDS
+                        || d < MIN_SECONDS
                     {
-                        None
+                        (None, d)
                     } else {
                         let mono = flowmux_asr::audio::resample::resample_to_16k_mono(
                             &buf.interleaved,
@@ -299,24 +305,23 @@ impl AsrController {
                             buf.channels,
                         )
                         .ok();
-                        mono.map(|mut m| {
+                        let mono = mono.map(|mut m| {
                             if gain > 1.001 {
                                 for s in m.iter_mut() {
                                     *s = (*s * gain).clamp(-1.0, 1.0);
                                 }
                             }
                             m
-                        })
+                        });
+                        (mono, d)
                     }
                 };
                 let Some(pcm) = pcm else {
+                    eprintln!("[flowmux-asr] pump: only {dur:.2}s buffered, skip");
                     tokio::time::sleep(TICK).await;
                     continue;
                 };
-                if pcm.is_empty() {
-                    tokio::time::sleep(TICK).await;
-                    continue;
-                }
+                eprintln!("[flowmux-asr] pump tick: {dur:.2}s buffered, transcribing...");
                 let result = tokio::task::spawn_blocking(move || {
                     engine.transcribe(16_000, &pcm)
                 })
@@ -325,8 +330,10 @@ impl AsrController {
                     break;
                 }
                 if let Ok(text) = result {
+                    eprintln!("[flowmux-asr] pump partial raw: {text:?}");
                     let cleaned = clean_asr_artifacts(&text);
                     if cleaned.is_empty() {
+                        eprintln!("[flowmux-asr] pump: cleaned empty, skip");
                         tokio::time::sleep(TICK).await;
                         continue;
                     }
@@ -341,14 +348,17 @@ impl AsrController {
                             p
                         }
                     };
+                    eprintln!("[flowmux-asr] pump emit len={}", payload.len());
                     if !payload.is_empty() {
                         if tx.send(AsrUiEvent::Partial { delta: payload }).await.is_err() {
+                            eprintln!("[flowmux-asr] pump: send failed");
                             break;
                         }
                     }
                 }
                 tokio::time::sleep(TICK).await;
             }
+            eprintln!("[flowmux-asr] pump: exit");
         });
     }
 

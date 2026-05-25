@@ -146,6 +146,31 @@ impl PttSession {
                 audio.duration_seconds
             )));
         }
+        // Refuse to call the recogniser on a captured-silence buffer.
+        // SenseVoice hallucinates a fixed single-syllable string on
+        // pure zeros ("그." for the multilingual checkpoint); leaving
+        // that path enabled used to inject the same wrong text every
+        // time the user's PulseAudio default source went mute.
+        let peak = audio
+            .pcm_16k_mono
+            .iter()
+            .map(|s| s.abs())
+            .fold(0.0_f32, f32::max);
+        let rms = if audio.pcm_16k_mono.is_empty() {
+            0.0
+        } else {
+            (audio.pcm_16k_mono.iter().map(|s| s * s).sum::<f32>()
+                / audio.pcm_16k_mono.len() as f32)
+                .sqrt()
+        };
+        eprintln!(
+            "[flowmux-asr] capture levels: peak={peak:.4} rms={rms:.4}"
+        );
+        if peak < 0.005 {
+            return Err(AsrError::Other(
+                "오디오 입력이 무음입니다. 옵션 → Voice input → 입력 장치에서 다른 마이크를 선택하거나 시스템 사운드 설정에서 입력 소스를 확인하세요.".into(),
+            ));
+        }
         let gain = self.config.input_gain.clamp(1.0, 30.0);
         let pcm: Vec<f32> = if gain > 1.001 {
             audio

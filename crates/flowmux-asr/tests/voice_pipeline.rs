@@ -78,6 +78,27 @@ fn sanitizer_drops_control_bytes() {
     assert!(cleaned.starts_with("ls"));
 }
 
+/// Silence baseline — confirms what SenseVoice returns for an
+/// all-zero buffer. Earlier the controller saw "그." every tick and
+/// blamed the engine; this test pins down whether that string is the
+/// engine's silence hallucination or actual audio recognition.
+#[test]
+fn engine_silence_baseline() {
+    let Some(store) = ModelStore::xdg_default() else {
+        return;
+    };
+    let entry = catalog::recommended_default();
+    if !store.is_installed(&entry) {
+        return;
+    }
+    let mut forced = entry.clone();
+    forced.language = "ko".into();
+    let engine = load_engine(&forced, &store).expect("engine load");
+    let silence = vec![0.0_f32; 16_000 * 5];
+    let text = engine.transcribe(16_000, &silence);
+    eprintln!("[ko] silence -> {text:?}");
+}
+
 /// End-to-end engine smoke test: loads SenseVoice + decodes a 1-s
 /// silence buffer. Skips when the model has not been downloaded.
 #[test]
@@ -102,6 +123,52 @@ fn engine_loads_and_decodes_silence_when_installed() {
     eprintln!("silence decoded text: {text:?}");
     // Empty or near-empty text is the expected outcome for silence;
     // we just confirm the engine returned without panicking.
+}
+
+/// Force-load the engine with `language="ko"` and decode the most
+/// recent capture dump. Regression guard for the
+/// `AsrLanguage::Auto`-driven misclassification that emitted "그." /
+/// "我." on real Korean mic input.
+#[test]
+fn engine_with_ko_language_decodes_dumped_capture() {
+    let path = std::env::temp_dir().join("flowmux-asr-last.wav");
+    if !path.exists() {
+        eprintln!("skip: no dumped capture available");
+        return;
+    }
+    let Some(store) = ModelStore::xdg_default() else {
+        return;
+    };
+    let entry = catalog::recommended_default();
+    if !store.is_installed(&entry) {
+        eprintln!("skip: model not installed");
+        return;
+    }
+    let mut forced = entry.clone();
+    forced.language = "ko".into();
+    let engine = load_engine(&forced, &store).expect("ko engine load");
+    let mut reader = hound::WavReader::open(&path).expect("open wav");
+    let spec = reader.spec();
+    let samples: Vec<f32> = match spec.sample_format {
+        hound::SampleFormat::Int => reader
+            .samples::<i16>()
+            .map(|s| s.unwrap() as f32 / i16::MAX as f32)
+            .collect(),
+        hound::SampleFormat::Float => reader.samples::<f32>().map(|s| s.unwrap()).collect(),
+    };
+    let text = engine.transcribe(spec.sample_rate, &samples);
+    eprintln!("[ko] decoded: {text:?}");
+    assert!(
+        !text.trim().is_empty(),
+        "Korean engine produced empty text on dumped capture"
+    );
+    let has_hangul = text
+        .chars()
+        .any(|c| (0xAC00..=0xD7AF).contains(&(c as u32)));
+    assert!(
+        has_hangul,
+        "expected Korean (Hangul) output, got {text:?}"
+    );
 }
 
 /// If a previously-recorded capture is on disk at
