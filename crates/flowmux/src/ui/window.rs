@@ -91,6 +91,18 @@ pub struct WindowController {
     /// toast never updates. Captured from `tokio::runtime::Handle` at
     /// controller construction so every D-Bus path can `enter()` it.
     tokio_handle: Option<tokio::runtime::Handle>,
+    /// Voice push-to-talk controller. Plumbed in by `main` after the
+    /// controller is built; the options-dialog dispatch path forwards
+    /// new `AsrOptions` here through `replace_options` so the engine
+    /// cache invalidates when the user picks a different model.
+    asr_controller: RefCell<Option<crate::asr::AsrControllerHandle>>,
+    /// Recording indicator dot packed at the start of the header bar.
+    /// The ASR event handler toggles `set_visible(...)` on it.
+    asr_recording_dot: gtk::Box,
+    /// "Ready-to-record" microphone icon. Shown when the ASR
+    /// pipeline reports it can start a session right now (feature on
+    /// + model installed). Hidden otherwise.
+    asr_mic_icon: gtk::Image,
 }
 
 impl WindowController {
@@ -105,7 +117,13 @@ impl WindowController {
         let focused_pane: FocusedPane = Rc::new(Cell::new(None));
         let notifications = NotificationStore::new();
         let stack = gtk::Stack::new();
-        stack.set_transition_type(gtk::StackTransitionType::Crossfade);
+        // Instant switch instead of Crossfade. Crossfade composites
+        // both pages every frame for ~150ms, stalling VTE / WebKit
+        // redraws on modest GPUs and making pane / workspace
+        // navigation feel sluggish. Workspace / tab switches are
+        // content replacement, not animation, so None is the right
+        // pick.
+        stack.set_transition_type(gtk::StackTransitionType::None);
         stack.set_hexpand(true);
         stack.set_vexpand(true);
 
@@ -178,8 +196,27 @@ impl WindowController {
         let clipboard_toast = ClipboardToast::new();
         content_overlay.add_overlay(clipboard_toast.widget());
 
+        let header_bar = adw::HeaderBar::new();
+        // Push-to-talk recording indicator packed at the leftmost
+        // position of the header bar. Created hidden; the ASR event
+        // handler toggles `set_visible` on Recording / Done events.
+        let asr_recording_dot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        asr_recording_dot.add_css_class("flowmux-asr-recording-dot");
+        asr_recording_dot.set_valign(gtk::Align::Center);
+        asr_recording_dot.set_visible(false);
+        asr_recording_dot.set_tooltip_text(Some("음성 입력 중"));
+        header_bar.pack_start(&asr_recording_dot);
+        // Microphone icon shown right next to the dot when the ASR
+        // pipeline is "ready to record": feature enabled + model
+        // installed on disk. Hidden when any precondition is missing.
+        let asr_mic_icon = gtk::Image::from_icon_name("audio-input-microphone-symbolic");
+        asr_mic_icon.add_css_class("flowmux-asr-mic-icon");
+        asr_mic_icon.set_visible(false);
+        asr_mic_icon.set_tooltip_text(Some("음성 입력 준비됨 — Ctrl+Alt+Space"));
+        header_bar.pack_start(&asr_mic_icon);
+
         let toolbar = adw::ToolbarView::new();
-        toolbar.add_top_bar(&adw::HeaderBar::new());
+        toolbar.add_top_bar(&header_bar);
         toolbar.set_content(Some(&content_overlay));
 
         // Restore saved window size/maximized state, otherwise default to 1280x800.
@@ -227,6 +264,9 @@ impl WindowController {
             badge_publisher_busy: Rc::new(Cell::new(false)),
             badge_dirty: Rc::new(Cell::new(false)),
             tokio_handle,
+            asr_controller: RefCell::new(None),
+            asr_recording_dot,
+            asr_mic_icon,
         };
         controller.install_state_flush_on_close();
         controller.install_cwd_polling_fallback();
@@ -245,6 +285,29 @@ impl WindowController {
         handle: Arc<tokio::sync::Mutex<Option<flowmux_notify::DesktopNotifier>>>,
     ) {
         self.notifier = handle;
+    }
+
+    /// Hand the voice push-to-talk controller to the window so the
+    /// options-dialog dispatch path can push fresh `AsrOptions` into
+    /// it after the user clicks OK. Without this the controller keeps
+    /// its startup snapshot — enabling the feature in the dialog has
+    /// no effect until the next launch.
+    pub fn set_asr_controller(&self, handle: crate::asr::AsrControllerHandle) {
+        *self.asr_controller.borrow_mut() = Some(handle);
+    }
+
+    /// The header-bar recording indicator. Cloned by the ASR event
+    /// dispatcher so it can flip `set_visible(...)` without holding a
+    /// borrow on the controller.
+    pub fn asr_recording_dot(&self) -> gtk::Box {
+        self.asr_recording_dot.clone()
+    }
+
+    /// Toggle the "ready to record" microphone icon next to the
+    /// recording dot. Called from the options-dialog apply path and
+    /// from startup once the ASR controller is in place.
+    pub fn set_asr_ready(&self, ready: bool) {
+        self.asr_mic_icon.set_visible(ready);
     }
 
     pub fn show_status_when_empty(&self) {
@@ -730,7 +793,13 @@ impl WindowController {
         let stack = gtk::Stack::new();
         stack.set_hexpand(true);
         stack.set_vexpand(true);
-        stack.set_transition_type(gtk::StackTransitionType::Crossfade);
+        // Instant switch instead of Crossfade. Crossfade composites
+        // both pages every frame for ~150ms, stalling VTE / WebKit
+        // redraws on modest GPUs and making pane / workspace
+        // navigation feel sluggish. Workspace / tab switches are
+        // content replacement, not animation, so None is the right
+        // pick.
+        stack.set_transition_type(gtk::StackTransitionType::None);
         stack.add_named(&torn.content, Some(&torn.surface.to_string()));
         stack.set_visible_child_name(&torn.surface.to_string());
 
@@ -802,7 +871,13 @@ impl WindowController {
         sidebar.select_workspace(workspace_id);
 
         let stack = gtk::Stack::new();
-        stack.set_transition_type(gtk::StackTransitionType::Crossfade);
+        // Instant switch instead of Crossfade. Crossfade composites
+        // both pages every frame for ~150ms, stalling VTE / WebKit
+        // redraws on modest GPUs and making pane / workspace
+        // navigation feel sluggish. Workspace / tab switches are
+        // content replacement, not animation, so None is the right
+        // pick.
+        stack.set_transition_type(gtk::StackTransitionType::None);
         stack.set_hexpand(true);
         stack.set_vexpand(true);
 
@@ -1074,6 +1149,13 @@ impl WindowController {
             }
         }
         self.sync_workspace_label(ws_id).await;
+        // Window title follows the focused pane's active surface label.
+        // Folding this into `PaneFocused` lets the `on_focus` closure
+        // send a single bridge command per focus change instead of
+        // queuing a second `RefreshWindowTitle` behind it; with the
+        // dispatch loop being strictly sequential the extra command
+        // was adding one round-trip of latency on every focus move.
+        self.refresh_window_title().await;
     }
 
     fn flush_terminal_cwds_blocking(&self) {
@@ -1086,12 +1168,14 @@ impl WindowController {
     /// Relying only on libghostty OSC 7 (`current-directory-uri::notify`) misses shells
     /// without OSC 7 integration, such as Ubuntu's default bash spawned by
     /// flowmux; after `cd`, no notify ever arrives and the tab name stays stale.
-    /// Poll once per second to reuse TerminalPane::current_dir()'s
-    /// `/proc/<pid>/cwd` fallback. The OSC 7 event path remains immediate, and
-    /// polling is a safety net for OSC-7-naive shells.
+    /// Polling reuses TerminalPane::current_dir()'s `/proc/<pid>/cwd` fallback.
+    /// The OSC 7 event path remains immediate, so polling is only a safety net
+    /// for OSC-7-naive shells — 10s is slow enough to keep main-loop borrow
+    /// contention out of the typing path while still catching missed `cd`s
+    /// within a reasonable window.
     fn install_cwd_polling_fallback(&self) {
         let controller = self.clone();
-        glib::timeout_add_local(Duration::from_secs(1), move || {
+        glib::timeout_add_local(Duration::from_secs(10), move || {
             let controller = controller.clone();
             glib::MainContext::default().spawn_local(async move {
                 controller.poll_terminal_cwds().await;
@@ -1327,12 +1411,32 @@ impl WindowController {
                 let css_provider = self.css_provider.clone();
                 let theme = self.theme.clone();
                 let window = self.window.clone();
-                crate::ui::options_dialog::present(&self.window, current, move |opts| {
+                let tokio_handle = self.tokio_handle.clone();
+                let asr_controller = self.asr_controller.borrow().clone();
+                let mic_icon = self.asr_mic_icon.clone();
+                crate::ui::options_dialog::present(&self.window, current, tokio_handle, move |opts| {
                     if let Err(e) = flowmux_config::options::save(&opts) {
                         tracing::warn!(error = %e, "options save failed");
                         return;
                     }
                     *options_cell.borrow_mut() = opts.clone();
+                    // Push fresh AsrOptions into the live controller
+                    // so toggling the feature on / picking a different
+                    // model takes effect immediately. The controller
+                    // drops its cached engine when the model id (or
+                    // language / translate flag) changes.
+                    if let Some(asr) = &asr_controller {
+                        {
+                            let mut ctrl = asr.borrow_mut();
+                            ctrl.replace_options(opts.asr.clone());
+                            mic_icon.set_visible(ctrl.is_ready_to_record());
+                        }
+                        // Re-trigger the background preload after a
+                        // settings save so a freshly-enabled voice
+                        // feature or a changed model/language gets
+                        // warmed before the user's next PTT press.
+                        asr.borrow().schedule_preload();
+                    }
                     // Apply zoom immediately to all existing widgets.
                     let registry = registry.borrow();
                     for terminal in registry.terminals.values() {
@@ -1504,10 +1608,16 @@ impl WindowController {
                 }
             }
             GtkCommand::ActivateSurface { pane, surface } => {
-                let ws_id = self.store.set_active_surface(pane, surface).await;
+                // Switch the visible GTK stack child + tab highlight
+                // and pan the tab into view BEFORE awaiting the store
+                // round-trip. set_active_surface is a metadata-only
+                // update, so doing it after the UI change lets the
+                // user see the stack switch in the same frame as the
+                // click instead of after one mpsc hop of latency.
                 self.pane_registry
                     .borrow_mut()
                     .activate_surface(pane, surface);
+                let ws_id = self.store.set_active_surface(pane, surface).await;
                 self.refresh_window_title().await;
                 if let Some(ws_id) = ws_id {
                     // Tab activation changes the active surface used for the
@@ -1829,25 +1939,15 @@ impl WindowController {
                 // pane+surface AND the app window is focused. Mirrors
                 // cmux's `shouldSuppressExternalDelivery` policy: don't
                 // toast or grow the bell list for an event the user is
-                // literally watching.
-                //
-                // Exception: AttentionNeeded (agent paused, waiting for
-                // the user) and Error notifications always pierce the
-                // suppression. "Same pane focused" is not the same as
-                // "user is reading right now" — they may have scrolled
-                // past the prompt, be on a different monitor, or have
-                // their eyes off the screen entirely. Silencing the
-                // bell for the only event class that exists to say
-                // "stop typing and look here" defeats its purpose.
+                // literally watching. No level pierces the suppression
+                // — when the user is on the exact source pane+tab,
+                // they are by definition looking at the event, so an
+                // additional FDO toast / in-app entry would be pure
+                // duplicate noise regardless of severity.
                 let window_active = self.window.is_active();
                 let focused = self.focused_pane.get();
-                let pierces_focus = matches!(
-                    level,
-                    flowmux_core::NotificationLevel::AttentionNeeded
-                        | flowmux_core::NotificationLevel::Error
-                );
-                let suppress =
-                    !pierces_focus && self.is_source_focused(pane, surface);
+                let pierces_focus = false;
+                let suppress = self.is_source_focused(pane, surface);
                 tracing::info!(
                     ?pane,
                     ?surface,
@@ -1871,9 +1971,9 @@ impl WindowController {
                     let _ = ack.send(None);
                     return;
                 }
-                let Some(entry_id) =
-                    self.notifications
-                        .push(title, body, level, pane, surface, workspace)
+                let Some(entry_id) = self
+                    .notifications
+                    .push(title, body, level, pane, surface, workspace)
                 else {
                     // Near-duplicate of an entry pushed within
                     // `DUP_WINDOW`: the OSC path and the lifecycle
@@ -2051,7 +2151,8 @@ impl WindowController {
                 let text = {
                     let r = self.pane_registry.borrow();
                     if let Some(term) = r.terminals.get(&surface) {
-                        term.current_dir().map(|p| ("path", p.display().to_string()))
+                        term.current_dir()
+                            .map(|p| ("path", p.display().to_string()))
                     } else {
                         r.browsers
                             .get(&surface)
@@ -2067,8 +2168,7 @@ impl WindowController {
                     }
                     None => {
                         tracing::info!(%pane, %surface, "copy-surface-text: no path/url");
-                        self.clipboard_toast
-                            .show_with_message("Nothing to copy");
+                        self.clipboard_toast.show_with_message("Nothing to copy");
                     }
                 }
             }
@@ -2106,8 +2206,8 @@ impl WindowController {
                         None
                     })
                 };
-                let (kind, value) = resolved
-                    .unwrap_or_else(|| ("path", ws.root_dir.display().to_string()));
+                let (kind, value) =
+                    resolved.unwrap_or_else(|| ("path", ws.root_dir.display().to_string()));
                 self.window.clipboard().set_text(&value);
                 self.clipboard_toast
                     .show_with_message(&format!("Copied {kind}: {value}"));
@@ -2899,8 +2999,12 @@ fn make_callbacks(
                 focused.set(Some(pane));
                 let bridge = bridge.clone();
                 glib::MainContext::default().spawn_local(async move {
+                    // PaneFocused dispatch handler now refreshes the
+                    // window title at the end of `on_pane_focused`,
+                    // so a separate RefreshWindowTitle send is no
+                    // longer needed — it was doubling the dispatch
+                    // queue latency on every focus move.
                     let _ = bridge.tx.send(GtkCommand::PaneFocused { pane }).await;
-                    let _ = bridge.tx.send(GtkCommand::RefreshWindowTitle).await;
                 });
             }))
         },
@@ -5935,9 +6039,7 @@ mod tests {
         let ws = store.get_workspace(ws_id).await.unwrap();
         let pane = ws.surfaces[0].root_pane.first_leaf_id().unwrap();
         let (bridge, _rx) = Bridge::new();
-        let app = adw::Application::builder()
-            .application_id(app_id)
-            .build();
+        let app = adw::Application::builder().application_id(app_id).build();
         app.register(None::<&gtk::gio::Cancellable>).unwrap();
         let controller = WindowController::new(
             &app,
@@ -6261,10 +6363,9 @@ mod tests {
     /// from the popover list while leaving every other entry alone.
     #[gtk::test]
     async fn delete_notification_dispatch_removes_only_targeted_unread_entry() {
-        let (controller, ws_id, pane) = build_single_workspace_controller(
-            "com.flowmux.App.UiTest.NotifTrashRemovesUnread",
-        )
-        .await;
+        let (controller, ws_id, pane) =
+            build_single_workspace_controller("com.flowmux.App.UiTest.NotifTrashRemovesUnread")
+                .await;
         let id_a = push_notification(&controller, Some(pane), Some(ws_id), "a")
             .await
             .expect("first push must record an entry");
@@ -6349,10 +6450,9 @@ mod tests {
     /// so a future refactor that removes it surfaces here.
     #[gtk::test]
     async fn delete_notification_dispatch_on_unknown_id_is_safe_noop() {
-        let (controller, ws_id, pane) = build_single_workspace_controller(
-            "com.flowmux.App.UiTest.NotifTrashUnknownIsNoop",
-        )
-        .await;
+        let (controller, ws_id, pane) =
+            build_single_workspace_controller("com.flowmux.App.UiTest.NotifTrashUnknownIsNoop")
+                .await;
         push_notification(&controller, Some(pane), Some(ws_id), "kept").await;
         let unread_before = controller.notifications.unread_count();
         let count_before = controller.notifications.entries().len();
@@ -6401,10 +6501,8 @@ mod tests {
     /// `update_launcher_count` call would carry `count = 0`.
     #[gtk::test]
     async fn popover_open_sequence_drains_single_notification_to_zero() {
-        let (controller, ws_id, pane) = build_single_workspace_controller(
-            "com.flowmux.App.UiTest.PopoverOpenSingle",
-        )
-        .await;
+        let (controller, ws_id, pane) =
+            build_single_workspace_controller("com.flowmux.App.UiTest.PopoverOpenSingle").await;
         let id = push_notification(&controller, Some(pane), Some(ws_id), "alarm")
             .await
             .expect("push must record an entry");
@@ -6435,9 +6533,7 @@ mod tests {
             })
             .await;
         // Step (3): refresh re-publishes the unread count to the dock.
-        controller
-            .dispatch(GtkCommand::RefreshLauncherBadge)
-            .await;
+        controller.dispatch(GtkCommand::RefreshLauncherBadge).await;
 
         assert_eq!(
             controller.notifications.unread_count(),
@@ -6464,10 +6560,8 @@ mod tests {
     /// its own. The ENTIRE story must end with `unread_count() = 0`.
     #[gtk::test]
     async fn popover_open_then_late_desktop_id_still_drains_badge() {
-        let (controller, ws_id, pane) = build_single_workspace_controller(
-            "com.flowmux.App.UiTest.PopoverLateRace",
-        )
-        .await;
+        let (controller, ws_id, pane) =
+            build_single_workspace_controller("com.flowmux.App.UiTest.PopoverLateRace").await;
         let id = push_notification(&controller, Some(pane), Some(ws_id), "alarm")
             .await
             .expect("push must record an entry");
@@ -6481,9 +6575,7 @@ mod tests {
             "no desktop_id was attached yet; the sweep must return an empty list \
              so the dispatcher does not send a CloseDesktopNotifications no-op",
         );
-        controller
-            .dispatch(GtkCommand::RefreshLauncherBadge)
-            .await;
+        controller.dispatch(GtkCommand::RefreshLauncherBadge).await;
         assert_eq!(controller.notifications.unread_count(), 0);
 
         // Daemon's reply arrives. set_desktop_id reports Stale; the
@@ -6501,7 +6593,12 @@ mod tests {
              the entry was already read by the popover sweep",
         );
         assert_eq!(
-            controller.notifications.find(id).unwrap().desktop_id.as_deref(),
+            controller
+                .notifications
+                .find(id)
+                .unwrap()
+                .desktop_id
+                .as_deref(),
             Some("did-4242"),
             "the late desktop_id must still be recorded so any subsequent close \
              path (e.g. an explicit DeleteNotification) has it",
@@ -6515,10 +6612,8 @@ mod tests {
     /// reaches the dispatcher later as `Stale`.
     #[gtk::test]
     async fn popover_open_with_partial_desktop_ids_still_clears_badge() {
-        let (controller, ws_id, pane) = build_single_workspace_controller(
-            "com.flowmux.App.UiTest.PopoverPartial",
-        )
-        .await;
+        let (controller, ws_id, pane) =
+            build_single_workspace_controller("com.flowmux.App.UiTest.PopoverPartial").await;
         let a = push_notification(&controller, Some(pane), Some(ws_id), "a")
             .await
             .expect("push a");
@@ -6554,9 +6649,7 @@ mod tests {
                 desktop_ids: to_close,
             })
             .await;
-        controller
-            .dispatch(GtkCommand::RefreshLauncherBadge)
-            .await;
+        controller.dispatch(GtkCommand::RefreshLauncherBadge).await;
         assert_eq!(controller.notifications.unread_count(), 0);
 
         // Late reply for c → Stale → dispatcher closes did-33 and refreshes.
@@ -6592,21 +6685,14 @@ mod tests {
     /// be marked read.
     #[gtk::test]
     async fn stress_many_notifications_with_periodic_sweeps_drains_to_zero() {
-        let (controller, ws_id, pane) = build_single_workspace_controller(
-            "com.flowmux.App.UiTest.StressManyNotif",
-        )
-        .await;
+        let (controller, ws_id, pane) =
+            build_single_workspace_controller("com.flowmux.App.UiTest.StressManyNotif").await;
         const TOTAL: usize = 200;
         let mut ids = Vec::with_capacity(TOTAL);
         for i in 0..TOTAL {
-            let id = push_notification(
-                &controller,
-                Some(pane),
-                Some(ws_id),
-                &format!("evt-{i}"),
-            )
-            .await
-            .expect("push must record an entry");
+            let id = push_notification(&controller, Some(pane), Some(ws_id), &format!("evt-{i}"))
+                .await
+                .expect("push must record an entry");
             ids.push(id);
             // Simulate the daemon's Notify reply for a subset of pushes
             // (mimicking real-world timing where some replies overtake
@@ -6672,10 +6758,8 @@ mod tests {
     /// badge" against batch arrival patterns.
     #[gtk::test]
     async fn stress_popover_open_drains_badge_across_repeated_batches() {
-        let (controller, ws_id, pane) = build_single_workspace_controller(
-            "com.flowmux.App.UiTest.StressPopoverBatches",
-        )
-        .await;
+        let (controller, ws_id, pane) =
+            build_single_workspace_controller("com.flowmux.App.UiTest.StressPopoverBatches").await;
         const BATCHES: usize = 10;
         const PER_BATCH: usize = 20;
         for batch in 0..BATCHES {
@@ -6711,9 +6795,7 @@ mod tests {
                     desktop_ids: to_close,
                 })
                 .await;
-            controller
-                .dispatch(GtkCommand::RefreshLauncherBadge)
-                .await;
+            controller.dispatch(GtkCommand::RefreshLauncherBadge).await;
             assert_eq!(
                 controller.notifications.unread_count(),
                 0,
@@ -6739,10 +6821,8 @@ mod tests {
     /// can be "ghost unread" or "ghost read".
     #[gtk::test]
     async fn stress_mixed_ack_channels_keep_unread_count_in_sync_with_entries() {
-        let (controller, ws_id, pane) = build_single_workspace_controller(
-            "com.flowmux.App.UiTest.StressMixedAcks",
-        )
-        .await;
+        let (controller, ws_id, pane) =
+            build_single_workspace_controller("com.flowmux.App.UiTest.StressMixedAcks").await;
 
         // The check we run after every dispatched command — the unread
         // count exposed to the dock must match the actual unread set.
@@ -6764,10 +6844,9 @@ mod tests {
         // Sequence a deliberately interleaved set of dispatches.
         let mut pushed = Vec::new();
         for i in 0usize..30 {
-            let id =
-                push_notification(&controller, Some(pane), Some(ws_id), &format!("x{i}"))
-                    .await
-                    .expect("push");
+            let id = push_notification(&controller, Some(pane), Some(ws_id), &format!("x{i}"))
+                .await
+                .expect("push");
             pushed.push(id);
             assert_invariant(&format!("after push {i}"));
 
@@ -6801,13 +6880,9 @@ mod tests {
                     // Popover open sweep mid-stream.
                     let ids = controller.notifications.mark_all_unread_read();
                     controller
-                        .dispatch(GtkCommand::CloseDesktopNotifications {
-                            desktop_ids: ids,
-                        })
+                        .dispatch(GtkCommand::CloseDesktopNotifications { desktop_ids: ids })
                         .await;
-                    controller
-                        .dispatch(GtkCommand::RefreshLauncherBadge)
-                        .await;
+                    controller.dispatch(GtkCommand::RefreshLauncherBadge).await;
                     assert_invariant(&format!("after popover sweep at i={i}"));
                 }
                 3 => {
@@ -6823,9 +6898,7 @@ mod tests {
                 _ => {
                     // Bare RefreshLauncherBadge — just exercise the
                     // coalescing path with no state change.
-                    controller
-                        .dispatch(GtkCommand::RefreshLauncherBadge)
-                        .await;
+                    controller.dispatch(GtkCommand::RefreshLauncherBadge).await;
                     assert_invariant(&format!("after bare refresh at i={i}"));
                 }
             }
@@ -6843,9 +6916,7 @@ mod tests {
                 desktop_ids: leftover,
             })
             .await;
-        controller
-            .dispatch(GtkCommand::RefreshLauncherBadge)
-            .await;
+        controller.dispatch(GtkCommand::RefreshLauncherBadge).await;
         assert_eq!(
             controller.notifications.unread_count(),
             0,
@@ -6865,19 +6936,15 @@ mod tests {
     /// drifts from the computed unread set.
     #[gtk::test]
     async fn stress_refresh_burst_is_safely_coalesced() {
-        let (controller, ws_id, pane) = build_single_workspace_controller(
-            "com.flowmux.App.UiTest.StressRefreshBurst",
-        )
-        .await;
+        let (controller, ws_id, pane) =
+            build_single_workspace_controller("com.flowmux.App.UiTest.StressRefreshBurst").await;
         push_notification(&controller, Some(pane), Some(ws_id), "x").await;
         // 100 back-to-back refresh commands. The publisher's internal
         // busy/dirty flag must coalesce these into "publish at most a
         // small fixed number of times" — but we don't peek at the
         // flags here; we only check the dispatcher itself stays sane.
         for _ in 0..100 {
-            controller
-                .dispatch(GtkCommand::RefreshLauncherBadge)
-                .await;
+            controller.dispatch(GtkCommand::RefreshLauncherBadge).await;
         }
         assert_eq!(
             controller.notifications.unread_count(),
@@ -6890,9 +6957,7 @@ mod tests {
             .dispatch(GtkCommand::ActivateWorkspace { id: ws_id })
             .await;
         for _ in 0..100 {
-            controller
-                .dispatch(GtkCommand::RefreshLauncherBadge)
-                .await;
+            controller.dispatch(GtkCommand::RefreshLauncherBadge).await;
         }
         assert_eq!(controller.notifications.unread_count(), 0);
     }

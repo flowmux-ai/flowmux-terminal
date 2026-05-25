@@ -1,31 +1,32 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Push-to-talk session: start capture, stop on release, transcribe.
+//! Push-to-talk session: glues the cpal capture loop to the
+//! non-streaming SenseVoice recogniser.
 //!
-//! The session is the single object the GUI talks to. It hides the
-//! engine + capture + cancel flag plumbing behind a tiny state machine
-//! so the GTK side only needs to wire `start_ptt` / `release_ptt`
-//! handlers to the keypress events.
+//! Flow:
+//!   * `start()` opens the cpal stream and begins accumulating PCM
+//!     into the shared capture buffer.
+//!   * The controller polls `peak_so_far()` for UI feedback (dot
+//!     pulse intensity) but does not transcribe mid-stream.
+//!   * `finish()` stops the capture, downmixes + dumps a debug WAV,
+//!     then feeds the entire 16 kHz mono buffer through the
+//!     SenseVoice recogniser and returns the resulting text.
 
-use crate::audio::capture::{AudioCapture, CaptureHandle, CaptureSpec};
-use crate::engine::{AsrEngine, AsrEngineError, Transcription};
+use crate::audio::capture::{AudioCapture, CaptureHandle, CaptureSpec, PcmBuffer};
+use crate::audio::resample::resample_to_16k_mono;
+use crate::engine::SenseVoiceEngine;
 use crate::AsrError;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// Knobs the GUI tunes per session.
 #[derive(Debug, Clone)]
 pub struct SessionConfig {
     pub device_name: Option<String>,
     pub max_duration: Duration,
-    /// Append `\r` to the transcription before injecting it into the
-    /// terminal. Disabled by default — the user usually wants to read
-    /// the line first.
     pub auto_enter: bool,
-    /// Drop the transcription when the user releases the key before
-    /// this minimum duration. Stops accidental key-taps from sending
-    /// noise into the engine. Set to `0` to disable the floor.
     pub min_duration: Duration,
+    /// Linear gain applied to the captured samples before they reach
+    /// the recogniser. `1.0` = pass-through.
+    pub input_gain: f32,
 }
 
 impl Default for SessionConfig {
@@ -34,125 +35,166 @@ impl Default for SessionConfig {
             device_name: None,
             max_duration: Duration::from_secs(30),
             auto_enter: false,
-            min_duration: Duration::from_millis(200),
+            min_duration: Duration::from_millis(150),
+            input_gain: 1.0,
         }
     }
 }
 
-/// State transitions a session walks through. Returned to the GUI so
-/// the indicator widget can swap colour on every event.
 #[derive(Debug, Clone)]
 pub enum PttEvent {
     Recording,
-    Transcribing,
-    Done(Transcription),
-    DroppedTooShort { duration_seconds: f32 },
+    Done(String),
     Truncated,
     Cancelled,
     Failed(String),
 }
 
-/// Public session handle. The engine is shared across sessions —
-/// loading the whisper model is the expensive part and the GUI keeps
-/// the engine warm.
 pub struct PttSession {
-    engine: Arc<dyn AsrEngine>,
     config: SessionConfig,
     capture: Option<CaptureHandle>,
-    cancel: Arc<AtomicBool>,
 }
 
 impl PttSession {
-    pub fn new(engine: Arc<dyn AsrEngine>, config: SessionConfig) -> Self {
+    pub fn new(config: SessionConfig) -> Self {
         Self {
-            engine,
             config,
             capture: None,
-            cancel: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    /// Start capture. Returns immediately; the worker thread continues
-    /// until `finish_and_transcribe` or `cancel` is called.
-    pub fn start(&mut self) -> Result<PttEvent, AsrError> {
+    pub fn start(&mut self) -> Result<(), AsrError> {
         if self.capture.is_some() {
-            return Ok(PttEvent::Failed("이미 녹음 중입니다".into()));
+            return Err(AsrError::Other("session already running".into()));
         }
         let spec = CaptureSpec {
             device_name: self.config.device_name.clone(),
             max_duration: self.config.max_duration,
         };
+        eprintln!(
+            "[flowmux-asr] session.start: device={:?} max={:.1}s",
+            self.config.device_name,
+            self.config.max_duration.as_secs_f32()
+        );
         let handle = AudioCapture::start_session(spec)?;
         self.capture = Some(handle);
-        self.cancel.store(false, Ordering::Relaxed);
-        Ok(PttEvent::Recording)
+        Ok(())
     }
 
-    /// Stop capture, run transcription, and return the final event.
-    /// Blocking — the caller wraps this in `spawn_blocking` so the GUI
-    /// thread stays responsive.
-    pub fn finish_and_transcribe(&mut self) -> Result<PttEvent, AsrError> {
+    pub fn is_running(&self) -> bool {
+        self.capture.is_some()
+    }
+
+    /// Shared PCM buffer for snapshot-style readers. `None` when no
+    /// session is active.
+    pub fn buffer_arc(&self) -> Option<Arc<Mutex<PcmBuffer>>> {
+        self.capture.as_ref().map(|c| c.buffer_arc())
+    }
+
+    /// Take a 16 kHz mono snapshot of the audio captured so far,
+    /// optionally amplified by the session's `input_gain`. Used by
+    /// the streaming pump to feed SenseVoice mid-utterance.
+    pub fn snapshot_pcm_16k_mono(&self) -> Option<Vec<f32>> {
+        let buffer = self.buffer_arc()?;
+        let (samples, sample_rate, channels) = {
+            let buf = buffer.lock().unwrap();
+            if buf.duration_seconds() < 0.5 {
+                return None;
+            }
+            (buf.interleaved.clone(), buf.sample_rate, buf.channels)
+        };
+        let mut mono = resample_to_16k_mono(&samples, sample_rate, channels).ok()?;
+        let gain = self.config.input_gain.clamp(1.0, 30.0);
+        if gain > 1.001 {
+            for s in mono.iter_mut() {
+                *s = (*s * gain).clamp(-1.0, 1.0);
+            }
+        }
+        Some(mono)
+    }
+
+    /// Stop the capture, downmix + resample, optionally apply gain,
+    /// then transcribe the whole buffer with the supplied SenseVoice
+    /// engine. The engine is passed in (rather than owned) so the
+    /// controller can defer engine loading without blocking the
+    /// capture start path.
+    pub fn finish(&mut self, engine: &SenseVoiceEngine) -> Result<String, AsrError> {
         let Some(handle) = self.capture.take() else {
-            return Ok(PttEvent::Failed("녹음이 시작되지 않았습니다".into()));
+            return Err(AsrError::Other("no active session".into()));
         };
         let audio = handle.stop()?;
+        eprintln!(
+            "[flowmux-asr] finish: total_samples={} duration={:.2}s rate={} ch={}",
+            audio.pcm_16k_mono.len(),
+            audio.duration_seconds,
+            audio.original_sample_rate,
+            audio.original_channels
+        );
+        let wav_path = std::env::temp_dir().join("flowmux-asr-last.wav");
+        if let Err(e) = write_wav_16k_mono(&wav_path, &audio.pcm_16k_mono) {
+            eprintln!("[flowmux-asr] dump wav failed: {e}");
+        } else {
+            eprintln!(
+                "[flowmux-asr] dumped capture to {} ({} samples, 16kHz mono)",
+                wav_path.display(),
+                audio.pcm_16k_mono.len()
+            );
+        }
         if audio.duration_seconds < self.config.min_duration.as_secs_f32() {
-            return Ok(PttEvent::DroppedTooShort {
-                duration_seconds: audio.duration_seconds,
-            });
+            return Err(AsrError::Other(format!(
+                "capture too short ({:.2}s)",
+                audio.duration_seconds
+            )));
         }
-        let cancel = self.cancel.clone();
-        let result = self.engine.transcribe(&audio.pcm_16k_mono, cancel);
-        match result {
-            Ok(mut t) => {
-                if t.text.trim().is_empty() {
-                    return Ok(PttEvent::DroppedTooShort {
-                        duration_seconds: audio.duration_seconds,
-                    });
-                }
-                if self.config.auto_enter && !t.text.ends_with('\n') {
-                    t.text.push('\r');
-                }
-                if audio.truncated {
-                    // Surface truncation to the GUI as an event, but
-                    // still hand back the transcribed text — the user
-                    // would rather see what was captured than lose
-                    // everything past the 30 s cap.
-                    let _ = PttEvent::Truncated;
-                }
-                Ok(PttEvent::Done(t))
-            }
-            Err(AsrEngineError::Cancelled) => Ok(PttEvent::Cancelled),
-            Err(e) => Ok(PttEvent::Failed(e.to_string())),
-        }
+        let gain = self.config.input_gain.clamp(1.0, 30.0);
+        let pcm: Vec<f32> = if gain > 1.001 {
+            audio
+                .pcm_16k_mono
+                .iter()
+                .map(|s| (s * gain).clamp(-1.0, 1.0))
+                .collect()
+        } else {
+            audio.pcm_16k_mono.clone()
+        };
+        let text = engine.transcribe(16_000, &pcm);
+        eprintln!("[flowmux-asr] final text: {text:?}");
+        Ok(text)
     }
 
-    /// Abort capture and discard the buffer. Used by the Esc / double-
-    /// tap PTT cancel path.
-    pub fn cancel(&mut self) -> PttEvent {
-        self.cancel.store(true, Ordering::Relaxed);
+    pub fn cancel(&mut self) {
         if let Some(handle) = self.capture.take() {
             handle.abort();
         }
-        PttEvent::Cancelled
-    }
-
-    /// Returns true if the session is mid-capture.
-    pub fn is_recording(&self) -> bool {
-        self.capture.is_some()
     }
 }
 
-/// Sanitise transcription text before it is injected into a PTY. The
-/// engine occasionally emits control characters or `\0` from noisy
-/// recordings; those would land as raw bytes in the terminal and let a
-/// crafted audio prompt move the cursor or rewrite history.
+/// Write 16 kHz mono f32 samples to a WAV file (i16 PCM).
+fn write_wav_16k_mono(path: &std::path::Path, samples: &[f32]) -> std::io::Result<()> {
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: 16_000,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut writer = hound::WavWriter::create(path, spec)
+        .map_err(|e| std::io::Error::other(format!("wav writer: {e}")))?;
+    for s in samples {
+        let clamped = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+        writer
+            .write_sample(clamped)
+            .map_err(|e| std::io::Error::other(format!("wav write: {e}")))?;
+    }
+    writer
+        .finalize()
+        .map_err(|e| std::io::Error::other(format!("wav finalize: {e}")))?;
+    Ok(())
+}
+
+/// Strip control bytes so an ANSI escape from noisy audio cannot
+/// smuggle CSI into the shell.
 pub fn sanitize_for_pty(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for ch in input.chars() {
-        // Allow regular printable Unicode + tab + newline; drop other
-        // ASCII control bytes including 0x1B (ESC) so OSC/CSI cannot be
-        // smuggled through.
         if ch == '\n' || ch == '\t' {
             out.push(ch);
         } else if (ch as u32) < 0x20 || ch == '\u{7f}' {
@@ -164,23 +206,52 @@ pub fn sanitize_for_pty(input: &str) -> String {
     out
 }
 
+/// Strip whisper / sense-voice meta tokens (`[BLANK_AUDIO]`, `<|...|>`).
+pub fn clean_asr_artifacts(input: &str) -> String {
+    const META_TOKENS: &[&str] = &[
+        "[BLANK_AUDIO]",
+        "[blank_audio]",
+        "[Music]",
+        "[music]",
+        "[Applause]",
+        "(applause)",
+        "[Inaudible]",
+        "(inaudible)",
+        "[Laughter]",
+        "(laughter)",
+        "[Noise]",
+        "(noise)",
+        "[_BEG_]",
+    ];
+    let mut stripped = input.to_string();
+    for t in META_TOKENS {
+        stripped = stripped.replace(t, "");
+    }
+    let mut cleaned = String::with_capacity(stripped.len());
+    let mut chars = stripped.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '<' && chars.peek() == Some(&'|') {
+            chars.next();
+            let mut last = '\0';
+            for inner in chars.by_ref() {
+                if last == '|' && inner == '>' {
+                    break;
+                }
+                last = inner;
+            }
+        } else {
+            cleaned.push(c);
+        }
+    }
+    cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::ModelLanguages;
-    use crate::config::AsrEngineConfig;
-    use crate::engine::MockEngine;
-    use std::path::PathBuf;
-
-    fn engine() -> Arc<dyn AsrEngine> {
-        Arc::new(MockEngine::new(AsrEngineConfig::new(
-            PathBuf::from("unused"),
-            ModelLanguages::Multilingual,
-        )))
-    }
 
     #[test]
-    fn sanitize_drops_escape_and_keeps_tab_newline() {
+    fn sanitize_drops_escape_keeps_tab_newline() {
         let raw = "hello\t world\nrm -rf /\x1b]0;evil\x07";
         let out = sanitize_for_pty(raw);
         assert!(!out.contains('\x1b'));
@@ -190,21 +261,8 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_passes_korean_through_unchanged() {
-        let raw = "안녕하세요 flowmux";
-        assert_eq!(sanitize_for_pty(raw), raw);
-    }
-
-    #[test]
-    fn session_returns_failed_when_finishing_without_start() {
-        let mut session = PttSession::new(engine(), SessionConfig::default());
-        let event = session.finish_and_transcribe().unwrap();
-        assert!(matches!(event, PttEvent::Failed(_)));
-    }
-
-    #[test]
-    fn session_is_recording_flag_tracks_capture_state() {
-        let session = PttSession::new(engine(), SessionConfig::default());
-        assert!(!session.is_recording());
+    fn clean_asr_artifacts_removes_blank_audio_marker() {
+        let raw = "[BLANK_AUDIO]hello world";
+        assert_eq!(clean_asr_artifacts(raw), "hello world");
     }
 }

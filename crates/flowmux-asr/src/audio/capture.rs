@@ -49,10 +49,10 @@ impl Default for CaptureSpec {
 /// thread.
 #[derive(Debug, Default)]
 pub struct PcmBuffer {
-    interleaved: Vec<f32>,
-    sample_rate: u32,
-    channels: u16,
-    truncated: bool,
+    pub interleaved: Vec<f32>,
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub truncated: bool,
 }
 
 impl PcmBuffer {
@@ -133,6 +133,15 @@ pub struct CaptureHandle {
 }
 
 impl CaptureHandle {
+    /// Clone the shared PCM buffer so a periodic worker can take
+    /// snapshots while the capture thread keeps appending to it. The
+    /// worker locks the mutex only long enough to copy the current
+    /// samples + sample-rate + channel layout out, then releases the
+    /// lock so the audio callback is not stalled.
+    pub fn buffer_arc(&self) -> Arc<Mutex<PcmBuffer>> {
+        self.buffer.clone()
+    }
+
     /// Signal the worker thread, join it, and resample the captured
     /// PCM down to 16 kHz mono.
     pub fn stop(mut self) -> Result<CapturedAudio, AudioError> {
@@ -192,13 +201,25 @@ fn run_capture(
             .ok_or_else(|| AudioError::DeviceNotFound(name.clone()))?,
     };
 
-    let supported = device
-        .default_input_config()
-        .map_err(|e| AudioError::DefaultConfig(e.to_string()))?;
+    // Prefer mono i16 16 kHz when the device supports it — this is
+    // the exact config `arecord -f S16_LE -r 16000 -c 1` succeeds
+    // with on the same hardware. cpal's `default_input_config()`
+    // often hands back stereo F32 44.1 kHz, which routes through
+    // PulseAudio's plug chain and attenuates the captured signal on
+    // some setups (VirtualBox AudioPCI in particular).
+    let supported = pick_preferred_input_config(&device)
+        .ok_or_else(|| AudioError::DefaultConfig("no supported input config".into()))?;
     let config = supported.config();
     let sample_format = supported.sample_format();
     let channels = config.channels;
     let sample_rate = config.sample_rate.0;
+    let device_name = device
+        .name()
+        .unwrap_or_else(|_| "<unknown>".to_string());
+    eprintln!(
+        "[flowmux-asr] capture device={} rate={} ch={} format={:?}",
+        device_name, sample_rate, channels, sample_format
+    );
 
     {
         let mut b = buffer.lock().unwrap();
@@ -250,6 +271,51 @@ fn run_capture(
 
     drop(stream);
     Ok(())
+}
+
+/// Walk every supported input config and pick the one closest to
+/// what the Korean Zipformer expects (mono / i16 / 16 kHz). Falls
+/// back to whatever cpal's `default_input_config` would return when
+/// no candidate is available, matching the previous behaviour.
+fn pick_preferred_input_config(device: &cpal::Device) -> Option<cpal::SupportedStreamConfig> {
+    use cpal::SampleRate;
+    let Ok(configs) = device.supported_input_configs() else {
+        return device.default_input_config().ok();
+    };
+    let configs: Vec<_> = configs.collect();
+    let target_rate = 16_000_u32;
+    let supports_rate = |cfg: &cpal::SupportedStreamConfigRange| {
+        cfg.min_sample_rate().0 <= target_rate && cfg.max_sample_rate().0 >= target_rate
+    };
+    // Score: lower is better.
+    //   +0 if channels==1 else +10
+    //   +0 if format==I16 else +20 (other) / +5 (F32)
+    //   +0 if 16 kHz is in range else +50
+    let score = |cfg: &cpal::SupportedStreamConfigRange| -> i32 {
+        let mut s = 0;
+        if cfg.channels() != 1 {
+            s += 10;
+        }
+        s += match cfg.sample_format() {
+            SampleFormat::I16 => 0,
+            SampleFormat::F32 => 5,
+            _ => 20,
+        };
+        if !supports_rate(cfg) {
+            s += 50;
+        }
+        s
+    };
+    let best = configs
+        .iter()
+        .min_by_key(|c| score(c))?
+        .clone();
+    let rate = if supports_rate(&best) {
+        SampleRate(target_rate)
+    } else {
+        best.min_sample_rate()
+    };
+    Some(best.with_sample_rate(rate))
 }
 
 fn build_stream_f32(

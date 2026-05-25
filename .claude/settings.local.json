@@ -4,7 +4,8 @@
       "Bash(flowmux --json browser open https://medium.com/flutter)",
       "Bash(~/.cargo/bin/flowmux --json browser open https://medium.com/flutter)",
       "Bash(~/.cargo/bin/flowmux browser *)",
-      "Bash(~/.cargo/bin/flowmux --help)"
+      "Bash(~/.cargo/bin/flowmux --help)",
+      "Read(//home/junsu/.local/share/applications/**)"
     ]
   }
 }

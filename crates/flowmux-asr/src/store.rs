@@ -1,28 +1,22 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! On-disk layout for downloaded ASR models.
+//! On-disk layout for downloaded streaming Zipformer models.
 //!
-//! Files live under `$XDG_DATA_HOME/flowmux/asr/models/<id>.bin`. The
-//! store is responsible for path resolution, partial-download
-//! placeholders, and listing currently-installed models. The downloader
-//! writes into a `<id>.bin.partial` next to the final name and renames
-//! it after the SHA-256 check passes — that rename is atomic on every
-//! POSIX filesystem flowmux supports, so a half-finished download cannot
-//! be mistaken for a verified model file on the next launch.
+//! Files live under `$XDG_DATA_HOME/flowmux/asr/models/<directory>/`.
+//! The downloader writes the source `.tar.bz2` into a `.partial`
+//! sibling, verifies the SHA-256, then extracts the archive in place
+//! and removes the tarball. A model is considered installed when the
+//! encoder ONNX file exists inside the expected directory.
 
 use crate::catalog::{ModelEntry, ModelId};
 use std::path::{Path, PathBuf};
 
-/// Storage root. Built once at startup. Cloning is cheap — every field
-/// is a `PathBuf`.
 #[derive(Debug, Clone)]
 pub struct ModelStore {
     root: PathBuf,
 }
 
 impl ModelStore {
-    /// `$XDG_DATA_HOME/flowmux/asr/models` on Linux. Falls back to a
-    /// best-effort `~/.local/share/...` when `XDG_DATA_HOME` is unset —
-    /// matches the convention used by the rest of flowmux.
+    /// `$XDG_DATA_HOME/flowmux/asr/models` on Linux.
     pub fn xdg_default() -> Option<Self> {
         let data = dirs::data_dir()?;
         Some(Self {
@@ -30,8 +24,6 @@ impl ModelStore {
         })
     }
 
-    /// Construct a store rooted under an explicit directory. Used by
-    /// tests to keep all writes inside a `tempfile::tempdir()`.
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
@@ -40,79 +32,84 @@ impl ModelStore {
         &self.root
     }
 
-    /// Final path of a verified model. The downloader renames a
-    /// `.partial` here only after the SHA-256 check passes.
-    pub fn model_path(&self, entry: &ModelEntry) -> PathBuf {
-        self.root.join(entry.filename())
+    /// Top-level directory that holds the unpacked model files.
+    pub fn model_dir(&self, entry: &ModelEntry) -> PathBuf {
+        self.root.join(&entry.directory_name)
     }
 
-    /// In-flight download target.
-    pub fn partial_path(&self, entry: &ModelEntry) -> PathBuf {
-        let mut name = entry.filename();
-        name.push_str(".partial");
-        self.root.join(name)
+    /// Path to a specific ONNX/tokens file inside the model directory.
+    pub fn file_path(&self, entry: &ModelEntry, filename: &str) -> PathBuf {
+        self.model_dir(entry).join(filename)
     }
 
-    /// True if the verified file exists. Does *not* re-verify the
-    /// SHA-256 here — the downloader has done that already; subsequent
-    /// reads pay only filesystem cost.
+    /// Where a partially-downloaded archive lives before verification.
+    pub fn partial_archive_path(&self, entry: &ModelEntry) -> PathBuf {
+        self.root.join(format!("{}.partial", entry.archive_filename()))
+    }
+
+    /// True when the model ONNX + tokens file both exist on disk.
     pub fn is_installed(&self, entry: &ModelEntry) -> bool {
-        self.model_path(entry).exists()
+        let dir = self.model_dir(entry);
+        dir.join(&entry.model_file).exists() && dir.join(&entry.tokens_file).exists()
     }
 
-    /// Ensure the parent directory exists. Safe to call repeatedly.
     pub fn ensure_dir(&self) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.root)
     }
 
-    /// Drop the verified model and any partial. Used by the "Remove
-    /// model" affordance in the options dialog.
+    /// Delete the unpacked model directory and any leftover archive.
     pub fn remove(&self, entry: &ModelEntry) -> std::io::Result<()> {
-        let final_path = self.model_path(entry);
-        let partial = self.partial_path(entry);
-        if final_path.exists() {
-            std::fs::remove_file(&final_path)?;
+        let dir = self.model_dir(entry);
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir)?;
         }
+        let partial = self.partial_archive_path(entry);
         if partial.exists() {
             std::fs::remove_file(&partial)?;
         }
         Ok(())
     }
 
-    /// Total bytes used by every verified model file under the root.
-    /// Used to surface a "총 사용량" line in the options dialog.
+    /// Recursive size of every installed model. Used by the options
+    /// dialog to surface a "총 사용량" line.
     pub fn disk_usage(&self) -> std::io::Result<u64> {
-        let Ok(read_dir) = std::fs::read_dir(&self.root) else {
-            return Ok(0);
-        };
-        let mut total = 0;
-        for ent in read_dir.flatten() {
-            if let Ok(md) = ent.metadata() {
-                if md.is_file() {
-                    total += md.len();
-                }
-            }
-        }
-        Ok(total)
+        Ok(walk_size(&self.root))
     }
 
-    /// Returns ids whose `.bin` exists on disk. Order is unspecified.
+    /// Directory names currently present under the root. Used by the
+    /// options dialog to surface a "설치된 모델" hint.
     pub fn installed_ids(&self) -> Vec<ModelId> {
         let Ok(read_dir) = std::fs::read_dir(&self.root) else {
             return Vec::new();
         };
         let mut out = Vec::new();
         for entry in read_dir.flatten() {
-            let path = entry.path();
-            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-                continue;
-            };
-            if let Some(stem) = name.strip_suffix(".bin") {
-                out.push(ModelId::from(stem));
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                if let Some(name) = entry.file_name().to_str() {
+                    out.push(ModelId::from(name));
+                }
             }
         }
         out
     }
+}
+
+fn walk_size(root: &Path) -> u64 {
+    let Ok(read_dir) = std::fs::read_dir(root) else {
+        return 0;
+    };
+    let mut total = 0;
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        if path.is_file() {
+            if let Ok(md) = path.metadata() {
+                total += md.len();
+            }
+        } else if path.is_dir() {
+            total += walk_size(&path);
+        }
+    }
+    total
 }
 
 #[cfg(test)]
@@ -135,52 +132,52 @@ mod tests {
     }
 
     #[test]
-    fn partial_path_appends_partial_suffix_to_final_path() {
-        let (_d, store) = tmp();
-        let entry = recommended_default();
-        let final_path = store.model_path(&entry);
-        let partial = store.partial_path(&entry);
-        let expected_partial = format!("{}.partial", final_path.to_string_lossy());
-        assert_eq!(partial.to_string_lossy(), expected_partial);
-        assert!(partial.to_string_lossy().ends_with(".bin.partial"));
-    }
-
-    #[test]
-    fn is_installed_reflects_filesystem_state() {
+    fn is_installed_only_true_when_every_file_exists() {
         let (_d, store) = tmp();
         let entry = recommended_default();
         assert!(!store.is_installed(&entry));
-        std::fs::write(store.model_path(&entry), b"fake").unwrap();
+        let dir = store.model_dir(&entry);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(&entry.model_file), b"m").unwrap();
+        assert!(!store.is_installed(&entry));
+        std::fs::write(dir.join(&entry.tokens_file), b"t").unwrap();
         assert!(store.is_installed(&entry));
     }
 
     #[test]
-    fn remove_clears_verified_and_partial_files() {
+    fn remove_drops_directory_and_archive() {
         let (_d, store) = tmp();
         let entry = recommended_default();
-        std::fs::write(store.model_path(&entry), b"a").unwrap();
-        std::fs::write(store.partial_path(&entry), b"b").unwrap();
+        std::fs::create_dir_all(store.model_dir(&entry)).unwrap();
+        std::fs::write(store.model_dir(&entry).join("x"), b"x").unwrap();
+        std::fs::write(store.partial_archive_path(&entry), b"y").unwrap();
         store.remove(&entry).unwrap();
-        assert!(!store.is_installed(&entry));
-        assert!(!store.partial_path(&entry).exists());
+        assert!(!store.model_dir(&entry).exists());
+        assert!(!store.partial_archive_path(&entry).exists());
     }
 
     #[test]
-    fn installed_ids_lists_only_bin_files() {
+    fn installed_ids_lists_directories() {
         let (_d, store) = tmp();
-        let entry = recommended_default();
-        std::fs::write(store.model_path(&entry), b"x").unwrap();
-        std::fs::write(store.root().join("README.md"), b"docs").unwrap();
-        std::fs::write(store.partial_path(&entry), b"y").unwrap();
-        let ids = store.installed_ids();
-        assert_eq!(ids, vec![entry.id]);
+        std::fs::create_dir_all(store.root().join("model-a")).unwrap();
+        std::fs::create_dir_all(store.root().join("model-b")).unwrap();
+        std::fs::write(store.root().join("README"), b"docs").unwrap();
+        let mut ids: Vec<_> = store
+            .installed_ids()
+            .into_iter()
+            .map(|i| i.as_str().to_string())
+            .collect();
+        ids.sort();
+        assert_eq!(ids, vec!["model-a".to_string(), "model-b".to_string()]);
     }
 
     #[test]
-    fn disk_usage_sums_files_in_root() {
+    fn disk_usage_sums_nested_files() {
         let (_d, store) = tmp();
-        std::fs::write(store.root().join("a.bin"), vec![0u8; 1024]).unwrap();
-        std::fs::write(store.root().join("b.bin"), vec![0u8; 256]).unwrap();
-        assert_eq!(store.disk_usage().unwrap(), 1024 + 256);
+        let sub = store.root().join("model-a");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("encoder"), vec![0u8; 512]).unwrap();
+        std::fs::write(sub.join("decoder"), vec![0u8; 256]).unwrap();
+        assert_eq!(store.disk_usage().unwrap(), 512 + 256);
     }
 }

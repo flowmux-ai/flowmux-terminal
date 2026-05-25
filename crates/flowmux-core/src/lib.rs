@@ -914,8 +914,20 @@ fn add_surface_to_leaf_descend(
                         .take()
                         .expect("surface is Some until taken at match");
                     let id = s.id;
+                    // Insert immediately after the currently active
+                    // surface so the new tab appears next to the one
+                    // the user was working on, matching tmux's
+                    // `new-window -a` and the way most multiplexers
+                    // expose "add tab here". Falls back to push when
+                    // the active id is missing (shouldn't happen, but
+                    // keeps the function total).
+                    let insert_pos = surfaces
+                        .iter()
+                        .position(|x| x.id == *active)
+                        .map(|i| i + 1)
+                        .unwrap_or(surfaces.len());
+                    surfaces.insert(insert_pos, s);
                     *active = id;
-                    surfaces.push(s);
                     Some(id)
                 }
                 PaneContent::Terminal { .. } | PaneContent::Browser { .. } => None,

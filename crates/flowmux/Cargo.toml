@@ -50,10 +50,8 @@ flowmux-vcs = { workspace = true }
 flowmux-daemon = { workspace = true }
 flowmux-cookies = { workspace = true }
 flowmux-browser = { workspace = true }
-# Voice input (push-to-talk ASR). The GTK GUI is the one place that
-# pulls in the heavy whisper.cpp backend; the rest of the workspace
-# uses the mock engine.
-flowmux-asr = { workspace = true, features = ["whisper-engine"] }
+# Voice input (push-to-talk ASR) — streaming Zipformer via sherpa-onnx.
+flowmux-asr = { workspace = true }
 crossbeam-channel = { workspace = true }
 
 anyhow = { workspace = true }

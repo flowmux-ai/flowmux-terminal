@@ -29,9 +29,10 @@ use flowmux_config::options::{
 pub fn present(
     parent: &adw::ApplicationWindow,
     current: Options,
+    tokio_handle: Option<tokio::runtime::Handle>,
     on_apply: impl Fn(Options) + 'static,
 ) {
-    let dialog = build_dialog(parent, &current, on_apply);
+    let dialog = build_dialog(parent, &current, tokio_handle, on_apply);
     dialog.present();
 }
 
@@ -40,6 +41,7 @@ pub fn present(
 fn build_dialog(
     parent: &adw::ApplicationWindow,
     current: &Options,
+    tokio_handle: Option<tokio::runtime::Handle>,
     on_apply: impl Fn(Options) + 'static,
 ) -> adw::Window {
     let dialog = adw::Window::builder()
@@ -95,9 +97,10 @@ fn build_dialog(
     let keybindings_tab = crate::ui::keybindings_panel::build(kb_state.clone());
 
     // Voice input tab — edits write into asr_state, picked up by
-    // collect_options when the user clicks OK.
+    // collect_options when the user clicks OK. The tokio handle is
+    // threaded through so the model downloader can `spawn` on it.
     let asr_state = std::rc::Rc::new(std::cell::RefCell::new(current.asr.clone()));
-    let asr_tab = crate::ui::asr_panel::build(asr_state.clone());
+    let asr_tab = crate::ui::asr_panel::build(asr_state.clone(), tokio_handle.clone());
 
     // Use freedesktop symbolic icon names so the switcher picks up the
     // current Adwaita theme automatically. `preferences-system-symbolic`

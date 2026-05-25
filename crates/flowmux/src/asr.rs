@@ -1,51 +1,73 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Push-to-talk controller: glues the [`flowmux_asr`] engine to the
-//! GTK main thread.
+//! Push-to-talk controller — Hold-mode only.
 //!
-//! The controller is created once at startup and lives behind an
-//! `Rc<RefCell<…>>` shared by the keybinding action handler, the
-//! headerbar mic button, and the options dialog. It is GTK-thread-
-//! affine so widget updates can happen synchronously; long-running
-//! work (model load, transcription) is offloaded to tokio's
-//! `spawn_blocking` pool and the result is delivered back through an
-//! `async_channel` that the dispatch loop drains on the main thread.
+//! The controller decouples capture from engine availability so the
+//! user can press Ctrl+Alt+Space immediately at app start without
+//! waiting for SenseVoice to finish loading. Concretely:
+//!
+//! * The streaming engine is stored behind
+//!   `Arc<Mutex<Option<Arc<SenseVoiceEngine>>>>` and populated
+//!   asynchronously by `schedule_preload`.
+//! * `start()` opens the cpal capture immediately — no engine
+//!   dependency.
+//! * The streaming-partial pump and the finish-time transcription
+//!   poll the cell, picking up the engine as soon as the background
+//!   preload completes. Audio captured during the wait is fed in
+//!   without loss.
+//!
+//! The Toggle mode the crate previously shipped was removed at the
+//! user's request; the EventControllerKey installed here drives a
+//! single press-to-record / release-to-transcribe loop.
 
 use crate::keybindings::{FocusedPane, TerminalRegistry};
 use crate::ui::window::ClipboardToast;
 use adw::prelude::*;
-use flowmux_asr::audio::TARGET_SAMPLE_RATE;
 use flowmux_asr::catalog::{self, ModelEntry};
-use flowmux_asr::config::{AsrEngineConfig, Language};
-use flowmux_asr::engine::{load_engine, AsrEngine};
-use flowmux_asr::session::{sanitize_for_pty, PttEvent, PttSession, SessionConfig};
-use flowmux_asr::ModelStore;
-use flowmux_config::asr::{AsrLanguage, AsrOptions, PttMode};
-use std::cell::RefCell;
+use flowmux_asr::engine::load_engine;
+use flowmux_asr::session::{clean_asr_artifacts, sanitize_for_pty, PttSession, SessionConfig};
+use flowmux_asr::{ModelStore, SenseVoiceEngine};
+use flowmux_config::asr::AsrOptions;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// State emitted to the headerbar indicator + toast layer.
-#[derive(Debug, Clone)]
+/// Convenience alias for the engine slot shared between the
+/// controller, the preload worker, and the per-session pump / finish
+/// workers.
+type EngineCell = Arc<Mutex<Option<Arc<SenseVoiceEngine>>>>;
+
+#[derive(Clone)]
 pub enum AsrUiEvent {
     Recording,
+    Partial { delta: String },
     Transcribing,
-    Done { text: String, language: String },
+    Done { delta: String },
     DroppedTooShort { seconds: f32 },
     Failed(String),
     Cancelled,
+    EnginePreloaded,
 }
 
-/// Pure-Rust controller shell. GTK widgets that subscribe to status
-/// changes use [`AsrController::set_event_handler`] to register one
-/// callback fired on every state transition.
 pub struct AsrController {
     options: AsrOptions,
     runtime: tokio::runtime::Handle,
     store: ModelStore,
-    engine: Option<Arc<dyn AsrEngine>>,
-    engine_signature: Option<String>,
+    /// Shared engine slot. Populated by `schedule_preload`; consumed
+    /// by pump / finish workers via poll.
+    engine_cell: EngineCell,
+    /// Signature of the engine currently loaded into `engine_cell`.
+    /// Used to detect when a settings change requires a reload.
+    engine_signature: Arc<Mutex<Option<String>>>,
+    /// True once a preload spawn_blocking is in flight; prevents
+    /// duplicate loads.
+    preload_in_flight: Arc<AtomicBool>,
     session: Option<PttSession>,
+    started_at: Option<std::time::Instant>,
+    pump_cancel: Option<Arc<AtomicBool>>,
+    finish_cancel: Option<Arc<AtomicBool>>,
+    last_injection: Arc<Mutex<String>>,
     event_tx: async_channel::Sender<AsrUiEvent>,
     event_rx: Option<async_channel::Receiver<AsrUiEvent>>,
     focused: FocusedPane,
@@ -53,8 +75,6 @@ pub struct AsrController {
     clipboard_toast: ClipboardToast,
 }
 
-/// Convenience type — the controller is always shared by reference,
-/// never sent across threads.
 pub type AsrControllerHandle = Rc<RefCell<AsrController>>;
 
 impl AsrController {
@@ -67,9 +87,6 @@ impl AsrController {
     ) -> AsrControllerHandle {
         let (event_tx, event_rx) = async_channel::unbounded::<AsrUiEvent>();
         let store = ModelStore::xdg_default().unwrap_or_else(|| {
-            // Fall back to a temp store rather than panic — the
-            // options dialog reports the error inline when the user
-            // tries to download a model.
             ModelStore::new(std::env::temp_dir().join("flowmux-asr-models"))
         });
         let _ = store.ensure_dir();
@@ -77,9 +94,14 @@ impl AsrController {
             options,
             runtime,
             store,
-            engine: None,
-            engine_signature: None,
+            engine_cell: Arc::new(Mutex::new(None)),
+            engine_signature: Arc::new(Mutex::new(None)),
+            preload_in_flight: Arc::new(AtomicBool::new(false)),
             session: None,
+            started_at: None,
+            pump_cancel: None,
+            finish_cancel: None,
+            last_injection: Arc::new(Mutex::new(String::new())),
             event_tx,
             event_rx: Some(event_rx),
             focused,
@@ -88,9 +110,6 @@ impl AsrController {
         }))
     }
 
-    /// Hand the receiver off to the dispatch loop exactly once. The
-    /// caller spawns a `glib::MainContext::spawn_local` that drains it
-    /// and updates UI in response to each event.
     pub fn take_event_receiver(&mut self) -> Option<async_channel::Receiver<AsrUiEvent>> {
         self.event_rx.take()
     }
@@ -99,68 +118,100 @@ impl AsrController {
         &self.options
     }
 
-    /// Push an updated [`AsrOptions`] snapshot. If the model changed
-    /// the cached engine is dropped so the next session loads the
-    /// new one.
     pub fn replace_options(&mut self, options: AsrOptions) {
-        if options.active_model_id != self.options.active_model_id
-            || options.language.as_code() != self.options.language.as_code()
-            || options.translate_to_english != self.options.translate_to_english
-        {
-            self.engine = None;
-            self.engine_signature = None;
+        let model_changed = options.active_model_id != self.options.active_model_id;
+        let language_changed = options.language.as_code() != self.options.language.as_code();
+        if model_changed || language_changed {
+            *self.engine_cell.lock().unwrap() = None;
+            *self.engine_signature.lock().unwrap() = None;
         }
         self.options = options;
     }
 
     pub fn is_recording(&self) -> bool {
-        self.session
-            .as_ref()
-            .map(|s| s.is_recording())
-            .unwrap_or(false)
+        self.session.is_some()
     }
 
-    /// Entry point for the keybinding action / mic button. Treats the
-    /// call as a toggle in [`PttMode::Toggle`] mode and as a start in
-    /// [`PttMode::Hold`] mode. Hold mode pairs this with
-    /// [`Self::release`] on key-release.
-    pub fn activate(&mut self) {
+    /// Trigger the background engine load. No-op when an engine is
+    /// already in the cell with the right signature, or when a
+    /// preload is already in flight.
+    pub fn schedule_preload(&self) {
+        if !self.is_ready_to_record() {
+            return;
+        }
+        let target_signature = self.signature();
+        if self.engine_signature.lock().unwrap().as_deref() == Some(target_signature.as_str()) {
+            return;
+        }
+        if self.preload_in_flight.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let Some(entry) = self.active_entry() else {
+            self.preload_in_flight.store(false, Ordering::SeqCst);
+            return;
+        };
+        let lang_code = self.options.language.as_code().to_string();
+        let store = self.store.clone();
+        let cell = self.engine_cell.clone();
+        let sig_cell = self.engine_signature.clone();
+        let in_flight = self.preload_in_flight.clone();
+        let tx = self.event_tx.clone();
+        let signature = target_signature;
+        self.runtime.spawn_blocking(move || {
+            eprintln!(
+                "[flowmux-asr] preloading engine for '{}' (lang={})",
+                entry.id.as_str(),
+                lang_code
+            );
+            let started = std::time::Instant::now();
+            let mut effective = entry.clone();
+            effective.language = lang_code;
+            match load_engine(&effective, &store) {
+                Ok(engine) => {
+                    eprintln!(
+                        "[flowmux-asr] engine preloaded in {:.2}s",
+                        started.elapsed().as_secs_f32()
+                    );
+                    *cell.lock().unwrap() = Some(engine);
+                    *sig_cell.lock().unwrap() = Some(signature);
+                    let _ = tx.send_blocking(AsrUiEvent::EnginePreloaded);
+                }
+                Err(e) => {
+                    eprintln!("[flowmux-asr] engine preload failed: {e}");
+                }
+            }
+            in_flight.store(false, Ordering::SeqCst);
+        });
+    }
+
+    pub fn is_ready_to_record(&self) -> bool {
+        if !self.options.is_ready() {
+            return false;
+        }
+        let id = &self.options.active_model_id;
+        let Some(entry) = catalog::entries().into_iter().find(|e| e.id.as_str() == id) else {
+            return false;
+        };
+        self.store.is_installed(&entry)
+    }
+
+    /// Hold-mode press: start capture and pump.
+    pub fn start(&mut self) -> Result<(), ()> {
+        if self.is_recording() {
+            return Ok(());
+        }
+        if let Some(cancel) = self.finish_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        if let Some(cancel) = self.pump_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
         if !self.options.is_ready() {
             self.emit(AsrUiEvent::Failed(
                 "음성 입력이 비활성화되어 있거나 모델이 선택되지 않았습니다.".into(),
             ));
-            return;
+            return Err(());
         }
-        if self.is_recording() {
-            // Either second tap in Toggle, or accidental autorepeat.
-            // Finish the session in both cases.
-            self.finish();
-            return;
-        }
-        if self.start().is_err() {
-            // Already surfaced through emit() inside start().
-        }
-    }
-
-    /// Pair of [`Self::activate`] for [`PttMode::Hold`] — fired when
-    /// the accelerator's key is released.
-    pub fn release(&mut self) {
-        if self.options.ptt_mode != PttMode::Hold {
-            return;
-        }
-        if self.is_recording() {
-            self.finish();
-        }
-    }
-
-    pub fn cancel(&mut self) {
-        if let Some(mut session) = self.session.take() {
-            let _ = session.cancel();
-        }
-        self.emit(AsrUiEvent::Cancelled);
-    }
-
-    fn start(&mut self) -> Result<(), ()> {
         let Some(entry) = self.active_entry() else {
             self.emit(AsrUiEvent::Failed("선택된 모델을 찾을 수 없습니다.".into()));
             return Err(());
@@ -171,90 +222,229 @@ impl AsrController {
             ));
             return Err(());
         }
-        let engine = match self.ensure_engine(&entry) {
-            Ok(e) => e,
-            Err(msg) => {
-                self.emit(AsrUiEvent::Failed(msg));
-                return Err(());
-            }
-        };
+        // Kick the engine load if it has not started yet. Capture
+        // begins regardless — the recogniser is only required at
+        // finish time and pump-tick time.
+        self.schedule_preload();
         let session_config = SessionConfig {
             device_name: self.options.input_device.clone(),
             max_duration: Duration::from_secs(self.options.max_seconds as u64),
             auto_enter: self.options.auto_enter,
-            min_duration: Duration::from_millis(250),
+            min_duration: Duration::from_millis(150),
+            input_gain: self.options.input_gain,
         };
-        let mut session = PttSession::new(engine, session_config);
-        match session.start() {
-            Ok(_) => {
-                self.session = Some(session);
-                self.emit(AsrUiEvent::Recording);
-                Ok(())
+        let mut session = PttSession::new(session_config);
+        if let Err(e) = session.start() {
+            self.emit(AsrUiEvent::Failed(format!("녹음 시작 실패: {e}")));
+            return Err(());
+        }
+        {
+            let mut last = self.last_injection.lock().unwrap();
+            last.clear();
+        }
+        if let Some(buffer_arc) = session.buffer_arc() {
+            let cancel = Arc::new(AtomicBool::new(false));
+            self.pump_cancel = Some(cancel.clone());
+            self.spawn_partial_pump(buffer_arc, cancel);
+        }
+        self.session = Some(session);
+        self.started_at = Some(std::time::Instant::now());
+        self.emit(AsrUiEvent::Recording);
+        Ok(())
+    }
+
+    fn spawn_partial_pump(
+        &self,
+        buffer_arc: Arc<Mutex<flowmux_asr::audio::capture::PcmBuffer>>,
+        cancel: Arc<AtomicBool>,
+    ) {
+        let tx = self.event_tx.clone();
+        let last_injection = self.last_injection.clone();
+        let engine_cell = self.engine_cell.clone();
+        let gain = self.options.input_gain.clamp(1.0, 30.0);
+        const TICK: Duration = Duration::from_millis(1500);
+        const MIN_SECONDS: f32 = 0.6;
+        self.runtime.spawn(async move {
+            // Wait one tick before the first snapshot so there is
+            // actual audio to transcribe.
+            tokio::time::sleep(TICK).await;
+            loop {
+                if cancel.load(Ordering::Relaxed) {
+                    break;
+                }
+                // Pull the engine into an owned Option in its own
+                // statement so the MutexGuard does not live across
+                // the `await` below — otherwise the future is !Send
+                // and tokio refuses to schedule it.
+                let engine_snapshot = engine_cell.lock().unwrap().clone();
+                let engine = match engine_snapshot {
+                    Some(e) => e,
+                    None => {
+                        // Preload still running — skip this tick.
+                        tokio::time::sleep(TICK).await;
+                        continue;
+                    }
+                };
+                let pcm = {
+                    let buf = buffer_arc.lock().unwrap();
+                    if buf.sample_rate == 0
+                        || buf.channels == 0
+                        || buf.duration_seconds() < MIN_SECONDS
+                    {
+                        None
+                    } else {
+                        let mono = flowmux_asr::audio::resample::resample_to_16k_mono(
+                            &buf.interleaved,
+                            buf.sample_rate,
+                            buf.channels,
+                        )
+                        .ok();
+                        mono.map(|mut m| {
+                            if gain > 1.001 {
+                                for s in m.iter_mut() {
+                                    *s = (*s * gain).clamp(-1.0, 1.0);
+                                }
+                            }
+                            m
+                        })
+                    }
+                };
+                let Some(pcm) = pcm else {
+                    tokio::time::sleep(TICK).await;
+                    continue;
+                };
+                if pcm.is_empty() {
+                    tokio::time::sleep(TICK).await;
+                    continue;
+                }
+                let result = tokio::task::spawn_blocking(move || {
+                    engine.transcribe(16_000, &pcm)
+                })
+                .await;
+                if cancel.load(Ordering::Relaxed) {
+                    break;
+                }
+                if let Ok(text) = result {
+                    let cleaned = clean_asr_artifacts(&text);
+                    if cleaned.is_empty() {
+                        tokio::time::sleep(TICK).await;
+                        continue;
+                    }
+                    let sanitized = sanitize_for_pty(&cleaned);
+                    let payload = {
+                        let mut last = last_injection.lock().unwrap();
+                        if *last == sanitized {
+                            String::new()
+                        } else {
+                            let p = build_replace_payload(&last, &sanitized);
+                            *last = sanitized.clone();
+                            p
+                        }
+                    };
+                    if !payload.is_empty() {
+                        if tx.send(AsrUiEvent::Partial { delta: payload }).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                tokio::time::sleep(TICK).await;
             }
-            Err(e) => {
-                self.emit(AsrUiEvent::Failed(format!("녹음 시작 실패: {e}")));
-                Err(())
-            }
+        });
+    }
+
+    /// Hold-mode release: stop capture, transcribe, inject.
+    pub fn release(&mut self) {
+        if self.is_recording() {
+            self.finish();
         }
     }
 
+    pub fn cancel(&mut self) {
+        if let Some(cancel) = self.pump_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        if let Some(cancel) = self.finish_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        if let Some(mut session) = self.session.take() {
+            session.cancel();
+        }
+        self.started_at = None;
+        self.emit(AsrUiEvent::Cancelled);
+    }
+
     fn finish(&mut self) {
+        if let Some(cancel) = self.pump_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
         let Some(mut session) = self.session.take() else {
             return;
         };
+        let duration = self
+            .started_at
+            .take()
+            .map(|t| t.elapsed())
+            .unwrap_or_default();
+        if duration < Duration::from_millis(150) {
+            session.cancel();
+            self.emit(AsrUiEvent::DroppedTooShort {
+                seconds: duration.as_secs_f32(),
+            });
+            return;
+        }
         self.emit(AsrUiEvent::Transcribing);
         let tx = self.event_tx.clone();
-        // Move the (Send) session onto a tokio blocking worker so the
-        // whisper.cpp call cannot stall the GTK main loop.
+        let last_injection = self.last_injection.clone();
+        let engine_cell = self.engine_cell.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.finish_cancel = Some(cancel.clone());
         self.runtime.spawn_blocking(move || {
-            let result = session.finish_and_transcribe();
+            // Wait (with cancel) for the engine to finish loading.
+            // The capture has already stopped, so any delay here only
+            // affects how long the final text takes to appear — the
+            // user's audio was preserved.
+            let engine = match wait_for_engine(&engine_cell, &cancel) {
+                Some(e) => e,
+                None => return, // cancelled
+            };
+            let result = session.finish(&engine);
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
             let event = match result {
-                Ok(PttEvent::Done(t)) => AsrUiEvent::Done {
-                    text: sanitize_for_pty(&t.text),
-                    language: t.language,
-                },
-                Ok(PttEvent::DroppedTooShort { duration_seconds }) => AsrUiEvent::DroppedTooShort {
-                    seconds: duration_seconds,
-                },
-                Ok(PttEvent::Cancelled) => AsrUiEvent::Cancelled,
-                Ok(PttEvent::Failed(msg)) => AsrUiEvent::Failed(msg),
-                Ok(other) => AsrUiEvent::Failed(format!("unexpected state: {other:?}")),
-                Err(e) => AsrUiEvent::Failed(format!("transcription failed: {e}")),
+                Ok(text) => {
+                    let cleaned = clean_asr_artifacts(&text);
+                    let sanitized = sanitize_for_pty(&cleaned);
+                    let mut last = last_injection.lock().unwrap();
+                    let payload = if *last == sanitized {
+                        String::new()
+                    } else {
+                        let p = build_replace_payload(&last, &sanitized);
+                        *last = sanitized.clone();
+                        p
+                    };
+                    AsrUiEvent::Done { delta: payload }
+                }
+                Err(e) => AsrUiEvent::Failed(format!("finalize failed: {e}")),
             };
             let _ = tx.send_blocking(event);
         });
     }
 
-    fn ensure_engine(&mut self, entry: &ModelEntry) -> Result<Arc<dyn AsrEngine>, String> {
-        let signature = format!(
-            "{}::{}::{}",
-            entry.id.as_str(),
-            self.options.language.as_code(),
-            self.options.translate_to_english
-        );
-        if let Some(cached) = &self.engine {
-            if self.engine_signature.as_deref() == Some(signature.as_str()) {
-                return Ok(cached.clone());
-            }
-        }
-        let path = self.store.model_path(entry);
-        let language = match &self.options.language {
-            AsrLanguage::Auto => Language::Auto,
-            AsrLanguage::Code(c) => Language::Code(c.clone()),
-        };
-        let cfg = AsrEngineConfig::new(path, entry.languages)
-            .with_language(language)
-            .with_translate(self.options.translate_to_english);
-        let engine = load_engine(cfg).map_err(|e| format!("엔진 로드 실패: {e}"))?;
-        let engine: Arc<dyn AsrEngine> = Arc::from(engine);
-        self.engine = Some(engine.clone());
-        self.engine_signature = Some(signature);
-        Ok(engine)
-    }
-
     fn active_entry(&self) -> Option<ModelEntry> {
         let id = self.options.active_model_id.clone();
-        catalog::entries().into_iter().find(|e| e.id.as_str() == id)
+        catalog::entries()
+            .into_iter()
+            .find(|e| e.id.as_str() == id)
+            .or_else(|| Some(catalog::recommended_default()))
+    }
+
+    fn signature(&self) -> String {
+        let id = self
+            .active_entry()
+            .map(|e| e.id.as_str().to_string())
+            .unwrap_or_default();
+        format!("{}::{}", id, self.options.language.as_code())
     }
 
     fn emit(&self, event: AsrUiEvent) {
@@ -262,35 +452,73 @@ impl AsrController {
     }
 }
 
-/// Take an [`AsrUiEvent`] received on the GTK main thread and apply
-/// its side effects: inject text into the focused terminal, update the
-/// toast, push the indicator state. Pulled out of the controller so
-/// it can run inside `spawn_local` without holding the borrow.
+/// Block (with a 100 ms poll) until the engine cell is populated or
+/// the cancel flag is set. Returns `None` only when cancelled.
+fn wait_for_engine(cell: &EngineCell, cancel: &AtomicBool) -> Option<Arc<SenseVoiceEngine>> {
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
+        if let Some(engine) = cell.lock().unwrap().clone() {
+            return Some(engine);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn build_replace_payload(previous: &str, candidate: &str) -> String {
+    let prev_chars: Vec<char> = previous.chars().collect();
+    let cand_chars: Vec<char> = candidate.chars().collect();
+    let mut common = 0;
+    while common < prev_chars.len()
+        && common < cand_chars.len()
+        && prev_chars[common] == cand_chars[common]
+    {
+        common += 1;
+    }
+    let deletions = prev_chars.len() - common;
+    let additions: String = cand_chars[common..].iter().collect();
+    let mut payload = String::with_capacity(deletions + additions.len());
+    for _ in 0..deletions {
+        payload.push('\x7f');
+    }
+    payload.push_str(&additions);
+    payload
+}
+
 pub fn handle_ui_event(
     event: AsrUiEvent,
     focused: &FocusedPane,
     registry: &TerminalRegistry,
     clipboard_toast: &ClipboardToast,
     indicator: &dyn AsrIndicator,
+    auto_enter: bool,
 ) {
+    let _ = clipboard_toast;
     match event {
-        AsrUiEvent::Recording => {
-            indicator.set_recording(true);
-            clipboard_toast.show_with_message("🎤 녹음 중… 키를 떼면 인식됩니다");
+        AsrUiEvent::EnginePreloaded => {}
+        AsrUiEvent::Recording => indicator.set_recording(true),
+        AsrUiEvent::Partial { delta } => {
+            if !delta.is_empty() {
+                inject_text(focused, registry, &delta);
+            }
         }
-        AsrUiEvent::Transcribing => {
-            indicator.set_busy(true);
-        }
-        AsrUiEvent::Done { text, language: _ } => {
+        AsrUiEvent::Transcribing => indicator.set_busy(true),
+        AsrUiEvent::Done { delta } => {
             indicator.set_recording(false);
             indicator.set_busy(false);
-            inject_text(focused, registry, clipboard_toast, &text);
+            if !delta.trim().is_empty() {
+                inject_text(focused, registry, &delta);
+            }
+            if auto_enter {
+                inject_text(focused, registry, "\r");
+            }
         }
         AsrUiEvent::DroppedTooShort { seconds } => {
             indicator.set_recording(false);
             indicator.set_busy(false);
             clipboard_toast.show_with_message(&format!(
-                "음성이 너무 짧습니다 ({:.2}초). 다시 시도하세요.",
+                "음성이 너무 짧습니다 ({:.2}초)",
                 seconds
             ));
         }
@@ -302,79 +530,107 @@ pub fn handle_ui_event(
         AsrUiEvent::Cancelled => {
             indicator.set_recording(false);
             indicator.set_busy(false);
-            clipboard_toast.show_with_message("음성 입력이 취소되었습니다");
         }
     }
 }
 
-fn inject_text(
-    focused: &FocusedPane,
-    registry: &TerminalRegistry,
-    clipboard_toast: &ClipboardToast,
-    text: &str,
-) {
-    let trimmed = text.trim_end_matches('\n');
-    if trimmed.is_empty() {
-        clipboard_toast.show_with_message("인식된 음성이 없습니다");
+fn inject_text(focused: &FocusedPane, registry: &TerminalRegistry, text: &str) {
+    if text.is_empty() {
         return;
     }
     let Some(pane_id) = focused.get() else {
-        clipboard_toast.show_with_message("포커스된 pane이 없습니다");
         return;
     };
     let registry = registry.borrow();
     let Some(terminal) = registry.active_terminal(pane_id) else {
-        clipboard_toast.show_with_message("터미널 pane이 포커스되어 있어야 음성 입력이 동작합니다");
         return;
     };
     terminal.feed_text(text);
-    clipboard_toast.show_with_message(&format!("🎤 입력됨: {}", preview(trimmed)));
 }
 
-fn preview(text: &str) -> String {
-    const MAX: usize = 60;
-    if text.chars().count() <= MAX {
-        return text.to_string();
-    }
-    let mut out: String = text.chars().take(MAX).collect();
-    out.push('…');
-    out
-}
-
-/// Tiny trait so the controller can talk to whatever indicator widget
-/// the headerbar exposes without coupling to a concrete `Button` type.
 pub trait AsrIndicator {
     fn set_recording(&self, on: bool);
     fn set_busy(&self, on: bool);
 }
 
-/// Default indicator backed by a single [`gtk::Button`]. The button
-/// gains the `flowmux-asr-recording` CSS class while a session is
-/// active so a stylesheet can paint it red.
-pub struct ButtonIndicator {
-    pub button: gtk::Button,
+pub struct DotIndicator {
+    pub widget: gtk::Box,
 }
 
-impl AsrIndicator for ButtonIndicator {
+impl AsrIndicator for DotIndicator {
     fn set_recording(&self, on: bool) {
-        if on {
-            self.button.add_css_class("flowmux-asr-recording");
-        } else {
-            self.button.remove_css_class("flowmux-asr-recording");
-        }
+        self.widget.set_visible(on);
     }
-    fn set_busy(&self, on: bool) {
-        if on {
-            self.button.add_css_class("flowmux-asr-busy");
-        } else {
-            self.button.remove_css_class("flowmux-asr-busy");
-        }
-    }
+    fn set_busy(&self, _on: bool) {}
 }
 
-/// Whisper accepts up to 30 s in one shot; the controller surfaces
-/// that as a status hint for the headerbar.
-pub fn max_buffer_seconds(opts: &AsrOptions) -> u16 {
-    AsrOptions::clamp_max_seconds(opts.max_seconds)
-        .min((30_u32.saturating_mul(TARGET_SAMPLE_RATE) / TARGET_SAMPLE_RATE) as u16)
+/// Window-level Hold-mode key controller. Press of the configured
+/// accelerator (default Ctrl+Alt+Space) opens the capture; release
+/// of the trailing key (Space) closes it and queues the
+/// transcription. Toggle mode and the Enter / Esc helper bindings
+/// were removed at the user's request.
+pub fn install_ptt_event_controller(
+    window: &adw::ApplicationWindow,
+    asr_controller: AsrControllerHandle,
+) {
+    use gtk::gdk;
+    use gtk::glib::Propagation;
+
+    let ctrl = gtk::EventControllerKey::new();
+    ctrl.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let pressed = Rc::new(Cell::new(false));
+
+    let target_keyval = gdk::Key::space;
+    let target_mods = gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK;
+    let relevant_mask = gdk::ModifierType::CONTROL_MASK
+        | gdk::ModifierType::ALT_MASK
+        | gdk::ModifierType::SHIFT_MASK
+        | gdk::ModifierType::SUPER_MASK
+        | gdk::ModifierType::META_MASK;
+
+    {
+        let asr = asr_controller.clone();
+        let pressed = pressed.clone();
+        ctrl.connect_key_pressed(move |_, keyval, _keycode, modifier| {
+            if keyval != target_keyval {
+                return Propagation::Proceed;
+            }
+            let modifier_subset = modifier & relevant_mask;
+            if modifier_subset != target_mods {
+                return Propagation::Proceed;
+            }
+            eprintln!(
+                "[flowmux-asr] hold press: latch_was={}",
+                pressed.get()
+            );
+            if pressed.get() {
+                return Propagation::Stop;
+            }
+            pressed.set(true);
+            match asr.borrow_mut().start() {
+                Ok(()) => eprintln!("[flowmux-asr] hold press: start OK"),
+                Err(()) => eprintln!("[flowmux-asr] hold press: start FAILED"),
+            }
+            Propagation::Stop
+        });
+    }
+
+    {
+        let asr = asr_controller.clone();
+        let pressed = pressed.clone();
+        ctrl.connect_key_released(move |_, keyval, _keycode, _modifier| {
+            if keyval != target_keyval {
+                return;
+            }
+            let was = pressed.get();
+            eprintln!("[flowmux-asr] hold release: latch_was={was}");
+            if !was {
+                return;
+            }
+            pressed.set(false);
+            asr.borrow_mut().release();
+        });
+    }
+
+    window.add_controller(ctrl);
 }

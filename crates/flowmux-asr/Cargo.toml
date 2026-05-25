@@ -5,15 +5,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "Local speech-to-text engine: model catalog, downloader, mic capture, and Whisper inference for the push-to-talk voice input feature."
-
-[features]
-# Without `whisper-engine` the crate compiles against a Mock backend that
-# returns a deterministic transcript. The GTK GUI crate turns the feature
-# on so production builds link real whisper.cpp; the headless workspace
-# `cargo check` path stays light.
-default = []
-whisper-engine = ["dep:whisper-rs"]
+description = "Local speech-to-text engine: model catalog, downloader, mic capture, and sherpa-onnx streaming Zipformer inference for the push-to-talk voice input feature."
 
 [dependencies]
 flowmux-core = { workspace = true }
@@ -31,7 +23,9 @@ rubato = { workspace = true }
 crossbeam-channel = { workspace = true }
 futures-util = { workspace = true }
 hound = { workspace = true }
-whisper-rs = { workspace = true, optional = true }
+sherpa-rs = { workspace = true }
+tar = { workspace = true }
+bzip2 = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

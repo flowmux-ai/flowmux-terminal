@@ -12,24 +12,6 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Behaviour of the push-to-talk shortcut.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PttMode {
-    /// Capture while the shortcut is held down. Releasing the keys
-    /// stops capture and triggers transcription. This is the default —
-    /// it matches Dragon NaturallySpeaking / macOS dictation.
-    Hold,
-    /// Tap once to start, tap again (or Esc) to stop.
-    Toggle,
-}
-
-impl Default for PttMode {
-    fn default() -> Self {
-        Self::Hold
-    }
-}
-
 /// Spoken language. `Auto` lets the engine guess, which works well for
 /// multilingual Whisper checkpoints. A specific code (`ko`, `en`, `ja`,
 /// …) is faster and a little more accurate when the user only speaks
@@ -71,8 +53,6 @@ pub struct AsrOptions {
     pub active_model_id: String,
     #[serde(default)]
     pub language: AsrLanguage,
-    #[serde(default)]
-    pub ptt_mode: PttMode,
     /// Append `Enter` to the injected text. Default off so the user
     /// can review the line before submitting.
     #[serde(default)]
@@ -93,6 +73,17 @@ pub struct AsrOptions {
     /// later launches.
     #[serde(default)]
     pub mic_permission_acknowledged: bool,
+    /// Linear gain applied to captured audio before feeding into the
+    /// recognizer. Default 1.0 (no change). Range 1.0..=10.0.
+    /// KsponSpeech-trained streaming Zipformer expects samples near
+    /// peak 0.9; a quiet mic (peak < 0.3) often needs a 3-5x boost
+    /// for the model to emit tokens.
+    #[serde(default = "default_input_gain")]
+    pub input_gain: f32,
+}
+
+fn default_input_gain() -> f32 {
+    1.0
 }
 
 fn default_max_seconds() -> u16 {
@@ -105,12 +96,12 @@ impl Default for AsrOptions {
             enabled: false,
             active_model_id: String::new(),
             language: AsrLanguage::Auto,
-            ptt_mode: PttMode::Hold,
             auto_enter: false,
             input_device: None,
             max_seconds: default_max_seconds(),
             translate_to_english: false,
             mic_permission_acknowledged: false,
+            input_gain: default_input_gain(),
         }
     }
 }
@@ -140,11 +131,6 @@ impl AsrOptions {
 
     pub fn with_auto_enter(mut self, on: bool) -> Self {
         self.auto_enter = on;
-        self
-    }
-
-    pub fn with_ptt_mode(mut self, mode: PttMode) -> Self {
-        self.ptt_mode = mode;
         self
     }
 
@@ -181,12 +167,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_are_disabled_auto_hold() {
+    fn defaults_are_disabled_auto() {
         let opts = AsrOptions::default();
         assert!(!opts.enabled);
         assert!(opts.active_model_id.is_empty());
         assert_eq!(opts.language, AsrLanguage::Auto);
-        assert_eq!(opts.ptt_mode, PttMode::Hold);
         assert!(!opts.auto_enter);
         assert_eq!(opts.max_seconds, 30);
         assert!(!opts.translate_to_english);
@@ -234,7 +219,6 @@ mod tests {
             .with_active_model("ggml-small-q5_1")
             .with_language(AsrLanguage::Code("ko".into()))
             .with_auto_enter(true)
-            .with_ptt_mode(PttMode::Toggle)
             .with_input_device(Some("USB Mic".into()))
             .with_max_seconds(45)
             .with_translate(false)

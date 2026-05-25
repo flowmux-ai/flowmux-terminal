@@ -10,9 +10,11 @@ use rubato::{
 /// Whisper expects exactly this sample rate.
 pub const TARGET_SAMPLE_RATE: u32 = 16_000;
 
-/// Downmix interleaved multi-channel samples to mono `f32`. The
-/// average of every frame is taken — a Hann-window aware downmix is
-/// not necessary for Whisper which itself runs on the speech band.
+/// Downmix interleaved multi-channel samples to mono `f32`. Picks
+/// the channel with the loudest absolute value per frame so a stereo
+/// open with only one channel carrying actual mic data (common on
+/// PulseAudio "default" sources that wrap a mono mic in a stereo
+/// stream) does not halve the signal through averaging.
 fn downmix_to_mono(interleaved: &[f32], channels: u16) -> Vec<f32> {
     if channels <= 1 {
         return interleaved.to_vec();
@@ -22,11 +24,17 @@ fn downmix_to_mono(interleaved: &[f32], channels: u16) -> Vec<f32> {
     let mut out = Vec::with_capacity(frames);
     for f in 0..frames {
         let base = f * ch;
-        let mut acc = 0.0_f32;
-        for c in 0..ch {
-            acc += interleaved[base + c];
+        let mut best = interleaved[base];
+        let mut best_abs = best.abs();
+        for c in 1..ch {
+            let s = interleaved[base + c];
+            let a = s.abs();
+            if a > best_abs {
+                best_abs = a;
+                best = s;
+            }
         }
-        out.push(acc / ch as f32);
+        out.push(best);
     }
     out
 }
@@ -81,10 +89,13 @@ mod tests {
     }
 
     #[test]
-    fn downmix_averages_stereo_frames() {
+    fn downmix_picks_loudest_channel_per_frame() {
+        // First frame: L=1.0, R=-1.0 → both abs are equal so the
+        // first non-strict-greater branch keeps `best = 1.0`.
+        // Second frame: L=0.5, R=-0.5 → same magnitudes, keep L.
         let input = vec![1.0_f32, -1.0, 0.5, -0.5];
         let out = downmix_to_mono(&input, 2);
-        assert_eq!(out, vec![0.0, 0.0]);
+        assert_eq!(out, vec![1.0, 0.5]);
     }
 
     #[test]
@@ -123,7 +134,9 @@ mod tests {
         let out = resample_to_16k_mono(&interleaved, TARGET_SAMPLE_RATE, 2).unwrap();
         assert_eq!(out.len(), frames);
         for sample in out {
-            assert!(sample.abs() < 1e-6, "stereo opposites must cancel");
+            // Loudest-channel pick keeps the full amplitude rather
+            // than cancelling against the opposing channel.
+            assert!(sample.abs() > 0.4, "expected loudest channel preserved");
         }
     }
 }

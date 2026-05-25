@@ -297,6 +297,15 @@ fn main() -> anyhow::Result<()> {
             controller.pane_registry(),
             controller.clipboard_toast(),
         );
+        // Hand the controller to the window so the options-dialog
+        // dispatch path can push fresh AsrOptions into it after Save.
+        controller.set_asr_controller(asr_controller.clone());
+        controller.set_asr_ready(asr_controller.borrow().is_ready_to_record());
+
+        // Preload the streaming engine in the background when the
+        // feature is enabled. Avoids a 1-second stall on the first
+        // Ctrl+Alt+Space press.
+        asr_controller.borrow().schedule_preload();
 
         keybindings::install_actions(
             &controller.window,
@@ -307,6 +316,11 @@ fn main() -> anyhow::Result<()> {
             asr_controller.clone(),
         );
 
+        // Window-level key controller for explicit press / release —
+        // gio::Action only fires on key-press and would autorepeat the
+        // handler while Hold-mode users keep the keys down.
+        asr::install_ptt_event_controller(&controller.window, asr_controller.clone());
+
         // Drain ASR UI events on the GTK main loop. The receiver was
         // produced when the controller was built; if some other piece
         // of the GUI grabs it first, we no-op.
@@ -314,17 +328,20 @@ fn main() -> anyhow::Result<()> {
             let focused = controller.focused_pane.clone();
             let registry = controller.pane_registry();
             let toast = controller.clipboard_toast();
+            let asr_handle = asr_controller.clone();
+            let dot_widget = controller.asr_recording_dot();
             gtk::glib::MainContext::default().spawn_local(async move {
-                // No headerbar indicator is wired yet in this milestone —
-                // use a sink that ignores the recording / busy state.
-                struct NullIndicator;
-                impl asr::AsrIndicator for NullIndicator {
-                    fn set_recording(&self, _: bool) {}
-                    fn set_busy(&self, _: bool) {}
-                }
-                let indicator = NullIndicator;
+                let indicator = asr::DotIndicator { widget: dot_widget };
                 while let Ok(event) = rx.recv().await {
-                    asr::handle_ui_event(event, &focused, &registry, &toast, &indicator);
+                    let auto_enter = asr_handle.borrow().options().auto_enter;
+                    asr::handle_ui_event(
+                        event,
+                        &focused,
+                        &registry,
+                        &toast,
+                        &indicator,
+                        auto_enter,
+                    );
                 }
             });
         }

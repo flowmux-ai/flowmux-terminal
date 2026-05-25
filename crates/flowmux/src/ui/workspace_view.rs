@@ -35,6 +35,13 @@ pub struct PaneRegistry {
     /// Tab-bar `gtk::Box` so incremental tab additions can `append`
     /// into the same row instead of rebuilding the whole pane.
     pane_tab_containers: HashMap<PaneId, gtk::Box>,
+    /// ScrolledWindow that wraps each pane's tab strip. Tracked so
+    /// `activate_surface` can pan the focused tab into the visible
+    /// area when the strip is overflowing. Stored alongside the tabs
+    /// Box because ScrolledWindow internally wraps non-Scrollable
+    /// children in a Viewport, and we need the raw tabs Box as the
+    /// coordinate-reference for `compute_point`.
+    tab_scrollers: HashMap<PaneId, gtk::ScrolledWindow>,
     surface_tab_labels: HashMap<SurfaceId, gtk::Label>,
     pane_workspace: HashMap<PaneId, WorkspaceId>,
     surface_workspace: HashMap<SurfaceId, WorkspaceId>,
@@ -132,7 +139,7 @@ impl PaneRegistry {
 
     pub fn set_surface_title(&self, surface: SurfaceId, title: &str) {
         if let Some(label) = self.surface_tab_labels.get(&surface) {
-            label.set_text(title);
+            label.set_text(&truncate_tab_label(title));
             label.set_tooltip_text(Some(title));
         }
     }
@@ -157,6 +164,7 @@ impl PaneRegistry {
             self.surface_stacks.remove(&pane);
             self.surface_tabs.remove(&pane);
             self.pane_tab_containers.remove(&pane);
+            self.tab_scrollers.remove(&pane);
             self.pane_workspace.remove(&pane);
         }
 
@@ -267,13 +275,42 @@ impl PaneRegistry {
             self.active_browser_by_pane.insert(pane, surface);
             self.active_terminal_by_pane.remove(&pane);
         }
+        let mut activated_tab: Option<gtk::Widget> = None;
         if let Some(tabs) = self.surface_tabs.get(&pane) {
             for (id, tab) in tabs {
                 if *id == surface {
                     tab.add_css_class("active");
+                    activated_tab = Some(tab.clone());
                 } else {
                     tab.remove_css_class("active");
                 }
+            }
+        }
+        // Pan the activated tab into the visible area when the strip
+        // is overflowing. The common case is a plain tab switch where
+        // every tab in the strip is already allocated and the scroller
+        // already has a non-zero page_size — run scroll_into_view
+        // immediately so the user sees the pan in the same frame as
+        // the stack switch. Only fall back to the deferred / retry
+        // path when the tab is mid-allocation (e.g. freshly added),
+        // because that's the case that actually needs an idle hop.
+        if let (Some(scroller), Some(tabs_box), Some(tab)) = (
+            self.tab_scrollers.get(&pane).cloned(),
+            self.pane_tab_containers.get(&pane).cloned(),
+            activated_tab,
+        ) {
+            let allocated = tab.allocated_width() > 0;
+            let page_ready = scroller.hadjustment().page_size() > 0.0;
+            if allocated && page_ready {
+                scroll_tab_into_view(&scroller, &tabs_box, &tab);
+            } else {
+                // 8 retries × 16ms = up to ~130ms wait before giving
+                // up. Each retry early-returns once the tab has been
+                // allocated, so the real cost is one frame in the
+                // common case; the higher cap covers slow layout
+                // passes when several panes are being constructed at
+                // once.
+                defer_scroll_tab_into_view(scroller, tabs_box, tab, 8);
             }
         }
     }
@@ -299,6 +336,7 @@ impl PaneRegistry {
         self.surface_stacks.remove(&pane);
         self.pane_frames.remove(&pane);
         self.pane_tab_containers.remove(&pane);
+        self.tab_scrollers.remove(&pane);
         self.active_terminal_by_pane.remove(&pane);
         self.active_browser_by_pane.remove(&pane);
     }
@@ -703,8 +741,83 @@ fn build_leaf_pane(
     tabs.add_css_class("flowmux-pane-tabs");
     tabs.set_hexpand(false);
 
-    let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    spacer.set_hexpand(true);
+    // ScrolledWindow lets the tab strip scroll horizontally instead of
+    // shrinking each tab when there are too many to fit. Hide the
+    // built-in scrollbars (External + Never) and route mouse-wheel
+    // scrolling through a dedicated EventControllerScroll so vertical
+    // wheel motion still pans the tabs sideways.
+    let scroller = gtk::ScrolledWindow::new();
+    scroller.set_hexpand(true);
+    scroller.set_hscrollbar_policy(gtk::PolicyType::External);
+    scroller.set_vscrollbar_policy(gtk::PolicyType::Never);
+    scroller.set_propagate_natural_height(true);
+    scroller.set_child(Some(&tabs));
+    let scroll_ctrl = gtk::EventControllerScroll::new(
+        gtk::EventControllerScrollFlags::VERTICAL | gtk::EventControllerScrollFlags::HORIZONTAL,
+    );
+    {
+        let scroller_for_wheel = scroller.clone();
+        scroll_ctrl.connect_scroll(move |_, dx, dy| {
+            // Combine both axes so a precision trackpad's horizontal
+            // delta works the same as a discrete mouse-wheel notch on
+            // a vertical wheel. Step size matches one tab worth of
+            // tabs-Box spacing + an average tab width.
+            let delta = (dx + dy) * 60.0;
+            if delta == 0.0 {
+                return gtk::glib::Propagation::Proceed;
+            }
+            let hadj = scroller_for_wheel.hadjustment();
+            let upper = hadj.upper() - hadj.page_size();
+            let next = (hadj.value() + delta).clamp(0.0, upper.max(0.0));
+            hadj.set_value(next);
+            gtk::glib::Propagation::Stop
+        });
+    }
+    scroller.add_controller(scroll_ctrl);
+
+    // Left-edge `<` / `>` nav buttons. Hidden while the tab strip
+    // fits inside the visible area; shown the moment overflow exists.
+    // Anchored to the start of the tabbar (left of the scroller).
+    let nav = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    nav.add_css_class("flowmux-pane-tab-nav");
+    nav.set_visible(false);
+    let nav_prev = pane_tool_button("go-previous-symbolic", "Scroll tabs left");
+    let nav_next = pane_tool_button("go-next-symbolic", "Scroll tabs right");
+    nav.append(&nav_prev);
+    nav.append(&nav_next);
+    {
+        let scroller_for_prev = scroller.clone();
+        nav_prev.connect_clicked(move |_| {
+            scroll_tabs_by(&scroller_for_prev, -1);
+        });
+    }
+    {
+        let scroller_for_next = scroller.clone();
+        nav_next.connect_clicked(move |_| {
+            scroll_tabs_by(&scroller_for_next, 1);
+        });
+    }
+    // Reflect overflow state into nav visibility. Only listen to
+    // notify::upper — page-size and upper change together on every
+    // layout pass, and `connect_page_size_notify` was firing the same
+    // O(n) tab sweep twice per adjustment update. Dropping the
+    // duplicate halves the per-resize cost of `keep_active_tab_visible`
+    // (which walks the entire tab sibling chain to find the active
+    // tab's x-offset) without losing any "tab clipped after resize"
+    // coverage, because upper_notify already fires for the same
+    // events.
+    {
+        let hadj = scroller.hadjustment();
+        let nav_for_upper = nav.clone();
+        let hadj_for_upper = hadj.clone();
+        let scroller_for_upper = scroller.clone();
+        let tabs_for_upper = tabs.clone();
+        hadj.connect_upper_notify(move |_| {
+            update_tab_nav_visibility(&nav_for_upper, &hadj_for_upper);
+            keep_active_tab_visible(&scroller_for_upper, &tabs_for_upper);
+        });
+        update_tab_nav_visibility(&nav, &hadj);
+    }
 
     let tools = gtk::Box::new(gtk::Orientation::Horizontal, 1);
     tools.add_css_class("flowmux-pane-tools");
@@ -712,7 +825,11 @@ fn build_leaf_pane(
     let stack = gtk::Stack::new();
     stack.set_hexpand(true);
     stack.set_vexpand(true);
-    stack.set_transition_type(gtk::StackTransitionType::Crossfade);
+    // Instant tab switch instead of Crossfade. Crossfade composites
+    // both surfaces every frame for ~150ms, stalling VTE / WebKit
+    // redraws and making rapid tab cycling stutter. Plain content
+    // replacement keeps the perceived latency tight.
+    stack.set_transition_type(gtk::StackTransitionType::None);
 
     let mut tab_widgets = Vec::new();
     for surface in &surfaces {
@@ -771,8 +888,8 @@ fn build_leaf_pane(
     tools.append(&add_browser);
 
     stack.set_visible_child_name(&active.to_string());
-    tabbar.append(&tabs);
-    tabbar.append(&spacer);
+    tabbar.append(&nav);
+    tabbar.append(&scroller);
     tabbar.append(&tools);
     root.append(&tabbar);
     root.append(&stack);
@@ -785,6 +902,7 @@ fn build_leaf_pane(
         r.surface_stacks.insert(pane_id, stack);
         r.surface_tabs.insert(pane_id, tab_widgets);
         r.pane_tab_containers.insert(pane_id, tabs);
+        r.tab_scrollers.insert(pane_id, scroller);
         r.pane_workspace.insert(pane_id, workspace);
         r.activate_surface(pane_id, active);
     }
@@ -1302,8 +1420,29 @@ pub fn attach_surface_to_pane(
         (tabs, stack, frame)
     };
 
+    // Resolve where the new tab should slot in. Convention: a new tab
+    // lands immediately to the right of the currently focused tab so
+    // the user sees the addition next to where they were working,
+    // matching tmux/cmux behavior and the store-side ordering in
+    // `add_surface_to_leaf`. Falls back to "append to end" when no
+    // active is recorded yet.
+    let active_anchor: Option<(gtk::Widget, usize)> = {
+        let r = registry.borrow();
+        r.active_surface(pane_id).and_then(|sid| {
+            r.surface_tabs.get(&pane_id).and_then(|v| {
+                v.iter()
+                    .position(|(id, _)| *id == sid)
+                    .map(|i| (v[i].1.clone(), i))
+            })
+        })
+    };
+
     let (tab, label) = build_surface_tab_widget(pane_id, surface, true, callbacks);
-    tabs.append(&tab);
+    if let Some((after_widget, _)) = active_anchor.as_ref() {
+        tabs.insert_child_after(&tab, Some(after_widget));
+    } else {
+        tabs.append(&tab);
+    }
 
     let widget = build_panel(
         pane_id,
@@ -1317,16 +1456,75 @@ pub fn attach_surface_to_pane(
     );
     stack.add_named(&widget, Some(&surface.id.to_string()));
 
+    let new_tab_widget = tab.upcast::<gtk::Widget>();
     {
         let mut r = registry.borrow_mut();
         r.surface_tab_labels.insert(surface.id, label);
-        r.surface_tabs
-            .entry(pane_id)
-            .or_default()
-            .push((surface.id, tab.upcast::<gtk::Widget>()));
+        let tabs_vec = r.surface_tabs.entry(pane_id).or_default();
+        let insert_pos = active_anchor
+            .as_ref()
+            .map(|(_, i)| i + 1)
+            .unwrap_or(tabs_vec.len());
+        tabs_vec.insert(insert_pos, (surface.id, new_tab_widget.clone()));
         r.activate_surface(pane_id, surface.id);
     }
+
+    // Backstop scroll: activate_surface above schedules a deferred
+    // scroll-into-view via `defer_scroll_tab_into_view`, but that path
+    // relies on `tab.allocated_width() > 0` to fire and a freshly
+    // inserted tab can still be reading 0 several idle ticks later
+    // depending on the layout scheduler. Adding an explicit timeout
+    // that always runs after 120ms — long enough for GTK to have
+    // finished at least one layout + paint pass — guarantees the
+    // newly added tab ends up inside the scroller's visible area even
+    // when the defer retries miss. Uses keep_active_tab_visible so
+    // the call works without holding a separate reference to the new
+    // tab widget; the registry's `.active` class still marks it.
+    {
+        let registry = registry.clone();
+        let pane_id = pane_id;
+        let new_tab = new_tab_widget.clone();
+        gtk::glib::timeout_add_local_once(Duration::from_millis(120), move || {
+            let r = registry.borrow();
+            let (Some(scroller), Some(tabs_box)) = (
+                r.tab_scrollers.get(&pane_id).cloned(),
+                r.pane_tab_containers.get(&pane_id).cloned(),
+            ) else {
+                return;
+            };
+            // Target the new tab explicitly. keep_active_tab_visible
+            // works too, but using the tab handle directly survives
+            // a scenario where the user activates a different tab
+            // before the 120ms window elapses — the *new* tab is
+            // what the user expects to be on screen.
+            scroll_tab_into_view(&scroller, &tabs_box, &new_tab);
+        });
+    }
     true
+}
+
+/// Upper bound (in characters) for the tab title label so an
+/// extremely long title can't push a single tab to span the whole tab
+/// strip. Titles longer than this are truncated with an ellipsis
+/// before the label sees them.
+const TAB_LABEL_MAX_CHARS: usize = 18;
+
+/// Truncate a tab title to [`TAB_LABEL_MAX_CHARS`] graphemes (treated
+/// as char count here — close enough for the script-mix the project
+/// supports). We pre-truncate at the source instead of relying on
+/// PangoLayout ellipsization because ellipsization lets the label
+/// shrink down to a minimum char width when the parent has space
+/// pressure, which made tabs visibly narrow as the strip filled up.
+/// With ellipsization off and the text pre-truncated, the label's
+/// natural width is the only width it ever requests — so the tab
+/// width depends purely on the title text length.
+fn truncate_tab_label(title: &str) -> String {
+    let count = title.chars().count();
+    if count <= TAB_LABEL_MAX_CHARS {
+        return title.to_string();
+    }
+    let prefix: String = title.chars().take(TAB_LABEL_MAX_CHARS - 1).collect();
+    format!("{prefix}…")
 }
 
 fn surface_tab(surface: &PaneSurface, active: bool) -> (gtk::Box, gtk::Label) {
@@ -1335,12 +1533,14 @@ fn surface_tab(surface: &PaneSurface, active: bool) -> (gtk::Box, gtk::Label) {
     if active {
         tab.add_css_class("active");
     }
+    tab.set_hexpand(false);
 
     let button = gtk::Button::new();
     button.add_css_class("flat");
     button.add_css_class("flowmux-pane-tab-main");
     button.set_tooltip_text(Some(&surface.title));
     button.set_focus_on_click(false);
+    button.set_hexpand(false);
 
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     let icon_name = match surface.kind {
@@ -1348,9 +1548,12 @@ fn surface_tab(surface: &PaneSurface, active: bool) -> (gtk::Box, gtk::Label) {
         SurfaceKind::Browser { .. } => "web-browser-symbolic",
     };
     row.append(&gtk::Image::from_icon_name(icon_name));
-    let label = gtk::Label::new(Some(&surface.title));
-    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    label.set_max_width_chars(18);
+    // No ellipsization: the label requests its natural width and
+    // refuses to shrink, so tab width is a pure function of the
+    // (pre-truncated) title text. Long titles are clipped to
+    // TAB_LABEL_MAX_CHARS chars at the source.
+    let label = gtk::Label::new(Some(&truncate_tab_label(&surface.title)));
+    label.set_ellipsize(gtk::pango::EllipsizeMode::None);
     label.set_tooltip_text(Some(&surface.title));
     row.append(&label);
     button.set_child(Some(&row));
@@ -1373,6 +1576,158 @@ fn pane_tool_button(icon_name: &str, tooltip: &str) -> gtk::Button {
     button.set_tooltip_text(Some(tooltip));
     button.set_focus_on_click(false);
     button
+}
+
+/// Toggle the left-edge `<` / `>` tab-nav row based on whether the
+/// scroller currently overflows. Called from the hadjustment's
+/// upper / page-size notify signals so the buttons appear the moment
+/// adding a tab pushes the strip past the visible width and vanish
+/// again once the user closes enough tabs to fit.
+fn update_tab_nav_visibility(nav: &gtk::Box, hadj: &gtk::Adjustment) {
+    let overflowing = hadj.upper() - hadj.page_size() > 0.5;
+    nav.set_visible(overflowing);
+}
+
+/// Find the tab currently marked `.active` inside a tabs Box. Used by
+/// the keep-visible sweep so the hadjustment notify handlers can find
+/// the active tab without a registry lookup.
+fn active_tab_in_strip(tabs_box: &gtk::Box) -> Option<gtk::Widget> {
+    let mut child = tabs_box.first_child();
+    while let Some(c) = child {
+        if c.has_css_class("active") {
+            return Some(c);
+        }
+        child = c.next_sibling();
+    }
+    None
+}
+
+/// Re-pan the scroller so the currently-active tab stays fully
+/// visible. Called from hadjustment notify handlers (upper /
+/// page-size) so window resizes and sibling tab add/remove never
+/// leave the focused tab clipped at either edge.
+fn keep_active_tab_visible(scroller: &gtk::ScrolledWindow, tabs_box: &gtk::Box) {
+    let Some(tab) = active_tab_in_strip(tabs_box) else {
+        return;
+    };
+    scroll_tab_into_view(scroller, tabs_box, &tab);
+}
+
+/// Wait for `tab` to be allocated, then pan the scroller so it is
+/// fully visible. Used by the freshly-added-tab path where the tab
+/// widget exists but hasn't been laid out yet, so its
+/// `allocated_width()` reads as 0. A short timeout (one frame at
+/// 60fps) is used instead of `idle_add` because idle handlers can
+/// fire BEFORE the allocation pass in some GTK schedulers, leaving
+/// the retry loop spinning on a still-zero width; timeout_add fires
+/// strictly after the main loop iteration completes, by which point
+/// the layout has run. Retries up to `attempts` times so a slow
+/// composite (e.g. several panes being created at once) still has a
+/// chance to converge before we give up.
+fn defer_scroll_tab_into_view(
+    scroller: gtk::ScrolledWindow,
+    tabs_box: gtk::Box,
+    tab: gtk::Widget,
+    attempts: u8,
+) {
+    if attempts == 0 {
+        return;
+    }
+    gtk::glib::timeout_add_local_once(Duration::from_millis(16), move || {
+        let allocated = tab.allocated_width() > 0;
+        let page_ready = scroller.hadjustment().page_size() > 0.0;
+        if !allocated || !page_ready {
+            defer_scroll_tab_into_view(scroller, tabs_box, tab, attempts - 1);
+            return;
+        }
+        scroll_tab_into_view(&scroller, &tabs_box, &tab);
+    });
+}
+
+/// Pan the tab scroller so `tab` is fully visible. Compute the tab's
+/// x-offset inside the *tabs Box* (the scrollable content) and nudge
+/// the hadjustment so the tab's bounding rect lies entirely inside
+/// the [value, value+page_size] window.
+///
+/// `tabs_box` is the raw Box of tabs — passing the scroller's child
+/// would return its auto-inserted Viewport, whose coordinate space
+/// has already been translated by the current scroll offset, which
+/// confuses the math. Walking child-to-parent x offsets through the
+/// tabs Box gives unscrolled content coordinates, which is what
+/// hadjustment values are denominated in.
+///
+/// No-ops when the tab has not been allocated yet (allocated_width
+/// == 0) or when the strip isn't overflowing (page_size >= upper).
+fn scroll_tab_into_view(scroller: &gtk::ScrolledWindow, tabs_box: &gtk::Box, tab: &gtk::Widget) {
+    let tab_w = tab.allocated_width() as f64;
+    if tab_w <= 0.0 {
+        return;
+    }
+    let hadj = scroller.hadjustment();
+    let page = hadj.page_size();
+    let upper = hadj.upper();
+    if page <= 0.0 || upper - page <= 0.5 {
+        // No overflow → nothing to scroll into view.
+        return;
+    }
+    let Some(tab_left) = tab_x_in_strip(tabs_box, tab) else {
+        return;
+    };
+    let tab_right = tab_left + tab_w;
+    let view_left = hadj.value();
+    let view_right = view_left + page;
+    let max_value = (upper - page).max(hadj.lower());
+    let next = if tab_left < view_left {
+        // Tab's left edge clipped → bring left edge to view_left.
+        tab_left
+    } else if tab_right > view_right {
+        // Tab's right edge clipped → bring right edge to view_right.
+        tab_right - page
+    } else {
+        return;
+    };
+    hadj.set_value(next.clamp(hadj.lower(), max_value));
+}
+
+/// Sum the x-positions of siblings preceding `tab` inside `tabs_box`
+/// to derive the tab's left edge in the box's own coordinate space.
+/// GtkBox lays children out sequentially; each child's allocation x
+/// inside the box is the cumulative width + spacing of earlier
+/// children. We compute that directly so the result is independent
+/// of any scrolled-window viewport translation.
+fn tab_x_in_strip(tabs_box: &gtk::Box, tab: &gtk::Widget) -> Option<f64> {
+    let mut child = tabs_box.first_child();
+    let mut x = 0.0_f64;
+    let spacing = tabs_box.spacing() as f64;
+    let mut prev_visible = false;
+    while let Some(c) = child {
+        if c == *tab {
+            return Some(x);
+        }
+        if c.is_visible() {
+            if prev_visible {
+                x += spacing;
+            }
+            x += c.allocated_width() as f64;
+            prev_visible = true;
+        }
+        child = c.next_sibling();
+    }
+    None
+}
+
+/// Pan the tab scroller by roughly one tab in `direction` (+1 right,
+/// -1 left). Step size is a heuristic: half the visible page so a
+/// single click reveals neighbouring tabs without skipping past them.
+/// Clamps to the adjustment's [lower, upper - page_size] range.
+fn scroll_tabs_by(scroller: &gtk::ScrolledWindow, direction: i32) {
+    let hadj = scroller.hadjustment();
+    let page = hadj.page_size();
+    let step = (page * 0.5).max(60.0);
+    let delta = step * direction as f64;
+    let upper = hadj.upper() - page;
+    let next = (hadj.value() + delta).clamp(hadj.lower(), upper.max(hadj.lower()));
+    hadj.set_value(next);
 }
 
 fn build_panel(

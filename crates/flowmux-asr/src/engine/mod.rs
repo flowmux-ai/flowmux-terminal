@@ -1,115 +1,60 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! ASR engine trait and concrete implementations.
+//! Non-streaming ASR engine backed by sherpa-onnx SenseVoice.
 //!
-//! The trait is intentionally narrow: every engine consumes 16 kHz mono
-//! `f32` PCM and returns one [`Transcription`]. Push-to-talk is the
-//! only mode supported in this milestone, so streaming/partials are
-//! out of scope for the trait.
+//! SenseVoice is multilingual (Korean / English / Chinese / Japanese
+//! / Cantonese) with WER around 5 % on Korean — significantly better
+//! than the streaming Zipformer model the crate previously used. The
+//! tradeoff is no live partials: the controller accumulates audio
+//! while the user holds the push-to-talk key and transcribes the
+//! whole buffer on release.
 
-use crate::config::AsrEngineConfig;
-use std::sync::atomic::AtomicBool;
+pub mod sense_voice;
+
+pub use sense_voice::SenseVoiceEngine;
+
+use crate::catalog::ModelEntry;
+use crate::store::ModelStore;
 use std::sync::Arc;
-
-mod mock;
-#[cfg(feature = "whisper-engine")]
-mod whisper;
-
-pub use mock::MockEngine;
-#[cfg(feature = "whisper-engine")]
-pub use whisper::WhisperEngine;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AsrEngineError {
-    #[error("model file not found: {0}")]
+    #[error("model files missing in {0}")]
     ModelMissing(String),
-    #[error("model load failed: {0}")]
-    ModelLoad(String),
-    #[error("inference failed: {0}")]
-    Inference(String),
-    #[error("cancelled")]
-    Cancelled,
+    #[error("engine load failed: {0}")]
+    Load(String),
+    #[error("transcription failed: {0}")]
+    Transcribe(String),
 }
 
-/// Result of a single push-to-talk transcription.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Transcription {
-    /// Whitespace-trimmed text. Empty when the engine emitted only
-    /// `[BLANK_AUDIO]` or silence markers.
-    pub text: String,
-    /// Detected (or configured) language code. `"auto"` is replaced
-    /// with the engine's best guess when the engine supports it.
-    pub language: String,
-    pub seconds_processed: f32,
-}
-
-impl Transcription {
-    pub fn empty() -> Self {
-        Self {
-            text: String::new(),
-            language: "auto".into(),
-            seconds_processed: 0.0,
+/// Load and warm the SenseVoice engine once at startup.
+pub fn load_engine(
+    entry: &ModelEntry,
+    store: &ModelStore,
+) -> Result<Arc<SenseVoiceEngine>, AsrEngineError> {
+    let dir = store.model_dir(entry);
+    let model = dir.join(&entry.model_file);
+    let tokens = dir.join(&entry.tokens_file);
+    for path in [&model, &tokens] {
+        if !path.exists() {
+            return Err(AsrEngineError::ModelMissing(path.display().to_string()));
         }
     }
-
-    pub fn is_blank(&self) -> bool {
-        self.text.trim().is_empty()
-    }
+    let engine = SenseVoiceEngine::load(SenseVoiceEngineConfig {
+        model: model.to_string_lossy().into(),
+        tokens: tokens.to_string_lossy().into(),
+        language: entry.language.clone(),
+        num_threads: 0,
+    })
+    .map_err(|e| AsrEngineError::Load(e.to_string()))?;
+    Ok(Arc::new(engine))
 }
 
-/// One engine instance owns a loaded model. Implementations are
-/// `Send + Sync` so the engine can be parked on a tokio worker.
-pub trait AsrEngine: Send + Sync {
-    /// Transcribe one PCM buffer. `cancel` is polled periodically; the
-    /// implementation should bail with [`AsrEngineError::Cancelled`]
-    /// when it flips to true.
-    fn transcribe(
-        &self,
-        pcm_16k_mono: &[f32],
-        cancel: Arc<AtomicBool>,
-    ) -> Result<Transcription, AsrEngineError>;
-
-    /// Display name used by debug logs and error toasts.
-    fn name(&self) -> &str;
-}
-
-/// Build the engine the user requested. When `whisper-engine` is off
-/// the catalog can still be exercised end-to-end through the mock,
-/// which is what the headless `cargo check --workspace` path uses.
-pub fn load_engine(config: AsrEngineConfig) -> Result<Box<dyn AsrEngine>, AsrEngineError> {
-    if !config.model_path.exists() {
-        return Err(AsrEngineError::ModelMissing(
-            config.model_path.display().to_string(),
-        ));
-    }
-    #[cfg(feature = "whisper-engine")]
-    {
-        let engine = WhisperEngine::load(config)?;
-        Ok(Box::new(engine))
-    }
-    #[cfg(not(feature = "whisper-engine"))]
-    {
-        Ok(Box::new(MockEngine::new(config)))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn transcription_is_blank_when_text_is_whitespace() {
-        let t = Transcription {
-            text: "   \n  ".into(),
-            language: "ko".into(),
-            seconds_processed: 1.0,
-        };
-        assert!(t.is_blank());
-
-        let t = Transcription {
-            text: "hello".into(),
-            language: "en".into(),
-            seconds_processed: 1.0,
-        };
-        assert!(!t.is_blank());
-    }
+#[derive(Debug, Clone)]
+pub struct SenseVoiceEngineConfig {
+    pub model: String,
+    pub tokens: String,
+    /// `"auto"` lets SenseVoice pick from `zh / en / ja / ko / yue`.
+    pub language: String,
+    /// 0 = pick a sensible default based on CPU count.
+    pub num_threads: i32,
 }

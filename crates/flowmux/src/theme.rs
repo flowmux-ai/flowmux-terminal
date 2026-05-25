@@ -150,6 +150,11 @@ impl ResolvedTheme {
     pub fn css(&self, focus_border_color: &str, focus_border_alpha: f32) -> String {
         let bg_css = rgba_css(&self.bg);
         let focus_css = focus_border_rgba_css(focus_border_color, focus_border_alpha);
+        // Same color as the pane focus border, but pinned at full
+        // opacity. Used by the active-tab top accent so the marker
+        // stays crisp even when the user has dialed the focus border
+        // alpha way down.
+        let focus_solid_css = focus_border_rgba_css(focus_border_color, 1.0);
         let pane_border_css = rgba_css(&blend_with_alpha(&self.fg, 0.10));
         let tabbar_bg_css = rgba_css(&shift_lightness(
             &self.bg,
@@ -162,6 +167,17 @@ impl ResolvedTheme {
         let control_hover_css = rgba_css(&blend_with_alpha(&self.fg, 0.09));
         let subdued_fg_css = rgba_css(&blend_with_alpha(&self.fg, 0.72));
         let sidebar_bg = rgba_css(&shift_lightness(&self.bg, -0.04));
+        // Active workspace row tint: brighter than the sidebar
+        // background on dark themes and darker on light themes so the
+        // currently-focused workspace stands out without leaning on
+        // libadwaita's accent color, which is too saturated next to
+        // the Ghostty-derived palette. Slightly stronger lightness
+        // shift than `tab_active_bg_css` so the workspace marker reads
+        // as the primary active surface in the window.
+        let workspace_active_bg = rgba_css(&shift_lightness(
+            &self.bg,
+            if self.is_dark() { 0.085 } else { -0.085 },
+        ));
         let toast_bg_css = rgba_css(&blend_with_alpha(
             &shift_lightness(&self.bg, if self.is_dark() { 0.12 } else { -0.12 }),
             0.94,
@@ -176,9 +192,14 @@ impl ResolvedTheme {
     margin: 1px;
     padding: 0;
 }}
+/* Focused pane: change only the existing 1px border's color. The
+   previous rule also painted an `inset 0 0 0 1px` box-shadow in the
+   same color, which doubled the focus indicator and forced GTK to run
+   a separate compositor pass over the entire pane (including the VTE
+   surface) every time focus enter/leave fired. Border-color flip
+   alone is visually identical and skips that pass. */
 .flowmux-pane.focused {{
     border-color: {focus};
-    box-shadow: inset 0 0 0 1px {focus};
 }}
 .flowmux-pane .flowmux-terminal {{
     padding: 7px;
@@ -202,6 +223,15 @@ impl ResolvedTheme {
 .flowmux-pane-tab.active {{
     background-color: {tab_active};
     border-color: {border};
+}}
+/* Active tab inside the focused pane: paint a top accent in the
+   pane focus color. Use the fully-opaque variant so the line stays
+   visible regardless of the user-configured focus border alpha. The
+   2px inset box-shadow sits on top of the tab's own 1px border
+   without changing layout (avoids a 1px jump in tab height when
+   focus moves between panes). */
+.flowmux-pane.focused .flowmux-pane-tab.active {{
+    box-shadow: inset 0 2px 0 {focus_solid};
 }}
 .flowmux-pane-tab-main {{
     min-height: 22px;
@@ -260,16 +290,17 @@ paned > separator {{
 .navigation-sidebar row label.caption {{
     color: {fg};
 }}
-/* Suppress libadwaita selected-row tint on workspace rows. The ListBox
-   keeps SelectionMode::Single so navigation helpers can read
-   selected_workspace(), but flowmux does not paint active-workspace
-   as a separate visual state — focus and .flowmux-attention are the
-   only highlights users see. libadwaita ships rules whose selectors
-   include row.activatable plus :selected combined with :hover, :active,
-   .has-open-popup, and a child-combinator variant with a 1px inset
-   box-shadow border. Plain row:selected loses on specificity, so each
-   variant is matched explicitly with .activatable below and the inset
-   border is cleared too. */
+/* Active-workspace row tint. The ListBox keeps SelectionMode::Single
+   so selected_workspace() always identifies the workspace that owns
+   the focused pane. Paint that row with a theme-derived background
+   (lightness shift from the Ghostty palette) so the user can spot it
+   without the libadwaita accent overpowering the sidebar. libadwaita
+   ships higher-specificity rules whose selectors include row.activatable
+   combined with :hover / :active / .has-open-popup and a child-
+   combinator variant with a 1px inset box-shadow border. Plain
+   row:selected loses on specificity, so each variant is matched
+   explicitly with .activatable below and the inset border is cleared
+   in favour of the flat tint. */
 .navigation-sidebar row.activatable:selected,
 .navigation-sidebar row.activatable:selected:hover,
 .navigation-sidebar row.activatable:selected:focus,
@@ -279,7 +310,7 @@ paned > separator {{
 .navigation-sidebar > row.activatable:selected:hover,
 .navigation-sidebar > row.activatable:selected:active,
 .navigation-sidebar > row.activatable:selected.has-open-popup {{
-    background-color: transparent;
+    background-color: {workspace_active};
     box-shadow: none;
 }}
 .navigation-sidebar row.activatable:selected label,
@@ -317,16 +348,37 @@ paned > separator {{
     box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
     padding: 8px 14px;
 }}
+/* Push-to-talk recording indicator: a small red dot packed at the
+   start of the window header bar. Visibility is toggled by the ASR
+   controller via `set_visible(...)` so the CSS only describes the
+   "on" appearance. The slow pulse makes the marker obvious without
+   demanding a foreground glance. */
+.flowmux-asr-recording-dot {{
+    background-color: #e23a3a;
+    border-radius: 6px;
+    min-width: 12px;
+    min-height: 12px;
+    margin: 4px 6px 4px 8px;
+    box-shadow: 0 0 6px rgba(226, 58, 58, 0.6);
+    animation: flowmux-asr-recording-pulse 1.2s ease-in-out infinite;
+}}
+@keyframes flowmux-asr-recording-pulse {{
+    0%   {{ opacity: 0.6; }}
+    50%  {{ opacity: 1.0; }}
+    100% {{ opacity: 0.6; }}
+}}
 "#,
             bg = bg_css,
             fg = rgba_css(&self.fg),
             border = pane_border_css,
             focus = focus_css,
+            focus_solid = focus_solid_css,
             tabbar = tabbar_bg_css,
             tab_active = tab_active_bg_css,
             control_hover = control_hover_css,
             subdued_fg = subdued_fg_css,
             sidebar = sidebar_bg,
+            workspace_active = workspace_active_bg,
             toast_bg = toast_bg_css,
             toast_border = toast_border_css,
         )

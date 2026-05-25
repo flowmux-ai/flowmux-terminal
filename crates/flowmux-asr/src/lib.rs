@@ -18,25 +18,26 @@
 //! The crate is intentionally GTK-free; the GUI binary brokers between
 //! GTK widgets and this crate through `async_channel`-style commands.
 
-#![forbid(unsafe_code)]
+// The streaming Zipformer engine wraps raw `sherpa-rs-sys` FFI and
+// therefore needs `unsafe` blocks. `forbid` is replaced with `deny`
+// so the ASR-specific FFI module can opt in while everything else
+// still gets the "no unsafe" guarantee.
+#![deny(unsafe_code)]
 
 pub mod audio;
 pub mod catalog;
-pub mod config;
 pub mod download;
 pub mod engine;
 pub mod session;
 pub mod store;
 
 pub use catalog::{ModelEntry, ModelId};
-pub use config::AsrEngineConfig;
 pub use download::{DownloadEvent, DownloadProgress, ModelDownloader};
-pub use engine::{AsrEngine, AsrEngineError, Transcription};
+pub use engine::{AsrEngineError, SenseVoiceEngine};
 pub use session::{PttEvent, PttSession, SessionConfig};
 pub use store::ModelStore;
 
-/// Top-level errors surfaced by the public API. Each variant wraps a
-/// concrete cause so the caller can log it without further plumbing.
+/// Top-level errors surfaced by the public API.
 #[derive(Debug, thiserror::Error)]
 pub enum AsrError {
     #[error("model not installed: {0}")]
@@ -49,4 +50,6 @@ pub enum AsrError {
     Engine(#[from] engine::AsrEngineError),
     #[error("i/o: {0}")]
     Io(#[from] std::io::Error),
+    #[error("{0}")]
+    Other(String),
 }

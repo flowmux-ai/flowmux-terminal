@@ -76,9 +76,10 @@ flowmux-cookies = { path = "crates/flowmux-cookies" }
 flowmux-browser = { path = "crates/flowmux-browser" }
 flowmux-asr = { path = "crates/flowmux-asr" }
 
-# ASR / voice input. `whisper-rs` is optional in `flowmux-asr` and is
-# enabled by the GTK GUI crate; the headless workspace check skips it so
-# whisper.cpp does not need to be compiled on a fresh CI box.
+# ASR / voice input. Real engine is sherpa-rs (sherpa-onnx C++ + ONNX
+# Runtime). The crate ships its public Rust wrappers as offline-only;
+# the streaming online recognizer is consumed through the re-exported
+# `sherpa_rs_sys` raw FFI (enabled by the `sys` feature).
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 sha2 = "0.10"
 cpal = "0.15"
@@ -86,7 +87,9 @@ rubato = "0.16"
 crossbeam-channel = "0.5"
 futures-util = "0.3"
 hound = "3.5"
-whisper-rs = { version = "0.13", default-features = false }
+sherpa-rs = { version = "0.6", default-features = false, features = ["sys", "download-binaries"] }
+tar = "0.4"
+bzip2 = "0.4"
 
 [profile.release]
 lto = "thin"

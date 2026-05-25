@@ -35,9 +35,15 @@ pub enum MicProbeOutcome {
 }
 
 /// Run a short capture session (default 200 ms) and report the
-/// outcome. Safe to call from an async task; the heavy lifting still
-/// happens on the dedicated capture thread.
-pub async fn probe_microphone(device_name: Option<String>) -> MicProbeOutcome {
+/// outcome. Blocking: the caller wraps it in `gio::spawn_blocking`
+/// (or a `std::thread::spawn`) so the GTK main loop stays responsive
+/// while the capture thread runs.
+///
+/// Made sync on purpose — earlier revisions used `tokio::time::sleep`
+/// which silently hangs when the function is invoked from
+/// `glib::MainContext::spawn_local`, because that executor is not a
+/// Tokio runtime.
+pub fn probe_microphone(device_name: Option<String>) -> MicProbeOutcome {
     let spec = CaptureSpec {
         device_name,
         max_duration: Duration::from_millis(200),
@@ -49,7 +55,7 @@ pub async fn probe_microphone(device_name: Option<String>) -> MicProbeOutcome {
 
     // Let the capture thread run for the same window the spec asks for
     // — `stop()` joins the thread and resamples.
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    std::thread::sleep(Duration::from_millis(250));
 
     match handle.stop() {
         Ok(audio) => MicProbeOutcome::Ok {

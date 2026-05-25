@@ -73,6 +73,16 @@ pub fn install_accels(app: &adw::Application, options: &Options) {
     let mut owner: HashMap<String, &'static str> = HashMap::new();
 
     for (action, accels) in &resolved {
+        // Voice push-to-talk is driven by a dedicated EventControllerKey
+        // installed on the application window (see `asr::install_ptt_event_controller`)
+        // so explicit key-press and key-release events both reach the
+        // controller. GTK's accelerator path only fires on key-press
+        // and autorepeats the action while the keys stay held, which
+        // is wrong for Hold mode. Leave the action entry unbound here.
+        if *action == ActionId::VoicePushToTalk {
+            app.set_accels_for_action(&full_action_name(*action), &[]);
+            continue;
+        }
         let valid: Vec<String> = accels
             .iter()
             .filter_map(|accel| {
@@ -276,19 +286,16 @@ pub fn install_actions(
             .build()
     };
 
-    // Voice push-to-talk (default Ctrl+Alt+space). GTK's action map
-    // only fires on key-press, so this acts as a toggle: first activation
-    // starts capture, second activation finishes and transcribes. The
-    // user can also pick "Hold" mode in options; a future change wires
-    // EventControllerKey on the window to drive release-based capture.
-    let voice_ptt = {
-        let asr_controller = asr_controller.clone();
-        gtk::gio::ActionEntry::builder("voice-ptt")
-            .activate(move |_, _, _| {
-                asr_controller.borrow_mut().activate();
-            })
-            .build()
-    };
+    // Voice push-to-talk action stub. Real key handling is driven
+    // by the window-level `EventControllerKey` in `asr.rs` so press
+    // and release events can both reach the controller (Hold mode
+    // needs both). The action stays registered so existing GTK
+    // accelerator plumbing keeps compiling but is intentionally a
+    // no-op.
+    let _ = asr_controller;
+    let voice_ptt = gtk::gio::ActionEntry::builder("voice-ptt")
+        .activate(move |_, _, _| {})
+        .build();
 
     let [w1, w2, w3, w4, w5, w6, w7, w8] = ws_jumps;
     window.add_action_entries([
