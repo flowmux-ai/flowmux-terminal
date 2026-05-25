@@ -220,9 +220,12 @@ impl AsrController {
         if let Some(cancel) = self.pump_cancel.take() {
             cancel.store(true, Ordering::Relaxed);
         }
+        if !self.options.enabled {
+            return Err(());
+        }
         if !self.options.is_ready() {
             self.emit(AsrUiEvent::Failed(
-                "음성 입력이 비활성화되어 있거나 모델이 선택되지 않았습니다.".into(),
+                "모델이 선택되지 않았습니다.".into(),
             ));
             return Err(());
         }
