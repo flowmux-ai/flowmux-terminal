@@ -13,6 +13,12 @@ finish-args:
   - --filesystem=home
   - --talk-name=org.freedesktop.Notifications
   - --talk-name=org.freedesktop.secrets
+  # IME: the ibus GTK immodule (forced on by the GUI when GTK_IM_MODULE
+  # is unset) reaches the host ibus-daemon through the IBus portal.
+  # Without this grant the sandbox falls back to the `simple` immodule
+  # on Ubuntu 22.04 hosts and CJK preedit (the composing-syllable
+  # underline) never renders.
+  - --talk-name=org.freedesktop.portal.IBus
   # flowmux writes its socket into XDG_RUNTIME_DIR; Flatpak isolates this
   # by default so the in-sandbox `flowmux` CLI uses the same path.
   # Terminal pane runs the user's host shell via `flatpak-spawn --host`
