@@ -12,110 +12,49 @@
 
 ### A terminal for AI agent workflows, browser control, and task signals.
 
-flowmux is a Linux/GTK4 terminal for AI coding agents. Its terminal pane uses
-`libghostty-vt` for VT state, flowmux-owned PTYs for process lifecycle, and a
-GTK renderer owned by the application.
+flowmux is a Linux/GTK4 terminal for AI coding agents. The terminal pane uses
+`libghostty-vt` for VT state, flowmux-owned PTYs, and an application-owned GTK
+renderer.
 
-> It is an unofficial GPL-3.0-or-later reimplementation inspired by [cmux](https://cmux.com/ko), a macOS/AppKit app, and is not affiliated with cmux.
+> Unofficial GPL-3.0-or-later reimplementation inspired by [cmux](https://cmux.com/ko), a macOS/AppKit app. Not affiliated with cmux.
   
 ## Control internal browser
 
-flowmux ships a WebKitGTK 6.0 browser tab that lives next to terminal tabs in
-the same pane tree. The clip below shows an AI agent driving the page through
-flowmux's IPC socket — snapshot the DOM, click, type, read state back — with
-no system Chromium and no separate driver process.
+A WebKitGTK 6.0 browser tab lives next to terminal tabs in the same pane tree.
+The clip shows an AI agent driving the page over flowmux's IPC socket —
+snapshot the DOM, click, type, read state back — with no system Chromium and
+no separate driver.
 
 ![video](resources/screenshot/video_control_browser.gif)
 
-## AI Agent notification(Claude, Codex, OpenCode)
+## AI Agent notification (Claude, Codex, OpenCode)
 
 flowmux installs lifecycle hooks into Claude Code, Codex, and OpenCode so
-events like *task complete*, *needs approval*, and *error* surface as native
-desktop notifications. Each notification is routed to the workspace that
-fired it, suppressed while its surface is focused, and isolated per flowmux
-window so multiple sessions don't bleed into each other.
+*task complete*, *needs approval*, and *error* events surface as native
+desktop notifications — routed to the workspace that fired them, suppressed
+while that surface is focused, and isolated per window.
 
 ![video2](resources/screenshot/claude_notification.gif)
 
 ## Features
 
-### Workspaces & panes
-- Side-panel workspaces keep several tasks side by side, and each one
-  can be split into as many panes as you need.
-- Terminal tabs and browser tabs share the same pane tree, and you can
-  jump between panes from the keyboard.
-- **Copy focused pane path** with `Ctrl+Shift+K`. The shortcut copies
-  the active terminal's working directory to the clipboard and shows a
-  toast confirming what was copied.
-- Right-click a pane tab or a sidebar workspace row to reach
-  **Copy path** / **Copy URL** — terminal tabs copy the working
-  directory, browser tabs copy the current URL.
-
-### In-app browser
-- A browser tab lives inside flowmux next to your terminals — no need
-  to open a separate Chromium just to view or interact with a page.
-- AI agents in a neighbouring pane can drive that browser directly:
-  snapshot the page, click, type, scroll, and read state back.
-- Import an existing session from Firefox, Chrome, Chromium, Brave,
-  Edge, or Arc so you stay logged in to the sites you already use.
-- A **Web Inspector** button next to the URL bar pops open WebKit's
-  developer tools for the focused browser tab — useful when an agent
-  flow needs DOM inspection or network tracing.
-
-### Notifications
-- "Task complete" and "needs attention" signals from a terminal turn
-  into native desktop notifications.
-- Each notification is routed to the workspace that fired it, stays
-  quiet while you are already looking at that pane, and the sidebar
-  highlights workspaces that need your attention.
-- The bell popover ships an **All Clear** button at the top that drops
-  every transcript entry in one sweep and withdraws the matching
-  desktop toasts so the dock badge resets in the same step.
-
-### AI agent integration
-- Claude Code, Codex, and OpenCode are wired up out of the box, so
-  completion, approval, and error events surface as notifications you
-  actually see.
-- Agent sessions are remembered across restarts, so a resumed
-  workspace lands back on the right pane.
-- `claude-teams` opens a workspace pre-split into several panes, each
-  running its own Claude instance.
-- `flowmux doctor` shows whether each agent is wired correctly and
-  `flowmux fix` re-installs the pieces that are missing — handy after
-  installing an agent that wasn't on the host when flowmux was first
-  set up.
-
-### Customizable keybindings
-- Open the options dialog and switch to the **Keybindings** tab to
-  rebind any pane / workspace / tab / clipboard / window shortcut.
-  Changes take effect immediately on **OK** — no restart needed.
-- The same edits land in `$XDG_CONFIG_HOME/flowmux/options.json`
-  under a `keybindings` field. Only the actions you change need to
-  appear — anything missing keeps its default, and an empty array
-  marks an action as explicitly unbound:
-
-  ```json
-  {
-    "keybindings": {
-      "copy":  ["<Ctrl>c"],
-      "paste": ["<Ctrl>v"],
-      "next-workspace": []
-    }
-  }
-  ```
-
-  Accelerator strings follow GTK's
-  [`gtk_accelerator_parse`](https://docs.gtk.org/gtk4/func.accelerator_parse.html)
-  syntax (`<Ctrl>`, `<Shift>`, `<Alt>`, …). Invalid entries are logged
-  and skipped at startup; the rest of an action's accelerators still
-  install.
-- A small set of terminal-side shortcuts handle IME / scroll quirks
-  on Ubuntu 22.04 + Hangul preedit and are intentionally **not**
-  user-editable: Shift+Enter (Hangul preedit flush) and the smart
-  PgUp/PgDn paging on the terminal scrollback. These live one layer
-  below the GTK action map and rebinding them would re-introduce the
-  input-method bugs they fix.
-
+- **Workspaces & panes** — side-panel workspaces hold tasks side by side, each
+  split into multiple keyboard-navigable panes mixing terminal and browser
+  tabs. `Ctrl+Shift+K` copies the focused cwd; right-click for Copy path / URL.
+- **In-app browser** — a WebKitGTK tab next to your terminals, drivable by
+  agents in a neighbouring pane (snapshot, click, type, read state). Import a
+  session from Firefox / Chrome / Chromium / Brave / Edge / Arc; **Web
+  Inspector** opens WebKit dev tools.
+- **Notifications** — terminal "task complete" / "needs attention" signals
+  become desktop notifications, routed to the firing workspace and quiet while
+  focused. Bell popover **All Clear** clears all entries and toasts at once.
+- **AI agent integration** — Claude Code, Codex, OpenCode work out of the box;
+  sessions persist across restarts. `claude-teams` opens a workspace pre-split
+  into per-Claude panes. `flowmux doctor` / `fix` audit and repair wiring.
+- **Customizable keybindings** — Options → **Keybindings** rebinds any shortcut
+  (applies on OK, no restart), saved to
+  `$XDG_CONFIG_HOME/flowmux/options.json`. IME/scroll terminal shortcuts
+  (Shift+Enter Hangul flush, smart PgUp/PgDn) are fixed and not editable.
 
 ## Layout
 
@@ -151,81 +90,15 @@ sudo apt install \
     libgtk-4-dev libadwaita-1-dev \
     libwebkitgtk-6.0-dev libssl-dev \
     libssh2-1-dev libdbus-1-dev
-# rustup (Rust 1.93 or newer) and Zig 0.15.x are required. Zig builds
-# the vendored libghostty-vt library used by the terminal pane.
+# rustup (Rust 1.93+) and Zig 0.15.x required; Zig builds the vendored
+# libghostty-vt used by the terminal pane.
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-The GTK terminal pane is backed by `libghostty-vt` plus flowmux's own
-GTK renderer and PTY lifecycle, so the native GUI build has no external
-terminal widget runtime dependency.
+### Optional — full media playback in tab browser
 
-### Ubuntu 22.04 (jammy) support
-
-Ubuntu 22.04 support no longer depends on a separately packaged GTK4 terminal widget.
-Install the GTK/libadwaita/WebKit development packages above plus Zig 0.15.x,
-then build normally with cargo. The Flatpak build still bridges the terminal
-shell back to the host with `flatpak-spawn --host`, so host tools such as
-`git`, `tig`, `vim`, and `htop` stay visible.
-
-The terminal input path reads libghostty's DECCKM state directly, so ncurses
-tools such as `tig` receive application-cursor Up/Down bytes after `smkx`
-without the previous toolkit/IBus-specific workaround path.
-
-```bash
-# 1. Install Flatpak, flatpak-builder, and the Flathub remote
-sudo apt install flatpak flatpak-builder
-flatpak remote-add --if-not-exists --user flathub \
-    https://flathub.org/repo/flathub.flatpakrepo
-
-# 2. Install the GNOME 48 runtime/SDK
-flatpak install -y --user flathub \
-    org.gnome.Platform//48 org.gnome.Sdk//48
-
-# 3. Build and install flowmux from this repo (per-user, no sudo)
-flatpak-builder --user --install --force-clean \
-    build-flatpak packaging/flatpak/com.flowmux.App.yml
-
-# 4. Launch
-flatpak run com.flowmux.App
-```
-
-Notes for the Flatpak build:
-
-- GStreamer plugins (see next section) are already bundled in the
-  GNOME runtime, so you do not need to install them separately on the
-  host for the Flatpak build to play media in the tab browser.
-- The Flatpak manifest bootstraps Rust 1.95.0 and Zig 0.15.2 inside the
-  build tree. This avoids depending on the runtime SDK's Rust extension,
-  which can lag behind `libghostty-vt`'s Rust 1.93 minimum.
-- The `flowmux` and `flowmuxctl` binaries inside the sandbox are
-  reachable from a host terminal as `flatpak run --command=flowmux
-  com.flowmux.App ...` and `flatpak run --command=flowmuxctl
-  com.flowmux.App ...`. The in-app browser CLI flow described in
-  [`AGENTS.md`](AGENTS.md) works the same way.
-- After upgrading the repo, re-run step 3 to rebuild against the new
-  source. The `--force-clean` flag wipes the previous build tree.
-
-If browser tabs open but render as a blank page (WebKit's web process
-aborts with `Could not create default EGL display: EGL_BAD_PARAMETER`),
-the host's GL stack is too old for the newer Mesa inside the Flatpak
-sandbox. Disable WebKit's GPU path with the `FLOWMUX_WEBKIT_HW_ACCEL`
-environment variable — set it once and it sticks across launches:
-
-```bash
-flatpak override --user --env=FLOWMUX_WEBKIT_HW_ACCEL=never com.flowmux.App
-flatpak run com.flowmux.App
-```
-
-Pages then render via CPU rasterisation. Hardware video decoding is
-lost, but the browser pane works.
-
-### Recommended (optional) — full media playback in tab browser
-
-WebKitGTK delegates media decoding to GStreamer. Without these
-plugins the tab browser still loads pages, but YouTube / Twitch /
-HTML5 `<video>` may stall, miss subtitles, or fail on
-encrypted/DRM content. Install them if you plan to play video:
+WebKitGTK decodes media via GStreamer. Without these plugins pages still load,
+but YouTube / Twitch / `<video>` may stall, miss subtitles, or fail on DRM:
 
 ```bash
 sudo apt install \
@@ -235,24 +108,18 @@ sudo apt install \
     gstreamer1.0-libav
 ```
 
-The exact symptoms when missing: log lines like
-`GStreamer element fakevideosink not found` or
-`WebKit wasn't able to find a WebVTT encoder. Subtitles handling
-will be degraded unless gst-plugins-bad is installed.`
-
 ## Build
 
 ```bash
-# release build of the full workspace
 cargo build --release --workspace
 ```
 
-The release profile produces two binaries under `target/release/`:
+Produces two binaries under `target/release/`:
 
-- `flowmux` — the GTK4 GUI; also forwards CLI subcommands to `flowmuxctl`.
-- `flowmuxctl` — the CLI helper invoked by the GUI binary and by agent hooks.
+- `flowmux` — GTK4 GUI; also forwards CLI subcommands to `flowmuxctl`.
+- `flowmuxctl` — CLI helper invoked by the GUI and by agent hooks.
 
-For day-to-day development you can skip the install step:
+For development:
 
 ```bash
 cargo run -p flowmux           # debug GUI
@@ -261,38 +128,40 @@ cargo check --workspace        # type-check everything
 
 ## Verify & repair
 
-flowmux integrates with several things on your host — AI-agent SKILL
-files, agent lifecycle hooks, the in-app browser data dir, host
-browsers visible to the cookie importer, and the flowmux daemon
-socket. Two commands keep the whole picture in one place:
+flowmux wires into host pieces: agent SKILL files, agent hooks, the browser
+data dir, host browsers for the cookie importer, and the daemon socket.
 
 ```bash
-flowmux doctor   # read-only audit; exits non-zero if anything needs fixing
-flowmux fix      # re-install / refresh anything `doctor` flagged
+flowmux doctor   # read-only audit; non-zero exit if anything needs fixing
+flowmux fix      # re-install / refresh what doctor flagged
 ```
 
-`doctor` prints one row per check with a coloured status badge — green
-`ok`, red `fix`, yellow `warn`, plain `info`. Pipe it (`flowmux
-doctor | …`) or set `NO_COLOR=1` to disable colour for log files and
-CI. Run it whenever you want to know "is everything wired?":
+`doctor` prints one row per check with a status badge (`ok` / `fix` / `warn` /
+`info`); `NO_COLOR=1` or piping disables colour. Run it after a flowmux
+install/upgrade and after installing a new agent. `fix` is idempotent and
+never clobbers hand-edited entries lacking the flowmux marker. Add `--json` to
+either for machine-readable output.
 
-- **after `flowmux` install or upgrade** — the SKILL/hook payloads
-  ship inside the binary, so a fresh build may need to re-sync the
-  on-disk copies.
-- **after installing Claude Code, Codex, or OpenCode for the first
-  time** — agents installed *after* flowmux are detected on the next
-  `doctor` run; `fix` then wires them up.
-- **when the bell popover or desktop notifications stop arriving**
-  from one agent — a row tagged `fix` (missing/drifted hook entry) is
-  almost always the cause.
+## Ubuntu 22.04 (jammy)
 
-`fix` is idempotent: rows that are already `ok` are no-ops, agents
-whose home directory is missing are skipped, and re-running it never
-clobbers a hand-edited entry that doesn't carry the flowmux marker.
-Add `--json` to either command for machine-readable output.
+22.04 lacks the GTK/WebKit versions for a native build, so ship via Flatpak
+(GNOME 48 runtime). Host tools stay visible through `flatpak-spawn --host`,
+and GStreamer plugins are bundled, so no extra host packages are needed.
+
+```bash
+sudo apt install flatpak flatpak-builder
+flatpak remote-add --if-not-exists --user flathub https://flathub.org/repo/flathub.flatpakrepo
+flatpak install -y --user flathub org.gnome.Platform//48 org.gnome.Sdk//48
+flatpak-builder --user --install --force-clean build-flatpak packaging/flatpak/com.flowmux.App.yml
+flatpak run com.flowmux.App
+```
+
+Blank browser tabs (`EGL_BAD_PARAMETER`) mean the host GL stack is too old for
+the sandbox Mesa — disable WebKit's GPU path:
+`flatpak override --user --env=FLOWMUX_WEBKIT_HW_ACCEL=never com.flowmux.App`.
 
 ## License
 
 GPL-3.0-or-later. See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).
-Contributions are accepted under the same license; see
+Contributions accepted under the same license; see
 [`CONTRIBUTING.md`](CONTRIBUTING.md).
