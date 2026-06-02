@@ -139,6 +139,22 @@ fn main() -> anyhow::Result<()> {
         if std::env::var_os("XMODIFIERS").is_none() {
             std::env::set_var("XMODIFIERS", "@im=ibus");
         }
+        // The ibus immodule processes key events asynchronously by
+        // default: a keypress is forwarded to ibus-daemon over D-Bus and
+        // the resulting commit-text comes back on a later turn. When a
+        // Hangul syllable is still in preedit and the user hits Enter,
+        // VTE handles the (unfiltered) Enter and feeds `\r` to the PTY
+        // *before* the async commit of the composed syllable arrives, so
+        // the line breaks in front of the last character and that
+        // character lands on the next line ("\n한" instead of "한\n").
+        // `IBUS_ENABLE_SYNC_MODE=1` makes the immodule block for the
+        // daemon's reply inside the key filter, so the commit is fed
+        // ahead of the Enter and the ordering is correct. The cost is a
+        // D-Bus round-trip per keystroke — the standard trade-off other
+        // terminals (gnome-terminal, kitty) take for the same reason.
+        if std::env::var_os("IBUS_ENABLE_SYNC_MODE").is_none() {
+            std::env::set_var("IBUS_ENABLE_SYNC_MODE", "1");
+        }
     }
 
     // One socket per GUI process so several flowmux windows can run
