@@ -267,9 +267,10 @@ impl TerminalPane {
         // even when the foreground app has hidden the terminal cursor.
         install_preedit_redraw_on_keystroke(&container, &term);
 
-        if terminal_capture_key_controllers_enabled(env_flag_enabled(
+        let smart_page_enabled = terminal_capture_key_controllers_enabled(env_flag_enabled(
             "FLOWMUX_ENABLE_VTE_CAPTURE_KEYS",
-        )) {
+        ));
+        if smart_page_enabled {
             install_smart_page_keys(&term, &scroll_adjustment);
         }
 
@@ -302,7 +303,7 @@ impl TerminalPane {
         // cursor; Ctrl+left-click opens the URL in a new browser tab in the
         // same pane. Plain clicks continue into VTE text selection.
         install_url_link_handling(&term, id, callbacks.on_open_url.clone());
-        install_flatpak_ibus_nav_workaround(&term);
+        install_flatpak_ibus_nav_workaround(&term, smart_page_enabled);
 
         // Process exit.
         {
@@ -830,13 +831,15 @@ fn install_smart_page_keys(term: &vte::Terminal, scroll_adjustment: &gtk::Adjust
 /// rewrites cursor keys to application mode when foreground programs
 /// such as tig request it.
 ///
-/// This remains opt-in because even a narrow capture-phase controller
-/// can suppress inline preedit drawing on some IBus/VTE paths: Claude
-/// and other terminal apps then receive committed Hangul syllables,
-/// but the in-progress composition is invisible. The default path now
-/// preserves VTE's native IM handling and relies on
-/// `IBUS_ENABLE_SYNC_MODE=1` for the 22.04 key delivery fixes that it
-/// covers.
+/// The bypass only consumes plain non-character keys IBus would forward
+/// (and drop) anyway, so it does not starve composition: letters,
+/// digits, punctuation and Space still reach IBus and compose normally,
+/// and the inline preedit stays visible (drawn by
+/// `install_preedit_redraw_on_keystroke`). An earlier attempt to gate
+/// this whole bypass behind `FLOWMUX_ENABLE_IBUS_NAV_WORKAROUND=1` and
+/// rely on `IBUS_ENABLE_SYNC_MODE=1` instead regressed every edit/nav
+/// key on the 22.04 host, because sync mode never fixed the drop
+/// (confirmed standalone) — so the bypass is on by default in Flatpak.
 ///
 /// What is intentionally **not** intercepted:
 ///   * Space. Its natural role inside IBus is "commit the current
@@ -846,22 +849,16 @@ fn install_smart_page_keys(term: &vte::Terminal, scroll_adjustment: &gtk::Adjust
 ///   * Letter / number / punctuation keys. IBus needs to see them
 ///     for preedit; bypassing them made Claude show only committed
 ///     syllables instead of the in-progress Hangul composition.
-///   * BackSpace / Delete (and KP_Delete). During preedit IBus uses
-///     BackSpace to decompose the syllable one jamo at a time; bypassing
-///     it committed and then deleted the whole syllable. Since
-///     `IBUS_ENABLE_SYNC_MODE=1` delivers these keys synchronously, IBus
-///     now receives them on the 22.04 host too, so the bypass is both
-///     unnecessary and harmful for in-preedit editing.
-///   * Enter. `IBUS_ENABLE_SYNC_MODE=1` lets VTE commit any pending
-///     Hangul preedit before the return key reaches the PTY, while a
-///     direct bypass submits the line without giving VTE a chance to
-///     draw or commit the in-progress syllable.
 ///
-/// Active only when both conditions hold:
-///   * running inside a Flatpak sandbox (`/.flatpak-info` exists)
-///   * `FLOWMUX_ENABLE_IBUS_NAV_WORKAROUND=1` is set
+/// BackSpace / Delete / KP_Delete and Enter (Return / ISO_Enter /
+/// KP_Enter) ARE intercepted — otherwise the 22.04 daemon-path drops
+/// them in Hangul mode (deletion stalls, Enter does not submit). See the
+/// inline notes at their `bind_key` calls; both rely on
+/// `flush_pending_preedit` to commit any composing syllable first.
 ///
-/// `FLOWMUX_NO_IBUS_NAV_WORKAROUND=1` still wins for bisection.
+/// Active when, and `FLOWMUX_NO_IBUS_NAV_WORKAROUND=1` overrides:
+///   * running inside a Flatpak sandbox (`/.flatpak-info` exists), or
+///   * `FLOWMUX_ENABLE_IBUS_NAV_WORKAROUND=1` is set (force-on elsewhere).
 fn flatpak_ibus_bypass_bytes(keyval: gtk::gdk::Key) -> Option<&'static [u8]> {
     use gtk::gdk::Key;
 
@@ -869,6 +866,12 @@ fn flatpak_ibus_bypass_bytes(keyval: gtk::gdk::Key) -> Option<&'static [u8]> {
         Some(b"\t")
     } else if keyval == Key::Escape {
         Some(b"\x1b")
+    } else if keyval == Key::BackSpace {
+        Some(b"\x7f")
+    } else if keyval == Key::Delete || keyval == Key::KP_Delete {
+        Some(b"\x1b[3~")
+    } else if keyval == Key::Return || keyval == Key::ISO_Enter || keyval == Key::KP_Enter {
+        Some(b"\r")
     } else if keyval == Key::Left || keyval == Key::KP_Left {
         Some(b"\x1b[D")
     } else if keyval == Key::Right || keyval == Key::KP_Right {
@@ -881,6 +884,10 @@ fn flatpak_ibus_bypass_bytes(keyval: gtk::gdk::Key) -> Option<&'static [u8]> {
         Some(b"\x1b[H")
     } else if keyval == Key::End || keyval == Key::KP_End {
         Some(b"\x1b[F")
+    } else if keyval == Key::Page_Up || keyval == Key::KP_Page_Up {
+        Some(b"\x1b[5~")
+    } else if keyval == Key::Page_Down || keyval == Key::KP_Page_Down {
+        Some(b"\x1b[6~")
     } else if keyval == Key::Insert {
         Some(b"\x1b[2~")
     } else if keyval == Key::F1 {
@@ -917,10 +924,10 @@ fn should_install_flatpak_ibus_nav_workaround(
     enable_env_present: bool,
     flatpak_info_exists: bool,
 ) -> bool {
-    !disable_env_present && enable_env_present && flatpak_info_exists
+    !disable_env_present && (flatpak_info_exists || enable_env_present)
 }
 
-fn install_flatpak_ibus_nav_workaround(term: &vte::Terminal) {
+fn install_flatpak_ibus_nav_workaround(term: &vte::Terminal, smart_page_enabled: bool) {
     if !should_install_flatpak_ibus_nav_workaround(
         std::env::var_os("FLOWMUX_NO_IBUS_NAV_WORKAROUND").is_some(),
         env_flag_enabled("FLOWMUX_ENABLE_IBUS_NAV_WORKAROUND"),
@@ -952,33 +959,55 @@ fn install_flatpak_ibus_nav_workaround(term: &vte::Terminal) {
     // Normal-mode xterm encodings. `flowmuxctl pty-tee` adjusts the
     // cursor-key subset to application mode while DECCKM is active.
     //
-    // BackSpace / Delete are deliberately NOT bypassed. During Hangul
-    // preedit IBus interprets BackSpace as "decompose the syllable by
-    // one jamo" (안 in progress → ㅇㅏ → ㅇ); routing it through the
-    // bypass instead flushed the preedit (committing the whole syllable)
-    // and then sent DEL, so the entire syllable vanished. With
-    // `IBUS_ENABLE_SYNC_MODE=1` (set in main.rs) IBus now receives these
-    // keys synchronously even on the 22.04 host, so the original
-    // dropped-key reason for intercepting them is gone; letting them
-    // reach IBus restores jamo-level editing. Outside preedit VTE's own
-    // handler emits the identical \x7f / \x1b[3~ bytes.
+    // BackSpace / Delete (and KP_Delete) ARE bypassed. The 22.04 IBus
+    // daemon-path drops every plain edit key it does not itself consume,
+    // so once the Hangul preedit is empty (e.g. after typing 안녕하세요 the
+    // last syllable is committed) BackSpace is forwarded by IBus and then
+    // silently dropped — deletion of already-committed text stalls. The
+    // briefly-tried alternative of letting these reach IBus under
+    // `IBUS_ENABLE_SYNC_MODE=1` did not help: sync mode never fixed the
+    // drop (confirmed standalone), it only enabled jamo-level decompose
+    // while a syllable is still composing. Restoring the bypass trades
+    // that in-preedit jamo decompose for reliable deletion: bypassing
+    // BackSpace runs `flush_pending_preedit` (commits the pending
+    // syllable) then sends DEL, so a composing syllable is committed and
+    // removed whole, and committed text deletes one cell at a time.
+    bind_key(gtk::gdk::Key::BackSpace);
+    bind_key(gtk::gdk::Key::Delete);
     bind_key(gtk::gdk::Key::Tab);
     bind_key(gtk::gdk::Key::Escape);
+    // Enter (Return / ISO_Enter / KP_Enter) is bypassed too: in Hangul
+    // mode the 22.04 daemon-path drops the forwarded key, so a plain
+    // Enter never reaches the PTY and the line is not submitted. The
+    // bypass runs `flush_pending_preedit` first, committing any syllable
+    // still composing, then sends CR. Shift+Enter (SHIFT modifier) and
+    // Alt+Enter never match these empty-modifier triggers, so their
+    // dedicated handlers are unaffected.
+    bind_key(gtk::gdk::Key::Return);
+    bind_key(gtk::gdk::Key::ISO_Enter);
+    bind_key(gtk::gdk::Key::KP_Enter);
     bind_key(gtk::gdk::Key::Left);
     bind_key(gtk::gdk::Key::Right);
     bind_key(gtk::gdk::Key::Up);
     bind_key(gtk::gdk::Key::Down);
     bind_key(gtk::gdk::Key::Home);
     bind_key(gtk::gdk::Key::End);
-    // Page_Up / Page_Down stay out of this table. The legacy smart-page
-    // hook owns them when `FLOWMUX_ENABLE_VTE_CAPTURE_KEYS=1`; otherwise
-    // VTE's native path handles them. Including them here would double-handle
-    // the key and defeat the scroll path.
+    // Page_Up / Page_Down: when the opt-in smart-page hook owns them
+    // (`FLOWMUX_ENABLE_VTE_CAPTURE_KEYS=1`) leave them to it — binding
+    // them here too would double-handle the key and defeat its scroll
+    // path. Otherwise bypass them so they are not dropped in Hangul mode;
+    // the bytes match VTE's native escape (`\x1b[5~` / `\x1b[6~`).
+    if !smart_page_enabled {
+        bind_key(gtk::gdk::Key::Page_Up);
+        bind_key(gtk::gdk::Key::Page_Down);
+        bind_key(gtk::gdk::Key::KP_Page_Up);
+        bind_key(gtk::gdk::Key::KP_Page_Down);
+    }
     // Keypad variants of the same keys — some layouts (notebook + Fn,
     // X11 with NumLock off, …) report them as the KP_* keysyms even
     // when the user hits the equivalent unshifted key.
-    // KP_Delete omitted for the same reason as Delete above — IBus must
-    // see it for in-preedit editing; VTE emits \x1b[3~ outside preedit.
+    // KP_Delete bypassed for the same reason as Delete above.
+    bind_key(gtk::gdk::Key::KP_Delete);
     bind_key(gtk::gdk::Key::KP_Left);
     bind_key(gtk::gdk::Key::KP_Right);
     bind_key(gtk::gdk::Key::KP_Up);
@@ -1315,13 +1344,13 @@ mod tests {
     }
 
     #[test]
-    fn flatpak_ibus_bypass_leaves_text_and_enter_on_vte_im_path() {
+    fn flatpak_ibus_bypass_leaves_text_on_vte_im_path() {
         use gtk::gdk::Key;
 
+        // Character keys must reach IBus so composition works; only the
+        // plain non-character / edit keys the 22.04 daemon-path drops are
+        // bypassed.
         for key in [
-            Key::Return,
-            Key::ISO_Enter,
-            Key::KP_Enter,
             Key::space,
             Key::a,
             Key::_1,
@@ -1338,6 +1367,15 @@ mod tests {
     }
 
     #[test]
+    fn flatpak_ibus_bypass_covers_enter_keys() {
+        use gtk::gdk::Key;
+
+        assert_eq!(flatpak_ibus_bypass_bytes(Key::Return), Some(&b"\r"[..]));
+        assert_eq!(flatpak_ibus_bypass_bytes(Key::ISO_Enter), Some(&b"\r"[..]));
+        assert_eq!(flatpak_ibus_bypass_bytes(Key::KP_Enter), Some(&b"\r"[..]));
+    }
+
+    #[test]
     fn flatpak_ibus_bypass_keeps_navigation_and_function_keys() {
         use gtk::gdk::Key;
 
@@ -1351,21 +1389,54 @@ mod tests {
             Some(&b"\x1b[2~"[..])
         );
         assert_eq!(flatpak_ibus_bypass_bytes(Key::F5), Some(&b"\x1b[15~"[..]));
+        assert_eq!(
+            flatpak_ibus_bypass_bytes(Key::Page_Up),
+            Some(&b"\x1b[5~"[..])
+        );
+        assert_eq!(
+            flatpak_ibus_bypass_bytes(Key::KP_Page_Down),
+            Some(&b"\x1b[6~"[..])
+        );
     }
 
     #[test]
-    fn flatpak_ibus_nav_workaround_is_legacy_opt_in() {
-        assert!(!should_install_flatpak_ibus_nav_workaround(
+    fn flatpak_ibus_bypass_covers_deletion_keys() {
+        use gtk::gdk::Key;
+
+        assert_eq!(
+            flatpak_ibus_bypass_bytes(Key::BackSpace),
+            Some(&b"\x7f"[..])
+        );
+        assert_eq!(
+            flatpak_ibus_bypass_bytes(Key::Delete),
+            Some(&b"\x1b[3~"[..])
+        );
+        assert_eq!(
+            flatpak_ibus_bypass_bytes(Key::KP_Delete),
+            Some(&b"\x1b[3~"[..])
+        );
+    }
+
+    #[test]
+    fn flatpak_ibus_nav_workaround_defaults_on_in_flatpak() {
+        // On by default inside the sandbox, with or without the enable env.
+        assert!(should_install_flatpak_ibus_nav_workaround(
             false, false, true
         ));
         assert!(should_install_flatpak_ibus_nav_workaround(
             false, true, true
         ));
+        // Force-on outside the sandbox via the enable env.
+        assert!(should_install_flatpak_ibus_nav_workaround(
+            false, true, false
+        ));
+        // Off when neither condition holds.
+        assert!(!should_install_flatpak_ibus_nav_workaround(
+            false, false, false
+        ));
+        // The disable env wins everywhere (bisection kill switch).
         assert!(!should_install_flatpak_ibus_nav_workaround(
             true, true, true
-        ));
-        assert!(!should_install_flatpak_ibus_nav_workaround(
-            false, true, false
         ));
     }
 }
