@@ -41,14 +41,22 @@ cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-`libghostty-vt` is vendored and compiled by **Zig 0.15.x** as part of
-`flowmux-terminal`'s build script, so `zig` must be on `PATH` for any
-build that includes that crate.
+The terminal is rendered by a **pure-Rust** backend: the
+`alacritty_terminal` crate owns the VT parser, grid, scrollback, PTY
+(`tty` + `event_loop`), and damage tracking; `flowmux-terminal`'s
+`engine`/`render` modules wrap it and `flowmux`'s `ui::terminal_render` +
+`ui::terminal_pane_native` draw it with a GTK4 `Snapshot` renderer. There
+is **no VTE** and **no Zig** — a plain `cargo build` is a complete build.
+See `docs/pure-rust-terminal-migration.md` for the design and the prior
+rollback lesson (the renderer, not the engine, must avoid per-frame full
+redraws).
 
-The Flatpak build (Ubuntu 22.04 path) is described in `README.md`
-under "Ubuntu 22.04 (jammy) support". `flowmux doctor` / `flowmux fix`
-audit and repair the on-host pieces (agent hooks, SKILL files, socket,
-browser data dir).
+flowmux installs natively (`scripts/install-host.sh`) and needs GTK 4.12+
+and WebKitGTK 6.0, so it targets Ubuntu 24.04+ (or any distro with those
+versions). There is no Flatpak build, and Ubuntu 22.04 is unsupported
+(jammy lacks GTK 4.12+/WebKitGTK 6.0 and has no maintained PPA for them).
+`flowmux doctor` / `flowmux fix` audit and repair the on-host pieces
+(agent hooks, SKILL files, socket, browser data dir).
 
 ## Architecture
 
@@ -89,8 +97,8 @@ handle it in the dispatch loop.
 
 A `Workspace` (`flowmux-core`) owns a tree of `Pane`s; each `Pane`
 holds one or more `PaneSurface`s of kind `Terminal` or `Browser`.
-Terminal surfaces are backed by `flowmux-terminal` (PTY + libghostty-vt
-state + GTK renderer); browser surfaces are backed by `flowmux-browser`
+Terminal surfaces are backed by `flowmux-terminal` (PTY + alacritty_terminal
+VT state + the GTK4 `terminal_render` renderer); browser surfaces are backed by `flowmux-browser`
 (WebKitGTK 6.0 WebView with a scriptable controller). The IPC protocol
 and the GUI both refer to these by `WorkspaceId` / `PaneId` /
 `SurfaceId` (UUID newtypes in `flowmux-core`).

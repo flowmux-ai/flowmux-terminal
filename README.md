@@ -13,8 +13,8 @@
 ### A terminal for AI agent workflows, browser control, and task signals.
 
 flowmux is a Linux/GTK4 terminal for AI coding agents. The terminal pane uses
-`libghostty-vt` for VT state, flowmux-owned PTYs, and an application-owned GTK
-renderer.
+the pure-Rust `alacritty_terminal` engine for VT state and scrollback,
+flowmux-owned PTYs, and an application-owned GTK4 renderer (no VTE).
 
 > Unofficial GPL-3.0-or-later reimplementation inspired by [cmux](https://cmux.com/ko), a macOS/AppKit app. Not affiliated with cmux.
   
@@ -64,7 +64,7 @@ flowmux/
 │   ├── flowmux-core/       Domain types: Workspace, Surface, Pane, Notification
 │   ├── flowmux-config/     cmux.json + ~/.config/ghostty/config readers
 │   ├── flowmux-state/      Persistent workspace/session state on disk
-│   ├── flowmux-terminal/   libghostty-oriented terminal backend + PTY env helpers
+│   ├── flowmux-terminal/   pure-Rust terminal backend (alacritty_terminal) + PTY env helpers
 │   ├── flowmux-browser/    WebKitGTK 6.0 browser surface + scriptable refs
 │   ├── flowmux-cookies/    Browser cookie/session import (libsecret + sqlite)
 │   ├── flowmux-notify/     OSC 9/99/777 parser + libnotify D-Bus sender
@@ -75,7 +75,7 @@ flowmux/
 │   ├── flowmux-vcs/        Git/PR sidebar integration
 │   ├── flowmux-cli/        `flowmuxctl` helper for CLI subcommands
 │   └── flowmux/            GTK4 + libadwaita main app and public `flowmux` binary
-├── packaging/{debian,flatpak}/  Distro packaging metadata
+├── packaging/debian/      Distro packaging metadata (cargo-deb)
 ├── resources/             .desktop file, icons, screenshots, themes
 ├── LICENSE                GPL-3.0-or-later (verbatim from gnu.org)
 ├── THIRD_PARTY_LICENSES.md  Third-party dependency license inventory
@@ -90,13 +90,8 @@ sudo apt install \
     libgtk-4-dev libadwaita-1-dev \
     libwebkitgtk-6.0-dev libssl-dev \
     libssh2-1-dev libdbus-1-dev
-# For the patched VTE build (see "Patched VTE" below) — meson/ninja plus the
-# VTE source-build dependencies not already pulled in by libgtk-4-dev:
-sudo apt install \
-    meson ninja-build \
-    liblz4-dev libpcre2-dev libfribidi-dev libicu-dev libgnutls28-dev
-# rustup (Rust 1.93+) and Zig 0.15.x required; Zig builds the vendored
-# libghostty-vt used by the terminal pane.
+# rustup (Rust 1.93+). The terminal is rendered by a pure-Rust backend
+# (alacritty_terminal), so there is no VTE, no meson/ninja, and no Zig.
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
@@ -131,29 +126,18 @@ cargo run -p flowmux           # debug GUI
 cargo check --workspace        # type-check everything
 ```
 
-### Patched VTE (drag-selection in agent TUIs)
-
-Upstream VTE drops a text selection the instant the foreground application
-rewrites the cells under it. TUIs such as Codex and Claude Code repaint their
-UI continuously, so a drag-selection in their pane vanishes on the next frame —
-and VTE exposes no public API to disable that behaviour. flowmux therefore
-links a small patched copy of VTE (`packaging/vte-patches/`) that keeps the
-selection anchored across output. The system libvte other apps use is left
-untouched.
-
-For a native install, build the patched VTE and link flowmux against it in one
-step (needs the `meson`/`ninja`/`liblz4-dev`/… packages listed in the
-prerequisites):
+### Install to the host
 
 ```bash
-scripts/install-host.sh        # builds patched VTE → builds flowmux → installs
+scripts/install-host.sh        # release build → installs to ~/.local/bin + ~/.cargo/bin
 ```
 
-This installs the patched VTE to `~/.local/flowmux-vte` and the binaries to
-`~/.local/bin` and `~/.cargo/bin`, baking a RUNPATH so the GUI loads the
-patched library at runtime. The Flatpak build (Ubuntu 22.04) applies the same
-patch automatically. A plain `cargo build --release --workspace` still works
-but links the system VTE, so drag-selection will not survive a repaint.
+The terminal is rendered by a pure-Rust backend (the `alacritty_terminal`
+engine plus a flowmux-owned GTK4 renderer), so a plain
+`cargo build --release --workspace` is a complete build — there is no VTE to
+patch and no special link step. Text selection in agent TUIs (Codex, Claude
+Code) survives output repaints because the selection lives in the terminal
+model, independent of the cells being rewritten.
 
 ## Verify & repair
 
@@ -171,23 +155,23 @@ install/upgrade and after installing a new agent. `fix` is idempotent and
 never clobbers hand-edited entries lacking the flowmux marker. Add `--json` to
 either for machine-readable output.
 
-## Ubuntu 22.04 (jammy)
+## Ubuntu 22.04 (jammy) — not supported
 
-22.04 lacks the GTK/WebKit versions for a native build, so ship via Flatpak
-(GNOME 48 runtime). Host tools stay visible through `flatpak-spawn --host`,
-and GStreamer plugins are bundled, so no extra host packages are needed.
+flowmux needs GTK 4.12+, libadwaita 1.5+, and WebKitGTK **6.0** (the GTK4
+WebKit). 22.04 ships GTK 4.6 and has none of these in apt, and there is no
+maintained jammy PPA that backports them (WebKitGTK 6.0 in particular is not
+realistically available there). The pure-Rust terminal removed the libvte and
+Zig requirements, but the GTK4 + WebKitGTK-6.0 requirement remains and that is
+what jammy cannot meet.
 
-```bash
-sudo apt install flatpak flatpak-builder
-flatpak remote-add --if-not-exists --user flathub https://flathub.org/repo/flathub.flatpakrepo
-flatpak install -y --user flathub org.gnome.Platform//48 org.gnome.Sdk//48
-flatpak-builder --user --install --force-clean build-flatpak packaging/flatpak/com.flowmux.App.yml
-flatpak run com.flowmux.App
-```
+flowmux previously shipped a Flatpak to cover 22.04; that has been removed, so
+**22.04 is no longer a supported target.** Use **Ubuntu 24.04 or newer** (or any
+distro whose repos carry GTK 4.12+ and WebKitGTK 6.0 — e.g. recent Fedora,
+Arch). Running flowmux on 22.04 would require building GTK 4.12+, libadwaita,
+and WebKitGTK 6.0 from source, which is out of scope here.
 
-Blank browser tabs (`EGL_BAD_PARAMETER`) mean the host GL stack is too old for
-the sandbox Mesa — disable WebKit's GPU path:
-`flatpak override --user --env=FLOWMUX_WEBKIT_HW_ACCEL=never com.flowmux.App`.
+24.04 and 26.04 have everything in apt — see the prerequisites above; no PPA or
+Flatpak is needed.
 
 ## License
 
