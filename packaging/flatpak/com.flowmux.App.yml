@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Flatpak manifest — the supported way to run flowmux on Ubuntu 22.04
+# (jammy), whose apt has neither GTK 4.12+ nor WebKitGTK 6.0. The GNOME
+# 48 runtime bundles a modern GTK4 + libadwaita + WebKitGTK 6.0, so the
+# pure-Rust flowmux builds against it unchanged — no VTE, no Zig.
+#
+# 24.04+ users should build natively instead (see README); this manifest
+# exists for distros too old for a native build.
+app-id: com.flowmux.App
+runtime: org.gnome.Platform
+runtime-version: '48'
+sdk: org.gnome.Sdk
+command: flowmux
+finish-args:
+  - --share=network
+  - --share=ipc
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --device=dri
+  - --filesystem=home
+  - --talk-name=org.freedesktop.Notifications
+  - --talk-name=org.freedesktop.secrets
+  # IME: the ibus GTK immodule (forced on by the GUI when GTK_IM_MODULE
+  # is unset) reaches the host ibus-daemon through the IBus portal.
+  # Without this grant the sandbox falls back to the `simple` immodule
+  # on Ubuntu 22.04 hosts and CJK preedit (the composing-syllable
+  # underline) never renders.
+  - --talk-name=org.freedesktop.portal.IBus
+  # Terminal pane runs the user's host shell via `flatpak-spawn --host`
+  # so it sees host-installed tools (git, tig, …); the helper talks to
+  # this D-Bus name on the session bus.
+  - --talk-name=org.freedesktop.Flatpak
+
+modules:
+  - name: flowmux
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      build-args:
+        - --share=network
+    build-commands:
+      - cargo build --release --manifest-path Cargo.toml -p flowmux -p flowmux-cli
+      - install -Dm755 target/release/flowmux    /app/bin/flowmux
+      - install -Dm755 target/release/flowmuxctl /app/lib/flowmux/flowmuxctl
+      # Expose flowmuxctl on /app/bin so `flatpak run --command=flowmuxctl
+      # com.flowmux.App …` resolves without typing the full /app/lib path.
+      # The hook installer (`flowmux hooks setup`, run inside the sandbox)
+      # writes plugin entries with exactly this short name so the host-side
+      # OpenCode / Claude / Codex spawn lines stay concise.
+      - install -d /app/bin
+      - ln -sf /app/lib/flowmux/flowmuxctl /app/bin/flowmuxctl
+      - install -Dm644 resources/desktop/com.flowmux.App.desktop /app/share/applications/com.flowmux.App.desktop
+      - install -Dm644 resources/icons/flowmux.svg /app/share/icons/hicolor/scalable/apps/com.flowmux.App.svg
+      - for size in 16 24 32 48 64 96 128 256 512; do install -Dm644 "resources/icons/flowmux-${size}.png" "/app/share/icons/hicolor/${size}x${size}/apps/com.flowmux.App.png"; done
+      - install -Dm644 LICENSE /app/share/licenses/flowmux/LICENSE
+      - install -Dm644 NOTICE  /app/share/licenses/flowmux/NOTICE
+      - install -Dm644 THIRD_PARTY_LICENSES.md /app/share/licenses/flowmux/THIRD_PARTY_LICENSES.md
+    sources:
+      - type: dir
+        path: ../..

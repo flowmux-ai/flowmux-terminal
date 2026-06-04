@@ -333,9 +333,10 @@ which a headless agent cannot perform. See `VERIFICATION.md`.
 ## Open risks
 - Renderer perf on 22.04 (the rollback cause) — gated in Phase 3.
 - IME parity on a hand-rolled key path — gated in Phase 4.
-- 22.04 native is **not feasible** and Flatpak is removed, so **22.04 is
-  unsupported**; target is 24.04+. Evidence: gtk4-rs 0.9's lowest feature
-  is `v4_10` (needs GTK ≥ 4.10) while jammy ships GTK 4.6, and jammy has no
-  GTK4 WebKit (only GTK3 webkit2gtk 4.0/4.1). Supporting jammy would mean
-  a 2-major gtk4-rs downgrade + UI rewrite + dropping the browser — out of
-  scope. 24.04 / 26.04 use native packages.
+- **22.04 support = Flatpak** (the native build targets 24.04+). jammy's
+  apt has no GTK 4.12+ and no GTK4 WebKit (only GTK3 webkit2gtk 4.0/4.1),
+  so a native jammy build is out of scope; instead
+  `packaging/flatpak/com.flowmux.App.yml` (GNOME 48 runtime) bundles the
+  modern GTK4 + libadwaita + WebKitGTK 6.0 and builds the pure-Rust
+  flowmux unchanged — no VTE/Zig module needed (unlike the old manifest).
+  24.04 / 26.04 build natively.

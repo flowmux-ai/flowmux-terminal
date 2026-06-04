@@ -52,11 +52,12 @@ rollback lesson (the renderer, not the engine, must avoid per-frame full
 redraws).
 
 flowmux installs natively (`scripts/install-host.sh`) and needs GTK 4.12+
-and WebKitGTK 6.0, so it targets Ubuntu 24.04+ (or any distro with those
-versions). There is no Flatpak build, and Ubuntu 22.04 is unsupported
-(jammy lacks GTK 4.12+/WebKitGTK 6.0 and has no maintained PPA for them).
-`flowmux doctor` / `flowmux fix` audit and repair the on-host pieces
-(agent hooks, SKILL files, socket, browser data dir).
+and WebKitGTK 6.0, so the native build targets Ubuntu 24.04+. Ubuntu
+22.04 (jammy lacks GTK 4.12+/WebKitGTK 6.0) installs via **Flatpak**
+(`packaging/flatpak/com.flowmux.App.yml`, GNOME 48 runtime — bundles the
+modern GTK4 + WebKitGTK 6.0; no VTE/Zig built). `flowmux doctor` /
+`flowmux fix` audit and repair the on-host pieces (agent hooks, SKILL
+files, socket, browser data dir).
 
 ## Architecture
 

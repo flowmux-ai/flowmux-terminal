@@ -74,8 +74,8 @@ scripts/install-host.sh
 
 ## 8. Compatibility (호환성)
 - [ ] 24.04 / 26.04: native build runs
-- [ ] 22.04: unsupported (no GTK 4.12+/WebKitGTK 6.0); not expected to build
-- [ ] Browser pane (WebKitGTK) still loads pages
+- [ ] 22.04: installs + runs via Flatpak (GNOME 48 runtime)
+- [ ] Browser pane (WebKitGTK) still loads pages (native and Flatpak)
 
 > If anything here misbehaves, report it — the fix is a code change I can
 > make; only the observation needed a human.

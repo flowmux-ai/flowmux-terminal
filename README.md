@@ -155,23 +155,29 @@ install/upgrade and after installing a new agent. `fix` is idempotent and
 never clobbers hand-edited entries lacking the flowmux marker. Add `--json` to
 either for machine-readable output.
 
-## Ubuntu 22.04 (jammy) — not supported
+## Ubuntu 22.04 (jammy) — install via Flatpak
 
-flowmux needs GTK 4.12+, libadwaita 1.5+, and WebKitGTK **6.0** (the GTK4
-WebKit). 22.04 ships GTK 4.6 and has none of these in apt, and there is no
-maintained jammy PPA that backports them (WebKitGTK 6.0 in particular is not
-realistically available there). The pure-Rust terminal removed the libvte and
-Zig requirements, but the GTK4 + WebKitGTK-6.0 requirement remains and that is
-what jammy cannot meet.
+The native build targets **24.04+** (it needs GTK 4.12+ and WebKitGTK 6.0,
+which 22.04's apt does not provide — jammy ships GTK 4.6 and only the GTK3
+WebKit). On 22.04, install via **Flatpak** instead: the GNOME 48 runtime bundles
+a modern GTK4 + libadwaita + WebKitGTK 6.0, so flowmux runs there unchanged
+(terminal *and* browser). No VTE or Zig is built — the runtime provides
+everything.
 
-flowmux previously shipped a Flatpak to cover 22.04; that has been removed, so
-**22.04 is no longer a supported target.** Use **Ubuntu 24.04 or newer** (or any
-distro whose repos carry GTK 4.12+ and WebKitGTK 6.0 — e.g. recent Fedora,
-Arch). Running flowmux on 22.04 would require building GTK 4.12+, libadwaita,
-and WebKitGTK 6.0 from source, which is out of scope here.
+```bash
+sudo apt install flatpak flatpak-builder
+flatpak remote-add --if-not-exists --user flathub https://flathub.org/repo/flathub.flatpakrepo
+flatpak install -y --user flathub org.gnome.Platform//48 org.gnome.Sdk//48 org.freedesktop.Sdk.Extension.rust-stable//24.08
+flatpak-builder --user --install --force-clean build-flatpak packaging/flatpak/com.flowmux.App.yml
+flatpak run com.flowmux.App
+```
 
-24.04 and 26.04 have everything in apt — see the prerequisites above; no PPA or
-Flatpak is needed.
+Blank browser tabs (`EGL_BAD_PARAMETER`) mean the host GL stack is too old for
+the sandbox Mesa — disable WebKit's GPU path:
+`flatpak override --user --env=FLOWMUX_WEBKIT_HW_ACCEL=never com.flowmux.App`.
+
+24.04 and 26.04 build natively (see the prerequisites above); they do not need
+Flatpak.
 
 ## License
 
