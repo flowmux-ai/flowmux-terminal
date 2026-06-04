@@ -56,6 +56,12 @@ modules:
       - type: git
         url: https://gitlab.gnome.org/GNOME/vte.git
         tag: '0.78.4'
+      # Keep text selections alive while a TUI repaints. Upstream VTE
+      # deselects whenever the application rewrites the cells under the
+      # selection, so a drag-selection in a Codex / Claude Code pane
+      # vanishes on the next frame. See packaging/vte-patches.
+      - type: patch
+        path: ../vte-patches/0001-keep-selection-on-output.patch
 
   - name: flowmux
     buildsystem: simple

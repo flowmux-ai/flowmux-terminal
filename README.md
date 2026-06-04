@@ -90,6 +90,11 @@ sudo apt install \
     libgtk-4-dev libadwaita-1-dev \
     libwebkitgtk-6.0-dev libssl-dev \
     libssh2-1-dev libdbus-1-dev
+# For the patched VTE build (see "Patched VTE" below) — meson/ninja plus the
+# VTE source-build dependencies not already pulled in by libgtk-4-dev:
+sudo apt install \
+    meson ninja-build \
+    liblz4-dev libpcre2-dev libfribidi-dev libicu-dev libgnutls28-dev
 # rustup (Rust 1.93+) and Zig 0.15.x required; Zig builds the vendored
 # libghostty-vt used by the terminal pane.
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -125,6 +130,30 @@ For development:
 cargo run -p flowmux           # debug GUI
 cargo check --workspace        # type-check everything
 ```
+
+### Patched VTE (drag-selection in agent TUIs)
+
+Upstream VTE drops a text selection the instant the foreground application
+rewrites the cells under it. TUIs such as Codex and Claude Code repaint their
+UI continuously, so a drag-selection in their pane vanishes on the next frame —
+and VTE exposes no public API to disable that behaviour. flowmux therefore
+links a small patched copy of VTE (`packaging/vte-patches/`) that keeps the
+selection anchored across output. The system libvte other apps use is left
+untouched.
+
+For a native install, build the patched VTE and link flowmux against it in one
+step (needs the `meson`/`ninja`/`liblz4-dev`/… packages listed in the
+prerequisites):
+
+```bash
+scripts/install-host.sh        # builds patched VTE → builds flowmux → installs
+```
+
+This installs the patched VTE to `~/.local/flowmux-vte` and the binaries to
+`~/.local/bin` and `~/.cargo/bin`, baking a RUNPATH so the GUI loads the
+patched library at runtime. The Flatpak build (Ubuntu 22.04) applies the same
+patch automatically. A plain `cargo build --release --workspace` still works
+but links the system VTE, so drag-selection will not survive a repaint.
 
 ## Verify & repair
 
