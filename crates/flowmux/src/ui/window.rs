@@ -1941,6 +1941,20 @@ impl WindowController {
                     workspace.is_some()
                 );
                 self.refresh_launcher_badge();
+                // System-notification toggle: when disabled, the in-app bell
+                // entry above stays (and badges update), but ack=None tells the
+                // IPC handler to skip the desktop toast so nothing reaches the
+                // system notification service.
+                let system_notifications_enabled =
+                    self.options.borrow().system_notifications_enabled;
+                if !system_notifications_enabled {
+                    flowmux_config::notify_debug!(
+                        "gui/add",
+                        "system notifications disabled — kept in-app entry={entry_id:?}, ack=None (no desktop toast)"
+                    );
+                    let _ = ack.send(None);
+                    return;
+                }
                 let _ = ack.send(Some(entry_id));
             }
             GtkCommand::SetNotificationDesktopId { id, desktop_id } => {
@@ -5975,6 +5989,11 @@ mod tests {
             gtk::CssProvider::new(),
             None,
         );
+        // `WindowController::new` loads the developer's real options.json. These
+        // tests assert the in-app ack contract (entry recorded → `Some(id)`),
+        // which the system-notification toggle gates — pin it on so a local
+        // `system_notifications_enabled: false` can't flip the ack path.
+        controller.options.borrow_mut().system_notifications_enabled = true;
         controller.render_workspace(&ws);
         store.set_active_workspace(Some(ws_id)).await;
         (controller, ws_id, pane)

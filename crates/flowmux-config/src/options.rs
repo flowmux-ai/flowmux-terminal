@@ -39,6 +39,11 @@ pub const FOCUS_BORDER_OPACITY_DEFAULT: u8 = 30;
 /// so the option ships enabled.
 pub const PERSIST_BROWSER_SESSION_DEFAULT: bool = true;
 
+/// Default for [`Options::system_notifications_enabled`]. Desktop toasts ship
+/// enabled so flowmux behaves like every other notifying app on first launch;
+/// the user can opt out to keep only the in-app bell list.
+pub const SYSTEM_NOTIFICATIONS_ENABLED_DEFAULT: bool = true;
+
 /// Web view engine to use for new browser tabs. At this stage every variant
 /// falls back to WebKitGTK; external engine spawning is a later step. The
 /// selected value is still persisted so the future wiring can use it.
@@ -107,6 +112,12 @@ pub struct Options {
     /// Default: [`PERSIST_BROWSER_SESSION_DEFAULT`] (`true`).
     #[serde(default = "default_persist_browser_session")]
     pub persist_browser_session: bool,
+    /// When true, notifications are delivered as system desktop toasts
+    /// (libnotify / D-Bus) in addition to the in-app bell list. When false,
+    /// notifications still appear in the in-app bell list but no system toast
+    /// is sent. Default: [`SYSTEM_NOTIFICATIONS_ENABLED_DEFAULT`] (`true`).
+    #[serde(default = "default_system_notifications_enabled")]
+    pub system_notifications_enabled: bool,
     /// Terminal font family selected in the options dialog. `None` means
     /// "inherit the resolved theme font" (the `font-family` from the theme
     /// file, or the built-in `monospace` fallback). A `Some` value overrides
@@ -144,6 +155,10 @@ fn default_persist_browser_session() -> bool {
     PERSIST_BROWSER_SESSION_DEFAULT
 }
 
+fn default_system_notifications_enabled() -> bool {
+    SYSTEM_NOTIFICATIONS_ENABLED_DEFAULT
+}
+
 impl Default for Options {
     fn default() -> Self {
         Self {
@@ -152,6 +167,7 @@ impl Default for Options {
             focus_border_color: default_focus_color(),
             focus_border_opacity: default_focus_border_opacity(),
             persist_browser_session: default_persist_browser_session(),
+            system_notifications_enabled: default_system_notifications_enabled(),
             font_family: None,
             font_size: None,
             keybindings: KeybindingOverrides::default(),
@@ -223,6 +239,12 @@ impl Options {
     /// Builder-style setter for the browser-session persistence flag.
     pub fn with_persist_browser_session(mut self, persist: bool) -> Self {
         self.persist_browser_session = persist;
+        self
+    }
+
+    /// Builder-style setter for the system-notification (desktop toast) flag.
+    pub fn with_system_notifications_enabled(mut self, enabled: bool) -> Self {
+        self.system_notifications_enabled = enabled;
         self
     }
 

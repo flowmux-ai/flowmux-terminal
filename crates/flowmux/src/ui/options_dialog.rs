@@ -86,6 +86,7 @@ fn build_dialog(
     let focus_color_btn = build_focus_color_button(current.focus_border_color_or_default());
     let opacity_widgets = build_focus_opacity_row(current.focus_border_opacity);
     let persist_check = build_persist_check(current.persist_browser_session);
+    let system_notify_switch = build_system_notify_switch(current.system_notifications_enabled);
 
     // General tab body — the original options dialog contents.
     let general = gtk::Box::new(gtk::Orientation::Vertical, 12);
@@ -100,6 +101,7 @@ fn build_dialog(
     general.append(&row("Focus border color", &focus_color_btn));
     general.append(&row("Focus border opacity (%)", &opacity_widgets.row));
     general.append(&row("Keep browser session data", &persist_check));
+    general.append(&row("System notifications", &system_notify_switch));
 
     let hint = gtk::Label::new(Some(
         "The selected label isolates the cookie/session directory for new \
@@ -181,6 +183,7 @@ fn build_dialog(
         let focus_color_btn = focus_color_btn.clone();
         let opacity_spin = opacity_widgets.spin.clone();
         let persist_check = persist_check.clone();
+        let system_notify_switch = system_notify_switch.clone();
         let family_drop = font_widgets.family_drop.clone();
         let font_size_spin = font_widgets.size_spin.clone();
         let families = font_widgets.families.clone();
@@ -201,6 +204,7 @@ fn build_dialog(
                 &focus_color_btn,
                 &opacity_spin,
                 &persist_check,
+                &system_notify_switch,
                 &family_drop,
                 &font_size_spin,
                 &families,
@@ -345,6 +349,7 @@ fn collect_options(
     focus_color: &gtk::ColorDialogButton,
     opacity_spin: &gtk::SpinButton,
     persist_check: &gtk::CheckButton,
+    system_notify_switch: &gtk::Switch,
     family_drop: &gtk::DropDown,
     font_size_spin: &gtk::SpinButton,
     families: &[Option<String>],
@@ -379,6 +384,7 @@ fn collect_options(
         focus_border_color: color_hex,
         focus_border_opacity: opacity,
         persist_browser_session: persist_check.is_active(),
+        system_notifications_enabled: system_notify_switch.is_active(),
         font_family,
         font_size,
         keybindings: keybindings.clone(),
@@ -606,6 +612,20 @@ fn build_persist_check(initial: bool) -> gtk::CheckButton {
     check
 }
 
+/// Toggle for [`Options::system_notifications_enabled`]. When off,
+/// notifications still land in the in-app bell list but no desktop toast is
+/// sent to the system notification service. Rendered as a switch so it reads
+/// as an on/off feature toggle rather than a multi-select option.
+fn build_system_notify_switch(initial: bool) -> gtk::Switch {
+    let toggle = gtk::Switch::new();
+    toggle.set_active(initial);
+    // The switch sits in a hexpand row; keep it natural-sized and right-aligned
+    // so it lines up with the other right-hand value widgets.
+    toggle.set_halign(gtk::Align::End);
+    toggle.set_valign(gtk::Align::Center);
+    toggle
+}
+
 /// Parse `#rrggbb` or another hex form as GdkRGBA and seed the
 /// ColorDialogButton. Fall back to the default pale yellow on parse failure.
 fn build_focus_color_button(initial_hex: &str) -> gtk::ColorDialogButton {
@@ -731,12 +751,14 @@ mod tests {
             0,
         );
         let kb = KeybindingOverrides::default();
+        let notify_on = build_system_notify_switch(true);
         let opts = collect_options(
             &zoom,
             &engine,
             &focus_color,
             &opacity.spin,
             &persist_off,
+            &notify_on,
             &family_drop,
             &size_spin,
             &families,
@@ -755,12 +777,14 @@ mod tests {
         family_drop.set_selected(1);
         size_spin.set_value(15.0);
         let persist_on = build_persist_check(true);
+        let notify_off = build_system_notify_switch(false);
         let opts = collect_options(
             &zoom,
             &engine,
             &focus_color,
             &opacity.spin,
             &persist_on,
+            &notify_off,
             &family_drop,
             &size_spin,
             &families,
@@ -768,6 +792,7 @@ mod tests {
             &kb,
         );
         assert!(opts.persist_browser_session);
+        assert!(!opts.system_notifications_enabled);
         assert_eq!(opts.font_family, Some("Fira Code".to_string()));
         assert_eq!(opts.font_size, Some(15.0));
     }
