@@ -476,6 +476,66 @@ impl TerminalPane {
         self.widget.feed_child(bytes);
     }
 
+    /// Feed `bytes` to the child, but only *after* any IME syllable still
+    /// in preedit (e.g. a composing Hangul block) has been committed —
+    /// otherwise the bytes overtake ibus's asynchronous commit and the
+    /// last syllable lands behind them. This is the Shift+Enter ("insert
+    /// newline" in agent TUIs) counterpart to the plain-Enter ordering in
+    /// [`install_enter_preedit_commit_ordering`]: typing "안녕하세요" and
+    /// pressing Shift+Enter while "요" is still composing must produce
+    /// "안녕하세요\n", not "안녕하세\n요".
+    ///
+    /// Shift+Enter reaches the child through a window accelerator
+    /// (`win.insert-newline`), so unlike plain Enter the keypress never
+    /// touches the VTE / ibus path — the composing syllable is not
+    /// committed by it. We force the commit with a focus-cycle flush, feed
+    /// `bytes` from VTE's `commit` signal on an idle tick (VTE writes the
+    /// committed bytes during that emission, so an idle feed always lands
+    /// behind them), and fall back to a direct feed when nothing is
+    /// composing (no commit fires). The `commit` handler is one-shot:
+    /// armed per call and disconnected on the first commit or the
+    /// fallback, so it never disturbs ordinary typing.
+    pub fn feed_after_preedit_commit(&self, bytes: &'static [u8]) {
+        if !ibus_im_module_active() {
+            self.widget.feed_child(bytes);
+            return;
+        }
+
+        let widget = self.widget.clone();
+        let done = Rc::new(Cell::new(false));
+        let handler_id: Rc<RefCell<Option<glib::SignalHandlerId>>> = Rc::new(RefCell::new(None));
+
+        {
+            let done = done.clone();
+            let hid = handler_id.clone();
+            let id = self.widget.connect_commit(move |t, _text, _size| {
+                if done.replace(true) {
+                    return;
+                }
+                let t2 = t.clone();
+                glib::idle_add_local_once(move || t2.feed_child(bytes));
+                if let Some(id) = hid.borrow_mut().take() {
+                    t.disconnect(id);
+                }
+            });
+            *handler_id.borrow_mut() = Some(id);
+        }
+
+        flush_pending_preedit(&widget);
+
+        let done_fb = done.clone();
+        let hid_fb = handler_id.clone();
+        glib::timeout_add_local_once(std::time::Duration::from_millis(20), move || {
+            if done_fb.replace(true) {
+                return;
+            }
+            widget.feed_child(bytes);
+            if let Some(id) = hid_fb.borrow_mut().take() {
+                widget.disconnect(id);
+            }
+        });
+    }
+
     pub fn add_controller(&self, controller: impl IsA<gtk::EventController>) {
         self.widget.add_controller(controller);
     }

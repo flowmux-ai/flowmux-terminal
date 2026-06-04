@@ -641,7 +641,7 @@ fn make_insert_newline_action(
             if !window_focus_is_terminal(&window, term) {
                 return;
             }
-            term.feed(ALT_ENTER_BYTES);
+            term.feed_after_preedit_commit(ALT_ENTER_BYTES);
         })
         .build()
 }
