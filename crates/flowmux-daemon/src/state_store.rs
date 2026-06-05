@@ -661,6 +661,29 @@ impl StateStore {
         removed
     }
 
+    /// Remove every workspace at once. Used by the sidebar context
+    /// menu's "Close all tabs" item. Returns the ids that were removed
+    /// (in their prior order) so the caller can tear down each
+    /// workspace's GUI page. Clears the active-workspace pointer since
+    /// nothing is left to activate.
+    pub async fn remove_all_workspaces(&self) -> Vec<WorkspaceId> {
+        let mut s = self.inner.lock().await;
+        let removed: Vec<WorkspaceId> = s.workspace_order.clone();
+        let removed = if removed.is_empty() {
+            s.workspaces.iter().map(|w| w.id).collect()
+        } else {
+            removed
+        };
+        s.workspaces.clear();
+        s.workspace_order.clear();
+        s.active_workspace = None;
+        drop(s);
+        if !removed.is_empty() {
+            self.mark_dirty();
+        }
+        removed
+    }
+
     pub async fn workspace_for_pane(&self, pane: PaneId) -> Option<WorkspaceId> {
         let s = self.inner.lock().await;
         for ws in &s.workspaces {
@@ -1444,6 +1467,31 @@ mod tests {
         assert_eq!(state.workspace_order, vec![second]);
         assert_eq!(state.active_workspace, Some(second));
         assert!(!store.remove_workspace(first).await);
+    }
+
+    #[tokio::test]
+    async fn remove_all_workspaces_clears_everything() {
+        let store = StateStore::new_lazy(State::default());
+        let first = store
+            .create_workspace(Some("one".into()), std::path::PathBuf::from("/tmp/one"))
+            .await;
+        let second = store
+            .create_workspace(Some("two".into()), std::path::PathBuf::from("/tmp/two"))
+            .await;
+        let third = store
+            .create_workspace(Some("three".into()), std::path::PathBuf::from("/tmp/three"))
+            .await;
+
+        let removed = store.remove_all_workspaces().await;
+        assert_eq!(removed, vec![first, second, third]);
+
+        let state = store.snapshot().await;
+        assert!(state.workspaces.is_empty());
+        assert!(state.workspace_order.is_empty());
+        assert_eq!(state.active_workspace, None);
+
+        // Idempotent: a second call on an empty store removes nothing.
+        assert!(store.remove_all_workspaces().await.is_empty());
     }
 
     #[tokio::test]
