@@ -187,8 +187,7 @@ impl TermEngine {
         // not set" and readline miscomputes autowrap, garbling long lines.
         // Advertise an xterm-256color terminfo (always installed) plus
         // truecolor, unless the caller already pinned these.
-        let mut env: std::collections::HashMap<String, String> =
-            spec.env.into_iter().collect();
+        let mut env: std::collections::HashMap<String, String> = spec.env.into_iter().collect();
         env.entry("TERM".into())
             .or_insert_with(|| "xterm-256color".into());
         env.entry("COLORTERM".into())
@@ -200,8 +199,8 @@ impl TermEngine {
             env,
         };
 
-        let pty = tty::new(&pty_opts, window_size, 0)
-            .map_err(|e| TerminalError::Spawn(e.to_string()))?;
+        let pty =
+            tty::new(&pty_opts, window_size, 0).map_err(|e| TerminalError::Spawn(e.to_string()))?;
         let pid = Some(pty.child().id());
 
         let event_loop = EventLoop::new(term.clone(), proxy, pty, false, false)
@@ -346,7 +345,11 @@ impl TermEngine {
         use alacritty_terminal::grid::{Dimensions, Scroll};
         let mut term = self.term.lock();
         let page = term.grid().screen_lines().saturating_sub(1) as i32;
-        term.scroll_display(if up { Scroll::Delta(page) } else { Scroll::Delta(-page) });
+        term.scroll_display(if up {
+            Scroll::Delta(page)
+        } else {
+            Scroll::Delta(-page)
+        });
     }
 
     /// Scrollback position as `(display_offset, history_lines)`:
@@ -435,11 +438,7 @@ mod tests {
 
     fn echo_spec(cmd: &str) -> EngineSpec {
         EngineSpec {
-            argv: vec![
-                "/bin/sh".to_string(),
-                "-c".to_string(),
-                cmd.to_string(),
-            ],
+            argv: vec!["/bin/sh".to_string(), "-c".to_string(), cmd.to_string()],
             rows: 24,
             cols: 80,
             ..Default::default()
@@ -456,8 +455,7 @@ mod tests {
             }
         });
 
-        let engine =
-            TermEngine::spawn(echo_spec("printf HELLO; sleep 0.2"), sink).expect("spawn");
+        let engine = TermEngine::spawn(echo_spec("printf HELLO; sleep 0.2"), sink).expect("spawn");
 
         // Wait for the reader thread to parse output into the grid.
         let deadline = Instant::now() + Duration::from_secs(5);
