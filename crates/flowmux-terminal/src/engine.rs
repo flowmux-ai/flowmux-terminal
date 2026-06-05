@@ -151,7 +151,7 @@ const STANDARD_PATH_DIRS: &[&str] = &[
 /// Return `current` with any missing [`STANDARD_PATH_DIRS`] appended. Existing
 /// entries keep their position and priority; only absent standard dirs are
 /// added, at the end.
-fn ensure_standard_path(current: Option<std::ffi::OsString>) -> String {
+pub fn ensure_standard_path(current: Option<std::ffi::OsString>) -> String {
     let mut dirs: Vec<PathBuf> = current
         .as_ref()
         .map(|p| std::env::split_paths(p).collect())

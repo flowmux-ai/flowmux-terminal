@@ -150,6 +150,21 @@ pub mod render;
 
 pub use key_modes::TerminalInputModes;
 
+/// Normalize this process's own `PATH` so the standard system bin dirs
+/// (`/usr/bin`, …) are present. A GUI launched from a minimal desktop
+/// session (e.g. a GNOME `.desktop` entry on Ubuntu 22.04) can inherit a
+/// `PATH` without `/usr/bin`; without this, every shell or helper the
+/// process spawns — terminal `bash -l`, `git`, `gh`, `flatpak-spawn` —
+/// fails to find base tools like `xset`. The Flatpak build dodged this by
+/// running shells on the host; the native build fixes its own `PATH` here.
+///
+/// Call once, early in `main`, before any thread or subprocess is spawned
+/// (`set_var` is only sound while single-threaded).
+pub fn ensure_process_path() {
+    let fixed = engine::ensure_standard_path(std::env::var_os("PATH"));
+    std::env::set_var("PATH", fixed);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

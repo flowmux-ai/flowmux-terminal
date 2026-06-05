@@ -70,6 +70,12 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    // Normalize PATH before spawning anything: a desktop-launched GUI on
+    // Ubuntu 22.04 can inherit a PATH without /usr/bin, leaving terminal
+    // shells (and git/gh/flatpak-spawn) unable to find base tools like xset.
+    // Done once here so the whole process and every child inherits it.
+    flowmux_terminal::ensure_process_path();
+
     // WebKitGTK 6.0's default sandbox starts bwrap + xdg-dbus-proxy. On
     // Ubuntu 24.04 with unprivileged user namespaces restricted by AppArmor,
     // bwrap fails with "setting up uid map: Permission denied", the proxy
