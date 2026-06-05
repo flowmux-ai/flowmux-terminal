@@ -87,10 +87,17 @@ impl TerminalPaneNative {
         render.set_font(DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE_PT);
         let metrics = render.font_metrics().expect("font metrics after set_font");
 
-        // Default shell when none given (login shell, like the VTE pane).
+        // Default shell when none given: a plain interactive (NON-login)
+        // shell, matching gnome-terminal's default. A login shell would run
+        // the user's login-only profile (~/.profile / ~/.bash_profile); on
+        // some setups (observed on Ubuntu 22.04) that file *resets* PATH
+        // without /usr/bin, so base tools like xset go missing — while a
+        // non-login shell sources only ~/.bashrc and keeps the inherited
+        // PATH. Configured shells (workspace_view) are already non-login, so
+        // this also makes the default consistent with them.
         let argv = if argv.is_empty() {
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-            vec![shell, "-l".to_string()]
+            vec![shell]
         } else {
             argv
         };
