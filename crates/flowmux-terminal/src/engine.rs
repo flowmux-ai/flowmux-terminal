@@ -134,6 +134,40 @@ impl Default for EngineSpec {
     }
 }
 
+/// The Debian/Ubuntu default login `PATH`. Appended (missing entries only)
+/// to the inherited `PATH` so a shell spawned from a minimal desktop session
+/// can still resolve base tools in `/usr/bin` etc.
+const STANDARD_PATH_DIRS: &[&str] = &[
+    "/usr/local/sbin",
+    "/usr/local/bin",
+    "/usr/sbin",
+    "/usr/bin",
+    "/sbin",
+    "/bin",
+    "/usr/games",
+    "/usr/local/games",
+];
+
+/// Return `current` with any missing [`STANDARD_PATH_DIRS`] appended. Existing
+/// entries keep their position and priority; only absent standard dirs are
+/// added, at the end.
+fn ensure_standard_path(current: Option<std::ffi::OsString>) -> String {
+    let mut dirs: Vec<PathBuf> = current
+        .as_ref()
+        .map(|p| std::env::split_paths(p).collect())
+        .unwrap_or_default();
+    for std_dir in STANDARD_PATH_DIRS {
+        let p = PathBuf::from(std_dir);
+        if !dirs.iter().any(|d| d == &p) {
+            dirs.push(p);
+        }
+    }
+    std::env::join_paths(&dirs)
+        .ok()
+        .and_then(|s| s.into_string().ok())
+        .unwrap_or_else(|| STANDARD_PATH_DIRS.join(":"))
+}
+
 /// A running terminal: PTY + parser + grid for one pane/tab.
 pub struct TermEngine {
     term: Arc<FairMutex<Term<Proxy>>>,
@@ -192,6 +226,18 @@ impl TermEngine {
             .or_insert_with(|| "xterm-256color".into());
         env.entry("COLORTERM".into())
             .or_insert_with(|| "truecolor".into());
+        // A GUI launched from a minimal desktop session can inherit a PATH
+        // without `/usr/bin`, so a spawned `bash -l` cannot find base tools
+        // like `xset` (the Flatpak build dodged this by running the shell on
+        // the host). Guarantee the standard system bin dirs are present,
+        // appending only the missing ones so the user's own entries and
+        // their order are untouched.
+        if !env.contains_key("PATH") {
+            env.insert(
+                "PATH".into(),
+                ensure_standard_path(std::env::var_os("PATH")),
+            );
+        }
         let pty_opts = PtyOptions {
             shell,
             working_directory: spec.cwd,
@@ -570,5 +616,26 @@ mod tests {
         // word, not a single cell.
         engine.selection_word(5, 0);
         assert_eq!(engine.selection_text().as_deref(), Some("bar"));
+    }
+
+    #[test]
+    fn standard_path_appends_only_missing_dirs() {
+        use std::ffi::OsString;
+
+        // A minimal session PATH without /usr/bin: the user's dir keeps its
+        // leading priority, and the missing standard dirs are appended.
+        let got = ensure_standard_path(Some(OsString::from("/home/u/bin:/snap/bin")));
+        assert!(got.starts_with("/home/u/bin:/snap/bin:"));
+        assert!(got.split(':').any(|d| d == "/usr/bin"));
+        assert!(got.split(':').any(|d| d == "/bin"));
+
+        // An already-complete PATH is returned unchanged (no duplicates).
+        let full = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games";
+        let got = ensure_standard_path(Some(OsString::from(full)));
+        assert_eq!(got, full);
+
+        // No inherited PATH at all → the full standard set.
+        let got = ensure_standard_path(None);
+        assert!(got.split(':').any(|d| d == "/usr/bin"));
     }
 }
