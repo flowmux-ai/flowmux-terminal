@@ -181,11 +181,23 @@ impl TermEngine {
             .argv
             .split_first()
             .map(|(program, args)| Shell::new(program.clone(), args.to_vec()));
+        // The GUI process (launched from a desktop file) usually has no
+        // TERM, and `tty::new` does not set one — so the child shell and
+        // ncurses tools (`clear`, vim) fail with "TERM environment variable
+        // not set" and readline miscomputes autowrap, garbling long lines.
+        // Advertise an xterm-256color terminfo (always installed) plus
+        // truecolor, unless the caller already pinned these.
+        let mut env: std::collections::HashMap<String, String> =
+            spec.env.into_iter().collect();
+        env.entry("TERM".into())
+            .or_insert_with(|| "xterm-256color".into());
+        env.entry("COLORTERM".into())
+            .or_insert_with(|| "truecolor".into());
         let pty_opts = PtyOptions {
             shell,
             working_directory: spec.cwd,
             drain_on_exit: false,
-            env: spec.env.into_iter().collect(),
+            env,
         };
 
         let pty = tty::new(&pty_opts, window_size, 0)
