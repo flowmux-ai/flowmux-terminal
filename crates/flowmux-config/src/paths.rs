@@ -187,7 +187,10 @@ mod tests {
         let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
         let prev_home = std::env::var_os("HOME");
         std::env::set_var("FLATPAK_ID", "com.flowmux.App");
-        std::env::set_var("XDG_CONFIG_HOME", "/home/junsu/.var/app/com.flowmux.App/config");
+        std::env::set_var(
+            "XDG_CONFIG_HOME",
+            "/home/junsu/.var/app/com.flowmux.App/config",
+        );
         std::env::set_var("HOME", "/home/junsu");
         let dir = host_config_dir_for("opencode").unwrap();
         assert_eq!(dir, PathBuf::from("/home/junsu/.config/opencode"));

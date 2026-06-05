@@ -21,8 +21,7 @@ use std::path::{Path, PathBuf};
 pub const APP_ID: &str = "com.flowmux.App";
 
 /// `.desktop` text embedded at compile time.
-pub const DESKTOP_ENTRY: &str =
-    include_str!("../../../resources/desktop/com.flowmux.App.desktop");
+pub const DESKTOP_ENTRY: &str = include_str!("../../../resources/desktop/com.flowmux.App.desktop");
 
 /// One icon size we ship. Hicolor expects per-resolution PNGs plus an
 /// optional scalable SVG. Sizes mirror the .deb assets list.
@@ -113,8 +112,9 @@ impl DesktopLayout {
 /// Resolve the real `$XDG_DATA_HOME` (or fallback). `dirs::data_dir()`
 /// already implements the fallback chain.
 pub fn resolve() -> Result<DesktopLayout> {
-    let data_home = dirs::data_dir()
-        .ok_or_else(|| anyhow::anyhow!("$XDG_DATA_HOME / $HOME unset; cannot place desktop entry"))?;
+    let data_home = dirs::data_dir().ok_or_else(|| {
+        anyhow::anyhow!("$XDG_DATA_HOME / $HOME unset; cannot place desktop entry")
+    })?;
     Ok(DesktopLayout::from_data_home(&data_home))
 }
 
@@ -146,9 +146,7 @@ impl DesktopDoctor {
     /// `Status::NeedsFix` in the outer doctor report.
     pub fn needs_fix(&self) -> bool {
         let dirty = |s: &AssetStatus| matches!(s, AssetStatus::Missing | AssetStatus::Drift);
-        dirty(&self.desktop)
-            || dirty(&self.svg)
-            || self.icons.iter().any(|(_, s)| dirty(s))
+        dirty(&self.desktop) || dirty(&self.svg) || self.icons.iter().any(|(_, s)| dirty(s))
     }
 
     /// True if any read returned an I/O error.
@@ -186,7 +184,12 @@ pub fn doctor(layout: &DesktopLayout) -> DesktopDoctor {
     let svg = check_bytes(&layout.icon_svg_path(), SCALABLE_SVG);
     let icons = ICONS
         .iter()
-        .map(|asset| (asset.size, check_bytes(&layout.icon_png_path(asset.size), asset.bytes)))
+        .map(|asset| {
+            (
+                asset.size,
+                check_bytes(&layout.icon_png_path(asset.size), asset.bytes),
+            )
+        })
         .collect();
     DesktopDoctor {
         desktop,
@@ -211,11 +214,7 @@ impl InstallOutcome {
     }
 }
 
-fn write_if_changed_bytes(
-    path: &Path,
-    payload: &[u8],
-    outcome: &mut InstallOutcome,
-) -> Result<()> {
+fn write_if_changed_bytes(path: &Path, payload: &[u8], outcome: &mut InstallOutcome) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("creating directory {}", parent.display()))?;
@@ -233,11 +232,7 @@ fn write_if_changed_bytes(
     Ok(())
 }
 
-fn write_if_changed_text(
-    path: &Path,
-    payload: &str,
-    outcome: &mut InstallOutcome,
-) -> Result<()> {
+fn write_if_changed_text(path: &Path, payload: &str, outcome: &mut InstallOutcome) -> Result<()> {
     write_if_changed_bytes(path, payload.as_bytes(), outcome)
 }
 

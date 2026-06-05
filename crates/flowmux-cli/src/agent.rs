@@ -320,7 +320,10 @@ mod tests {
         let path = Target::Codex.resolved_install_path(home.path(), Some(&codex_home));
         assert_eq!(
             path,
-            codex_home.join("skills").join("flowmux-browser").join("SKILL.md"),
+            codex_home
+                .join("skills")
+                .join("flowmux-browser")
+                .join("SKILL.md"),
         );
     }
 
@@ -416,7 +419,9 @@ mod tests {
                 p.display(),
             );
             assert_eq!(
-                p.parent().and_then(|p| p.file_name()).and_then(|s| s.to_str()),
+                p.parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|s| s.to_str()),
                 Some("flowmux-browser"),
                 "{:?} skill dir should be flowmux-browser, got {}",
                 t,

@@ -124,8 +124,7 @@ fn run_pty_pump(
     notify_tx: mpsc::Sender<NotifyEvent>,
 ) -> anyhow::Result<i32> {
     // 1. Allocate the inner PTY pair the shell will live on.
-    let OpenptyResult { master, slave } =
-        openpty(None, None).context("openpty for inner shell")?;
+    let OpenptyResult { master, slave } = openpty(None, None).context("openpty for inner shell")?;
 
     // 2. Mirror the outer terminal size onto the inner PTY *before*
     //    fork so the shell starts with the right $LINES/$COLUMNS and
@@ -234,11 +233,7 @@ fn run_pty_pump(
             let mut sink = [0u8; 64];
             loop {
                 let n = unsafe {
-                    libc::read(
-                        sig_r.as_raw_fd(),
-                        sink.as_mut_ptr() as *mut _,
-                        sink.len(),
-                    )
+                    libc::read(sig_r.as_raw_fd(), sink.as_mut_ptr() as *mut _, sink.len())
                 };
                 if n <= 0 {
                     break;

@@ -380,7 +380,10 @@ mod tests {
         let resolved = overrides.resolve();
         assert_eq!(resolved.len(), ActionId::all().len());
         for (action, accels) in &resolved {
-            let want: Vec<String> = default_accels(*action).iter().map(|s| s.to_string()).collect();
+            let want: Vec<String> = default_accels(*action)
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
             assert_eq!(accels, &want, "{:?}", action);
         }
     }
@@ -483,10 +486,7 @@ mod tests {
         overrides.set(ActionId::Paste, vec!["<Ctrl>v".into()]);
 
         let resolved = overrides.resolve();
-        let copy = resolved
-            .iter()
-            .find(|(a, _)| *a == ActionId::Copy)
-            .unwrap();
+        let copy = resolved.iter().find(|(a, _)| *a == ActionId::Copy).unwrap();
         let paste = resolved
             .iter()
             .find(|(a, _)| *a == ActionId::Paste)

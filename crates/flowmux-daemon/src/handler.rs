@@ -42,7 +42,9 @@ impl DaemonHandler {
     /// second connection silently fails to match and the dock badge /
     /// message-tray entry stays pinned. Sharing the cell makes both
     /// sides reuse the first connection that wins the lazy init race.
-    pub fn notifier_handle(&self) -> Arc<tokio::sync::Mutex<Option<flowmux_notify::DesktopNotifier>>> {
+    pub fn notifier_handle(
+        &self,
+    ) -> Arc<tokio::sync::Mutex<Option<flowmux_notify::DesktopNotifier>>> {
         self.notifier.clone()
     }
 

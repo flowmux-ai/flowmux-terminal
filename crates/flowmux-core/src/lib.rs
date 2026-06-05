@@ -415,9 +415,7 @@ impl Pane {
     ///      location instead of dropping to the workspace root.
     pub fn terminal_surface_cwd(&self, target: PaneId) -> Option<PathBuf> {
         match self {
-            Pane::Leaf { id, content } if *id == target => {
-                content.cwd_for_new_terminal()
-            }
+            Pane::Leaf { id, content } if *id == target => content.cwd_for_new_terminal(),
             Pane::Leaf { .. } => None,
             Pane::Split { first, second, .. } => first
                 .terminal_surface_cwd(target)
@@ -1158,9 +1156,7 @@ impl PaneContent {
                     .iter()
                     .rev()
                     .find_map(|surface| match &surface.kind {
-                        SurfaceKind::Terminal {
-                            cwd: Some(cwd), ..
-                        } => Some(cwd.clone()),
+                        SurfaceKind::Terminal { cwd: Some(cwd), .. } => Some(cwd.clone()),
                         _ => None,
                     })
             }

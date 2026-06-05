@@ -241,7 +241,10 @@ fn check_codex() -> HookCheckEntry {
 }
 
 fn check_opencode() -> HookCheckEntry {
-    let homes: Vec<PathBuf> = opencode_homes().into_iter().filter(|h| h.exists()).collect();
+    let homes: Vec<PathBuf> = opencode_homes()
+        .into_iter()
+        .filter(|h| h.exists())
+        .collect();
     if homes.is_empty() {
         let stub = opencode_home()
             .map(|h| h.join("opencode.json"))
@@ -659,7 +662,10 @@ fn opencode_homes_for(primary: Option<PathBuf>, host_home: Option<PathBuf>) -> V
         out.push(p);
     }
     if let Some(home) = host_home {
-        let anycli = home.join(".config").join("opencode-anycli").join("opencode");
+        let anycli = home
+            .join(".config")
+            .join("opencode-anycli")
+            .join("opencode");
         if anycli.exists() && !out.contains(&anycli) {
             out.push(anycli);
         }
@@ -735,7 +741,10 @@ fn shell_quote(s: &str) -> String {
 }
 
 fn install_opencode(flowmux_bin: &str) -> Result<HookInstallReport> {
-    let homes: Vec<PathBuf> = opencode_homes().into_iter().filter(|h| h.exists()).collect();
+    let homes: Vec<PathBuf> = opencode_homes()
+        .into_iter()
+        .filter(|h| h.exists())
+        .collect();
     if homes.is_empty() {
         return Ok(skipped(HookTarget::OpenCode));
     }
@@ -769,7 +778,10 @@ fn install_opencode(flowmux_bin: &str) -> Result<HookInstallReport> {
 }
 
 fn uninstall_opencode() -> Result<HookInstallReport> {
-    let homes: Vec<PathBuf> = opencode_homes().into_iter().filter(|h| h.exists()).collect();
+    let homes: Vec<PathBuf> = opencode_homes()
+        .into_iter()
+        .filter(|h| h.exists())
+        .collect();
     if homes.is_empty() {
         return Ok(skipped(HookTarget::OpenCode));
     }
@@ -813,13 +825,9 @@ fn opencode_plugin_source(flowmux_bin: &str) -> String {
 }
 
 fn opencode_plugin_source_with_argv(argv: &[String]) -> String {
-    let head = argv
-        .first()
-        .map(|s| s.as_str())
-        .unwrap_or("flowmux");
+    let head = argv.first().map(|s| s.as_str()).unwrap_or("flowmux");
     let trailing: Vec<String> = argv.iter().skip(1).cloned().collect();
-    let trailing_literal = serde_json::to_string(&trailing)
-        .unwrap_or_else(|_| "[]".into());
+    let trailing_literal = serde_json::to_string(&trailing).unwrap_or_else(|_| "[]".into());
     // OpenCode 1.14+ plugins are ESM modules. Path-loaded plugins
     // (`file:///…`) must export an `id` so OpenCode can name them; npm
     // packages skip that because the package name is the id. The
@@ -1376,7 +1384,10 @@ hooks = true
         // never saw the flowmux plugin.
         let dir = tmp();
         let host_home = dir.path().to_path_buf();
-        let anycli_tree = host_home.join(".config").join("opencode-anycli").join("opencode");
+        let anycli_tree = host_home
+            .join(".config")
+            .join("opencode-anycli")
+            .join("opencode");
         fs::create_dir_all(&anycli_tree).unwrap();
         let primary = host_home.join(".config").join("opencode");
         let homes = opencode_homes_for(Some(primary.clone()), Some(host_home));
@@ -1439,6 +1450,9 @@ mod render_dump {
             "--command=flowmuxctl".into(),
             "com.flowmux.App".into(),
         ]);
-        eprintln!("\n----- BEGIN PLUGIN SOURCE -----\n{}\n----- END PLUGIN SOURCE -----\n", src);
+        eprintln!(
+            "\n----- BEGIN PLUGIN SOURCE -----\n{}\n----- END PLUGIN SOURCE -----\n",
+            src
+        );
     }
 }

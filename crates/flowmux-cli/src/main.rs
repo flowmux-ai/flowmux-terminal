@@ -777,8 +777,13 @@ async fn run_hooks_doctor(socket: Option<PathBuf>) {
     let resolved = env_socket
         .clone()
         .unwrap_or_else(flowmux_config::paths::runtime_socket);
-    println!("socket primary   : {resolved:?} (source={})",
-        if env_socket.is_some() { "env" } else { "fallback" }
+    println!(
+        "socket primary   : {resolved:?} (source={})",
+        if env_socket.is_some() {
+            "env"
+        } else {
+            "fallback"
+        }
     );
     println!(
         "  exists?        : {} symlink_target?={:?}",
@@ -970,10 +975,7 @@ async fn run_generic_agent_hook_event(
             hooks::send_best_effort(&client, req).await;
         }
         None => {
-            flowmux_config::notify_debug!(
-                "cli/hook",
-                "daemon not reachable — request dropped"
-            );
+            flowmux_config::notify_debug!("cli/hook", "daemon not reachable — request dropped");
         }
     }
     Ok(())
@@ -1793,13 +1795,15 @@ mod tests {
         ])
         .expect("clap must parse the OpenCode plugin's argv shape");
         let Cmd::Hooks {
-            op: HooksOp::Opencode {
-                event: AgentHookEvent::Stop {
-                    pane: got_pane,
-                    surface: got_surface,
-                    args,
+            op:
+                HooksOp::Opencode {
+                    event:
+                        AgentHookEvent::Stop {
+                            pane: got_pane,
+                            surface: got_surface,
+                            args,
+                        },
                 },
-            },
         } = cli.cmd
         else {
             panic!("expected hooks opencode stop variant");
@@ -1827,13 +1831,15 @@ mod tests {
         ])
         .expect("flags-before-payload must parse");
         let Cmd::Hooks {
-            op: HooksOp::Opencode {
-                event: AgentHookEvent::Notification {
-                    pane: got_pane,
-                    surface,
-                    args,
+            op:
+                HooksOp::Opencode {
+                    event:
+                        AgentHookEvent::Notification {
+                            pane: got_pane,
+                            surface,
+                            args,
+                        },
                 },
-            },
         } = cli.cmd
         else {
             panic!("expected hooks opencode notification variant");
@@ -1851,13 +1857,15 @@ mod tests {
         let cli = Cli::try_parse_from(["flowmuxctl", "hooks", "opencode", "stop"])
             .expect("flag-less stop must still parse");
         let Cmd::Hooks {
-            op: HooksOp::Opencode {
-                event: AgentHookEvent::Stop {
-                    pane,
-                    surface,
-                    args,
+            op:
+                HooksOp::Opencode {
+                    event:
+                        AgentHookEvent::Stop {
+                            pane,
+                            surface,
+                            args,
+                        },
                 },
-            },
         } = cli.cmd
         else {
             panic!("expected hooks opencode stop variant");
@@ -1883,11 +1891,10 @@ mod tests {
         ])
         .expect("codex must accept the same flag");
         let Cmd::Hooks {
-            op: HooksOp::Codex {
-                event: AgentHookEvent::Stop {
-                    pane: got_pane, ..
+            op:
+                HooksOp::Codex {
+                    event: AgentHookEvent::Stop { pane: got_pane, .. },
                 },
-            },
         } = cli.cmd
         else {
             panic!("expected hooks codex stop variant");
