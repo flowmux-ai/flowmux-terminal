@@ -217,6 +217,11 @@ pub enum GtkCommand {
         id: WorkspaceId,
         ack: oneshot::Sender<()>,
     },
+    /// Remove every open workspace. Triggered by the sidebar context
+    /// menu's "Close all tabs" item.
+    RemoveAllWorkspaces {
+        ack: oneshot::Sender<()>,
+    },
     /// Rename a workspace and refresh its sidebar row.
     RenameWorkspace {
         id: WorkspaceId,
