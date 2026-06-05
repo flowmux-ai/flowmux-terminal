@@ -12,15 +12,15 @@
 //! cleanly" (see `docs/pure-rust-terminal-migration.md`). Here it is pure
 //! and unit-tested so the renderer can stay dumb.
 
+use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::Point;
 use alacritty_terminal::selection::SelectionRange;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::term::Term;
-use alacritty_terminal::event::EventListener;
-use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 pub use alacritty_terminal::vte::ansi::CursorShape;
+use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 
 /// 8-bit RGB triple ready for `gdk::RGBA` / GSK.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,15 +206,19 @@ pub fn snapshot<T: EventListener>(term: &Term<T>, theme: &ThemePalette) -> Frame
     let cols = grid.columns();
     let mut cells = vec![StyledCell::blank(default_fg, default_bg); rows * cols];
 
+    // `display_iter` yields *absolute* grid lines: history is negative,
+    // the active screen is `0..rows`. When scrolled back, `display_offset`
+    // is how far up we are, so the viewport row is `line + display_offset`
+    // (alacritty's own `point_to_viewport`). Mapping by the raw absolute
+    // line instead dropped every history row and left the bottom blank.
+    let display_offset = content.display_offset as i32;
     for indexed in content.display_iter {
         let point: Point = indexed.point;
-        // display_iter yields viewport-relative lines in 0..rows once the
-        // display offset is applied by the iterator.
-        let line = point.line.0;
-        if line < 0 {
+        let row = point.line.0 + display_offset;
+        if row < 0 {
             continue;
         }
-        let line = line as usize;
+        let line = row as usize;
         let col = point.column.0;
         if line >= rows || col >= cols {
             continue;
@@ -246,9 +250,15 @@ pub fn snapshot<T: EventListener>(term: &Term<T>, theme: &ThemePalette) -> Frame
     }
 
     let caret = {
-        let line = content.cursor.point.line.0;
-        (line >= 0 && (line as usize) < rows)
-            .then(|| (line as usize, content.cursor.point.column.0.min(cols.saturating_sub(1))))
+        // The cursor point is absolute too; map it into the viewport and
+        // drop it when scrolled out of view (off the bottom).
+        let line = content.cursor.point.line.0 + display_offset;
+        (line >= 0 && (line as usize) < rows).then(|| {
+            (
+                line as usize,
+                content.cursor.point.column.0.min(cols.saturating_sub(1)),
+            )
+        })
     };
     let cursor = {
         let c = content.cursor;
@@ -430,6 +440,49 @@ mod tests {
         assert!(super::point_in_range(pt(2, 4), blk));
         assert!(!super::point_in_range(pt(2, 7), blk)); // outside col window
         assert!(!super::point_in_range(pt(2, 2), blk));
+    }
+
+    #[test]
+    fn scrolled_snapshot_maps_history_into_viewport() {
+        use alacritty_terminal::event::VoidListener;
+        use alacritty_terminal::grid::Scroll;
+        use alacritty_terminal::term::test::TermSize;
+        use alacritty_terminal::term::{Config, Term};
+        use alacritty_terminal::vte::ansi::Processor;
+
+        // 5-row screen, feed 20 numbered lines so 15 land in scrollback.
+        let size = TermSize::new(10, 5);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser: Processor = Processor::new();
+        // No trailing newline, or the cursor lands on a blank 21st line and
+        // the bottom screen row would be empty.
+        let feed = (0..20)
+            .map(|i| format!("L{i:02}"))
+            .collect::<Vec<_>>()
+            .join("\r\n");
+        parser.advance(&mut term, feed.as_bytes());
+
+        let row_text = |frame: &FrameSnapshot, r: usize| -> String {
+            (0..frame.cols)
+                .map(|c| frame.cells[r * frame.cols + c].ch)
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        };
+
+        // Pinned to the bottom: last 5 lines visible, no blanks.
+        let frame = snapshot(&term, &theme());
+        assert_eq!(row_text(&frame, 0), "L15");
+        assert_eq!(row_text(&frame, 4), "L19");
+
+        // Scroll up 3 → viewport shows L12..L16. The bug skipped the
+        // history rows and left the bottom blank; assert every row is the
+        // right history line instead.
+        term.scroll_display(Scroll::Delta(3));
+        let frame = snapshot(&term, &theme());
+        for (r, want) in ["L12", "L13", "L14", "L15", "L16"].iter().enumerate() {
+            assert_eq!(&row_text(&frame, r), want, "row {r} mismatch");
+        }
     }
 
     #[test]
