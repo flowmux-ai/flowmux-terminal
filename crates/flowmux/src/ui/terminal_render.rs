@@ -544,7 +544,7 @@ fn draw_cursor(
     let color = frame.cursor_color;
     let rect = match cursor.shape {
         CursorShape::Underline => graphene::Rect::new(x, y + font.cell_h - 2.0, font.cell_w, 2.0),
-        CursorShape::Beam => graphene::Rect::new(x, y, 2.0, font.cell_h),
+        CursorShape::Beam => graphene::Rect::new(x, y, 1.0, font.cell_h),
         _ => graphene::Rect::new(x, y, font.cell_w, font.cell_h),
     };
     snapshot.append_color(&rgba(color), &rect);
