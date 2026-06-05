@@ -87,17 +87,31 @@ impl TerminalPaneNative {
         render.set_font(DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE_PT);
         let metrics = render.font_metrics().expect("font metrics after set_font");
 
-        // Default shell when none given: a plain interactive (NON-login)
-        // shell, matching gnome-terminal's default. A login shell would run
-        // the user's login-only profile (~/.profile / ~/.bash_profile); on
-        // some setups (observed on Ubuntu 22.04) that file *resets* PATH
-        // without /usr/bin, so base tools like xset go missing — while a
-        // non-login shell sources only ~/.bashrc and keeps the inherited
-        // PATH. Configured shells (workspace_view) are already non-login, so
-        // this also makes the default consistent with them.
+        // Default shell when none given: a NON-login shell, so the user's
+        // login-only profile (~/.profile / ~/.bash_profile) cannot reset PATH
+        // without /usr/bin (observed on Ubuntu 22.04, hides xset etc.). For
+        // bash we still hand it a generated --rcfile that emulates login init
+        // (sources /etc/profile + the login profile, so a PS1/env defined only
+        // there still applies) and then repairs PATH — see
+        // flowmux_terminal::DEFAULT_BASH_RCFILE. Non-bash shells stay a plain
+        // non-login shell. Configured shells (workspace_view) are unaffected.
         let argv = if argv.is_empty() {
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-            vec![shell]
+            let is_bash = std::path::Path::new(&shell)
+                .file_name()
+                .map(|n| n == "bash")
+                .unwrap_or(false);
+            match is_bash
+                .then(flowmux_terminal::write_default_bash_rcfile)
+                .flatten()
+            {
+                Some(rc) => vec![
+                    shell,
+                    "--rcfile".to_string(),
+                    rc.to_string_lossy().into_owned(),
+                ],
+                None => vec![shell],
+            }
         } else {
             argv
         };

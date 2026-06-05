@@ -99,7 +99,7 @@ pub fn run(
     // pane spawn, so doing it here too guarantees the child shell gets the
     // standard system dirs (e.g. /usr/bin for xset) even when a *stale* GUI
     // process — the single-instance app keeps the old in-memory binary alive
-    // until fully quit — never picked up the fix. The inner `bash -l` inherits
+    // until fully quit — never picked up the fix. The inner shell inherits
     // this process's environment.
     flowmux_terminal::ensure_process_path();
 

@@ -161,7 +161,7 @@ impl Default for EngineSpec {
 /// The Debian/Ubuntu default login `PATH`. Appended (missing entries only)
 /// to the inherited `PATH` so a shell spawned from a minimal desktop session
 /// can still resolve base tools in `/usr/bin` etc.
-const STANDARD_PATH_DIRS: &[&str] = &[
+pub(crate) const STANDARD_PATH_DIRS: &[&str] = &[
     "/usr/local/sbin",
     "/usr/local/bin",
     "/usr/sbin",
