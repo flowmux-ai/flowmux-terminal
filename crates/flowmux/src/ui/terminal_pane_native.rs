@@ -200,6 +200,7 @@ impl TerminalPaneNative {
         wire_keyboard(&pane);
         wire_scroll(&pane);
         wire_mouse_report(&pane);
+        wire_mouse_motion(&pane);
         wire_url_click(&pane, &callbacks);
         wire_mouse_selection(&pane, &callbacks);
         wire_focus_and_menu(&pane, surface, &callbacks);
@@ -680,6 +681,64 @@ fn send_mouse_report(
     gesture.set_state(gtk::EventSequenceState::Claimed);
 }
 
+/// Forward pointer *motion* to the app when it requested button-event (1002)
+/// or any-event (1003) tracking. Without this, vim's `mouse=a` drag-select,
+/// tmux pane drag-resize, and hover-driven TUIs never see the pointer move —
+/// the click-only reporter above only sends press/release. Reports are
+/// throttled to cell changes so a single drag doesn't flood the PTY.
+fn wire_mouse_motion(pane: &TerminalPaneNative) {
+    let engine = pane.engine.clone();
+    let render_w = pane.render.clone();
+    let last_cell = Rc::new(Cell::new((usize::MAX, usize::MAX)));
+    let motion = gtk::EventControllerMotion::new();
+    motion.connect_motion(move |ctrl, x, y| {
+        let e = engine.borrow();
+        let any_motion = e.mouse_motion_mode(); // 1003
+        let drag = e.mouse_drag_mode(); // 1002
+        if !any_motion && !drag {
+            return; // click-only (1000) or no mouse reporting → nothing to do
+        }
+        // 1002 reports motion only while a button is held; 1003 reports always.
+        let state = ctrl.current_event_state();
+        let held = if state.contains(gtk::gdk::ModifierType::BUTTON1_MASK) {
+            Some(0u8)
+        } else if state.contains(gtk::gdk::ModifierType::BUTTON2_MASK) {
+            Some(1)
+        } else if state.contains(gtk::gdk::ModifierType::BUTTON3_MASK) {
+            Some(2)
+        } else {
+            None
+        };
+        if drag && !any_motion && held.is_none() {
+            return;
+        }
+        let Some((col, line, _)) = cell_at(&render_w, x, y) else {
+            return;
+        };
+        if last_cell.get() == (col, line) {
+            return; // same cell — don't repeat
+        }
+        last_cell.set((col, line));
+        // Motion sets the +32 "motion" bit on top of the button (3 = none).
+        let cb = held.unwrap_or(3) + 32;
+        let (c, r) = (col as u32 + 1, line as u32 + 1);
+        let seq = if e.sgr_mouse() {
+            format!("\x1b[<{cb};{c};{r}M").into_bytes()
+        } else {
+            vec![
+                0x1b,
+                b'[',
+                b'M',
+                32u8.saturating_add(cb),
+                32u8.saturating_add(c.min(223) as u8),
+                32u8.saturating_add(r.min(223) as u8),
+            ]
+        };
+        e.write(seq);
+    });
+    pane.render.add_controller(motion);
+}
+
 /// Ctrl+left-click on a URL opens it in a browser tab (via `on_open_url`).
 fn wire_url_click(pane: &TerminalPaneNative, callbacks: &PaneCallbacks) {
     let engine = pane.engine.clone();
@@ -845,11 +904,26 @@ fn wire_mouse_selection(pane: &TerminalPaneNative, callbacks: &PaneCallbacks) {
 
 fn wire_focus_and_menu(pane: &TerminalPaneNative, surface: SurfaceId, callbacks: &PaneCallbacks) {
     let id = pane.id;
-    // Focus tracking.
+    // Focus tracking. Also report focus in/out to the app when it enabled
+    // mode 1004 (`CSI I` on focus, `CSI O` on blur) — vim/tmux focus-events.
     {
         let cb = callbacks.on_focus.clone();
         let focus = gtk::EventControllerFocus::new();
-        focus.connect_enter(move |_| (cb.borrow_mut())(id));
+        let engine_in = pane.engine.clone();
+        let engine_out = pane.engine.clone();
+        focus.connect_enter(move |_| {
+            (cb.borrow_mut())(id);
+            let e = engine_in.borrow();
+            if e.focus_event_mode() {
+                e.write(b"\x1b[I".to_vec());
+            }
+        });
+        focus.connect_leave(move |_| {
+            let e = engine_out.borrow();
+            if e.focus_event_mode() {
+                e.write(b"\x1b[O".to_vec());
+            }
+        });
         pane.render.add_controller(focus);
     }
     // Right-click menu: Copy / Paste / Split Right / Split Down / Copy path /

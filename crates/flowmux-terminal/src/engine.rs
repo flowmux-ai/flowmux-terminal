@@ -487,6 +487,27 @@ impl TermEngine {
         self.term.lock().mode().contains(TermMode::SGR_MOUSE)
     }
 
+    /// 1002: report pointer motion only while a button is held (button-event
+    /// tracking — drag-select in vim, pane drag-resize in tmux).
+    pub fn mouse_drag_mode(&self) -> bool {
+        use alacritty_terminal::term::TermMode;
+        self.term.lock().mode().contains(TermMode::MOUSE_DRAG)
+    }
+
+    /// 1003: report all pointer motion, button held or not (any-event
+    /// tracking — hover effects).
+    pub fn mouse_motion_mode(&self) -> bool {
+        use alacritty_terminal::term::TermMode;
+        self.term.lock().mode().contains(TermMode::MOUSE_MOTION)
+    }
+
+    /// 1004: the app wants focus in/out reports (`CSI I` / `CSI O`) when the
+    /// terminal gains/loses focus (vim/tmux focus-events).
+    pub fn focus_event_mode(&self) -> bool {
+        use alacritty_terminal::term::TermMode;
+        self.term.lock().mode().contains(TermMode::FOCUS_IN_OUT)
+    }
+
     pub fn has_selection(&self) -> bool {
         self.term
             .lock()
