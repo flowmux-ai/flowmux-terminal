@@ -260,7 +260,13 @@ pub fn snapshot<T: EventListener>(term: &Term<T>, theme: &ThemePalette) -> Frame
             )
         })
     };
-    let cursor = {
+    let cursor = if selection.is_some() {
+        // Hide the text cursor while a mouse selection is active, matching
+        // xterm/gnome-terminal/alacritty. Otherwise the block cursor sits at
+        // the selection's end cell and shimmers over thin glyphs (i/l) as it
+        // blinks/repaints, making the whole line look like it flickers.
+        None
+    } else {
         let c = content.cursor;
         if matches!(c.shape, CursorShape::Hidden) {
             None
@@ -483,6 +489,43 @@ mod tests {
         for (r, want) in ["L12", "L13", "L14", "L15", "L16"].iter().enumerate() {
             assert_eq!(&row_text(&frame, r), want, "row {r} mismatch");
         }
+    }
+
+    #[test]
+    fn active_selection_hides_cursor() {
+        use alacritty_terminal::event::VoidListener;
+        use alacritty_terminal::index::{Column, Line, Point, Side};
+        use alacritty_terminal::selection::{Selection, SelectionType};
+        use alacritty_terminal::term::test::TermSize;
+        use alacritty_terminal::term::{Config, Term};
+        use alacritty_terminal::vte::ansi::Processor;
+
+        let size = TermSize::new(10, 3);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut term, b"hi");
+
+        // No selection: cursor is shown.
+        let frame = snapshot(&term, &theme());
+        assert!(frame.cursor.is_some(), "cursor shown without selection");
+        assert!(frame.caret.is_some());
+
+        // Active selection over the first row: the block cursor is suppressed
+        // (so it can't shimmer over thin glyphs), but the caret is still
+        // tracked for IME preedit placement.
+        let mut sel = Selection::new(
+            SelectionType::Simple,
+            Point::new(Line(0), Column(0)),
+            Side::Left,
+        );
+        sel.update(Point::new(Line(0), Column(1)), Side::Right);
+        term.selection = Some(sel);
+        let frame = snapshot(&term, &theme());
+        assert!(frame.cursor.is_none(), "cursor hidden during selection");
+        assert!(
+            frame.caret.is_some(),
+            "caret still tracked during selection"
+        );
     }
 
     #[test]
