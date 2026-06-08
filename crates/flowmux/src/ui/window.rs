@@ -1220,6 +1220,41 @@ impl WindowController {
         rx.await.unwrap_or(false)
     }
 
+    /// Show a single modal confirmation before closing every open
+    /// workspace via the sidebar's "Close all tabs" item. Resolves to
+    /// `true` if the user confirms, `false` on cancel or when there is
+    /// nothing to close.
+    async fn confirm_close_all_workspaces(&self) -> bool {
+        let count = self.store.list_workspaces().await.len();
+        if count == 0 {
+            return false;
+        }
+        let dialog = adw::AlertDialog::new(
+            Some("Close all tabs?"),
+            Some(&format!(
+                "This will close all {count} workspaces and stop their tabs."
+            )),
+        );
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("close", "Close all");
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+        dialog.set_response_appearance("close", adw::ResponseAppearance::Destructive);
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+        let tx_cell: Rc<Cell<Option<tokio::sync::oneshot::Sender<bool>>>> =
+            Rc::new(Cell::new(Some(tx)));
+        let tx_for_resp = tx_cell.clone();
+        dialog.connect_response(None, move |dialog, response| {
+            if let Some(tx) = tx_for_resp.take() {
+                let _ = tx.send(response == "close");
+            }
+            dialog.close();
+        });
+        dialog.present(Some(&self.window));
+        rx.await.unwrap_or(false)
+    }
+
     async fn activate_active_or_show_empty(&self) {
         if let Some(id) = self.store.active_or_first().await {
             if self.surfaces.borrow().contains_key(&id) {
@@ -1779,6 +1814,17 @@ impl WindowController {
                     self.drop_workspace(id);
                     self.activate_active_or_show_empty().await;
                 }
+                let _ = ack.send(());
+            }
+            GtkCommand::RemoveAllWorkspaces { ack } => {
+                if !self.confirm_close_all_workspaces().await {
+                    let _ = ack.send(());
+                    return;
+                }
+                for id in self.store.remove_all_workspaces().await {
+                    self.drop_workspace(id);
+                }
+                self.activate_active_or_show_empty().await;
                 let _ = ack.send(());
             }
             GtkCommand::RenameWorkspace { id, name, ack } => {

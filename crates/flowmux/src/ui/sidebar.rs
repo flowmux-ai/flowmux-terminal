@@ -843,6 +843,25 @@ fn row_widget(
         });
         v.append(&close_btn);
 
+        // Close every open workspace at once. The dispatcher shows a
+        // single confirmation before tearing them all down.
+        let close_all_btn = mk("Close all tabs");
+        let bridge_for_close_all = bridge.clone();
+        let pop = popover.clone();
+        close_all_btn.connect_clicked(move |_| {
+            pop.popdown();
+            let bridge = bridge_for_close_all.clone();
+            gtk::glib::MainContext::default().spawn_local(async move {
+                let (ack, rx) = tokio::sync::oneshot::channel();
+                let _ = bridge
+                    .tx
+                    .send(GtkCommand::RemoveAllWorkspaces { ack })
+                    .await;
+                let _ = rx.await;
+            });
+        });
+        v.append(&close_all_btn);
+
         v.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
 
         // Open the focused pane's cwd in the system file manager
