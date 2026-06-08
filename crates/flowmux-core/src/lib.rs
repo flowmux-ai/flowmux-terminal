@@ -82,16 +82,6 @@ fn truncate_tab_title(title: &str) -> String {
     format!("{prefix}...")
 }
 
-fn looks_like_legacy_terminal_title(title: &str) -> bool {
-    let title = title.trim();
-    if title.is_empty() || title == FALLBACK_TERMINAL_TAB_TITLE {
-        return true;
-    }
-    title
-        .strip_prefix("Terminal ")
-        .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()))
-}
-
 fn normalize_unlocked_terminal_title(surface: &mut PaneSurface) -> bool {
     if surface.title_locked {
         return false;

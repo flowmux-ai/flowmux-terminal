@@ -230,12 +230,6 @@ impl Sidebar {
         self.upsert_inner(ws, &trimmed);
     }
 
-    /// Alias for `upsert`, used where the call site reads more clearly as a
-    /// refresh after rename, color changes, and similar updates.
-    pub fn refresh(&self, ws: &Workspace) {
-        self.upsert(ws);
-    }
-
     fn upsert_inner(&self, ws: &Workspace, subtitles: &[String]) {
         let mut rows = self.rows.borrow_mut();
         if let Some((_, row)) = rows.iter().find(|(id, _)| *id == ws.id).cloned() {

@@ -36,8 +36,6 @@ pub enum BrowserOp {
     Reload,
     Url,
     Title,
-    Snapshot,
-    Eval { source: String },
     Click { target: String },
     Fill { target: String, value: String },
     Select { target: String, value: String },

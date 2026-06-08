@@ -1068,15 +1068,6 @@ impl WindowController {
         }
     }
 
-    /// Compatibility helper for existing call sites that redraw only a sidebar
-    /// row with a fresh workspace object, such as rename or color changes.
-    /// Subtitles use the last value cached by sync_workspace_label.
-    async fn refresh_sidebar_for(&self, ws_id: WorkspaceId) {
-        if let Some(ws) = self.store.get_workspace(ws_id).await {
-            self.sidebar.refresh(&ws);
-        }
-    }
-
     /// Handle a pane focus event, update MRU, and sync label/subtitles. Focusing
     /// the same pane again moves it to the MRU head, though the label itself may
     /// not change because set_workspace_name is idempotent.
@@ -2294,36 +2285,6 @@ impl WindowController {
                             .map(|title| title.to_string())
                             .unwrap_or_default();
                         let _ = ack.send(Ok(BrowserActionResult::String(value)));
-                    }
-                    BrowserOp::Eval { source } => {
-                        let cell = std::cell::Cell::new(Some(ack));
-                        browser.evaluate_js(&source, move |result| {
-                            if let Some(ack) = cell.take() {
-                                let _ = ack.send(result.map(BrowserActionResult::String));
-                            }
-                        });
-                    }
-                    BrowserOp::Snapshot => {
-                        // After the page-side script returns, mirror the
-                        // (token → selector) entries into the pane's
-                        // server-side RefStore so subsequent action
-                        // calls can resolve `eN` to a CSS selector
-                        // without depending on the live DOM.
-                        let refs = browser.refs.clone();
-                        let scope = browser.ref_scope;
-                        let cell = std::cell::Cell::new(Some(ack));
-                        browser.evaluate_js(flowmux_browser::scripts::SNAPSHOT_JS, move |result| {
-                            if let Some(ack) = cell.take() {
-                                let mapped = match result {
-                                    Ok(s) => {
-                                        update_ref_store_from_snapshot(&refs, scope, &s);
-                                        Ok(BrowserActionResult::String(s))
-                                    }
-                                    Err(e) => Err(e),
-                                };
-                                let _ = ack.send(mapped);
-                            }
-                        });
                     }
                     BrowserOp::Click { target } => match resolve_ref(&browser, &target) {
                         Ok(sel) => run_browser_js(
@@ -3582,33 +3543,6 @@ fn resolve_ref(
                  take a fresh `flowmux browser snapshot` first"
             )
         })
-}
-
-/// After the WebView returns the snapshot JSON, copy each
-/// `(ref_token → selector)` pair into the pane's RefStore so future
-/// `click`/`fill`/etc. on the same surface can resolve those tokens.
-/// On a parse error (page returned malformed JSON) we leave the prior
-/// store in place — preferable to wiping it and dropping refs the
-/// agent might still want.
-fn update_ref_store_from_snapshot(
-    refs: &std::rc::Rc<std::cell::RefCell<flowmux_browser::RefStore>>,
-    scope: flowmux_browser::RefScope,
-    snapshot_json: &str,
-) {
-    let parsed: serde_json::Result<flowmux_browser::DomSnapshot> =
-        serde_json::from_str(snapshot_json);
-    let Ok(snap) = parsed else {
-        tracing::warn!(
-            json = %snapshot_json.chars().take(200).collect::<String>(),
-            "snapshot json did not match DomSnapshot shape; keeping prior refs"
-        );
-        return;
-    };
-    let mut store = refs.borrow_mut();
-    store.clear(scope);
-    for (token, meta) in snap.refs {
-        store.insert(scope, token, meta.selector);
-    }
 }
 
 /// Like [`run_browser_js`] but expects the page to evaluate to

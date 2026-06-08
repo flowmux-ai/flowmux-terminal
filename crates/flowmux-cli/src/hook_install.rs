@@ -95,18 +95,6 @@ pub enum HookCheckStatus {
     Error(String),
 }
 
-impl HookCheckStatus {
-    pub fn label(&self) -> &'static str {
-        match self {
-            HookCheckStatus::NoAgentHome => "no-agent",
-            HookCheckStatus::Missing => "missing",
-            HookCheckStatus::Installed => "ok",
-            HookCheckStatus::Drift => "drift",
-            HookCheckStatus::Error(_) => "error",
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct HookCheckEntry {
     pub target: HookTarget,

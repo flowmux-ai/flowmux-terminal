@@ -27,10 +27,8 @@ use webkit6::prelude::*;
 
 #[derive(Clone)]
 pub struct BrowserPane {
-    pub id: PaneId,
     pub root: gtk::Box,
     pub web_view: webkit6::WebView,
-    pub address_bar: gtk::Entry,
     /// cmux-style server-side ref store. Each snapshot clears + repopulates
     /// the entry for this pane; subsequent click/fill/etc. resolve their
     /// `eN` ref through this map to a CSS selector before injecting JS.
@@ -265,53 +263,16 @@ impl BrowserPane {
         }
 
         Self {
-            id,
             root,
             web_view,
-            address_bar: address,
             refs: Rc::new(RefCell::new(RefStore::new())),
             ref_scope: ref_scope_for_surface(surface_id),
         }
     }
 
-    pub fn navigate(&self, url: &str) {
-        self.web_view.load_uri(url);
-    }
-
-    /// Move backwards in session history. Returns false if there's
-    /// nothing to go back to.
-    pub fn back(&self) -> bool {
-        if self.web_view.can_go_back() {
-            self.web_view.go_back();
-            true
-        } else {
-            false
-        }
-    }
-
-    pub fn forward(&self) -> bool {
-        if self.web_view.can_go_forward() {
-            self.web_view.go_forward();
-            true
-        } else {
-            false
-        }
-    }
-
-    pub fn reload(&self) {
-        self.web_view.reload();
-    }
-
     pub fn current_url(&self) -> String {
         self.web_view
             .uri()
-            .map(|s| s.to_string())
-            .unwrap_or_default()
-    }
-
-    pub fn current_title(&self) -> String {
-        self.web_view
-            .title()
             .map(|s| s.to_string())
             .unwrap_or_default()
     }
