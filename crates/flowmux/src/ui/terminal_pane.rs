@@ -274,6 +274,14 @@ impl TerminalPane {
             install_enter_preedit_commit_ordering(&term);
         }
 
+        // Shift+Left/Right: move the cursor like a plain arrow instead
+        // of letting VTE send the modified `CSI 1;2 C/D` form, which
+        // line editors (Claude Code, shell readline) don't recognise and
+        // echo as a stray "C"/"D". flowmux can't offer keyboard text
+        // selection on VTE (no public set-selection API), so the least
+        // surprising behaviour is a bare cursor move.
+        install_shift_arrow_cursor_move(&term);
+
         let smart_page_enabled = terminal_capture_key_controllers_enabled(env_flag_enabled(
             "FLOWMUX_ENABLE_VTE_CAPTURE_KEYS",
         ));
@@ -901,6 +909,48 @@ fn env_flag_value_enabled(value: &str) -> bool {
         || value.eq_ignore_ascii_case("true")
         || value.eq_ignore_ascii_case("yes")
         || value.eq_ignore_ascii_case("on")
+}
+
+/// Make Shift+Left/Right behave like a plain Left/Right cursor move.
+///
+/// VTE's default for a shifted cursor key is the modified xterm form
+/// `CSI 1 ; 2 C` / `CSI 1 ; 2 D`. Line editors that only parse the bare
+/// `CSI C` / `CSI D` (Claude Code's TUI, shell readline) don't recognise
+/// the `1;2` parameters and surface the trailing letter as a literal
+/// "C"/"D" in the input. We can't offer a copyable keyboard selection on
+/// VTE — it exposes no API to set a selection by coordinate — so the
+/// least surprising behaviour is to drop the Shift modifier and feed the
+/// normal-mode cursor escape. `flowmuxctl pty-tee` rewrites it to the
+/// application-cursor form (`SS3 C` / `SS3 D`) while a foreground TUI has
+/// DECCKM enabled, so this stays correct in full-screen apps too.
+///
+/// Scoped to the Shift+Left/Right keysyms via a `ShortcutController`
+/// (like the Enter handler), so letter / jamo keys still reach VTE's IM
+/// path untouched and inline Hangul preedit is unaffected.
+fn install_shift_arrow_cursor_move(term: &vte::Terminal) {
+    let controller = gtk::ShortcutController::new();
+    controller.set_propagation_phase(gtk::PropagationPhase::Capture);
+    controller.set_scope(gtk::ShortcutScope::Local);
+
+    let bindings: &[(gtk::gdk::Key, &'static [u8])] = &[
+        (gtk::gdk::Key::Left, b"\x1b[D"),
+        (gtk::gdk::Key::KP_Left, b"\x1b[D"),
+        (gtk::gdk::Key::Right, b"\x1b[C"),
+        (gtk::gdk::Key::KP_Right, b"\x1b[C"),
+    ];
+
+    for (keyval, bytes) in bindings {
+        let term_widget = term.clone();
+        let bytes: &'static [u8] = bytes;
+        let action = gtk::CallbackAction::new(move |_, _| {
+            term_widget.feed_child(bytes);
+            glib::Propagation::Stop
+        });
+        let trigger = gtk::KeyvalTrigger::new(*keyval, gtk::gdk::ModifierType::SHIFT_MASK);
+        controller.add_shortcut(gtk::Shortcut::new(Some(trigger), Some(action)));
+    }
+
+    term.add_controller(controller);
 }
 
 /// Legacy smart paging for PgUp / PgDn / Shift+PgUp / Shift+PgDn.
