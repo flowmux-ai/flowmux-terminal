@@ -93,6 +93,7 @@ impl TerminalPane {
     }
 
     pub fn paste_clipboard(&self) {
+        scroll_terminal_to_bottom(&self.widget);
         self.widget.paste_clipboard();
     }
 }
@@ -225,6 +226,13 @@ impl TerminalPane {
         term.set_vexpand(true);
         term.set_scrollback_lines(10_000);
         term.set_audible_bell(false);
+        // Snap the viewport back to the live cursor row whenever the user
+        // types: someone who scrolled up to inspect scrollback should not
+        // end up typing off-screen with no visible echo. VTE's built-in
+        // `scroll-on-keystroke` covers every key-driven input path
+        // (keyboard + IM commit), mirroring the explicit snap-to-bottom the
+        // pure-Rust terminal backend does in `write_child` (commit 9e12edb).
+        term.set_scroll_on_keystroke(true);
 
         // Wrap the VTE in a `gtk::Overlay` so we can pin a vertical
         // `gtk::Scrollbar` to its right edge without going through a
@@ -507,6 +515,7 @@ impl TerminalPane {
     }
 
     pub fn feed(&self, bytes: &[u8]) {
+        scroll_terminal_to_bottom(&self.widget);
         self.widget.feed_child(bytes);
     }
 
@@ -530,6 +539,7 @@ impl TerminalPane {
     /// armed per call and disconnected on the first commit or the
     /// fallback, so it never disturbs ordinary typing.
     pub fn feed_after_preedit_commit(&self, bytes: &'static [u8]) {
+        scroll_terminal_to_bottom(&self.widget);
         if !ibus_im_module_active() {
             self.widget.feed_child(bytes);
             return;
@@ -868,6 +878,7 @@ fn install_enter_preedit_commit_ordering(term: &vte::Terminal) {
     let term_widget = term.clone();
     let armed_action = armed.clone();
     let action = gtk::CallbackAction::new(move |_, _| {
+        scroll_terminal_to_bottom(&term_widget);
         armed_action.set(true);
         flush_pending_preedit(&term_widget);
         let t = term_widget.clone();
@@ -927,6 +938,23 @@ fn env_flag_value_enabled(value: &str) -> bool {
 /// Scoped to the Shift+Left/Right keysyms via a `ShortcutController`
 /// (like the Enter handler), so letter / jamo keys still reach VTE's IM
 /// path untouched and inline Hangul preedit is unaffected.
+/// Snap the scrollback viewport back to the live cursor row. VTE's
+/// `scroll-on-keystroke` only fires for input routed through VTE's own
+/// key handler; the capture-phase shortcut paths and clipboard paste
+/// reach the PTY through direct `feed_child` / `paste_clipboard` calls
+/// that bypass it. Call this first on those paths so a user who scrolled
+/// up to read history is snapped back before their input is echoed
+/// off-screen. No-op when already pinned to the bottom — mirrors the
+/// pure-Rust backend's `write_child` snap (commit 9e12edb).
+fn scroll_terminal_to_bottom(term: &vte::Terminal) {
+    if let Some(adj) = term.vadjustment() {
+        let bottom = adj.upper() - adj.page_size();
+        if adj.value() < bottom {
+            adj.set_value(bottom);
+        }
+    }
+}
+
 fn install_shift_arrow_cursor_move(term: &vte::Terminal) {
     let controller = gtk::ShortcutController::new();
     controller.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -943,6 +971,7 @@ fn install_shift_arrow_cursor_move(term: &vte::Terminal) {
         let term_widget = term.clone();
         let bytes: &'static [u8] = bytes;
         let action = gtk::CallbackAction::new(move |_, _| {
+            scroll_terminal_to_bottom(&term_widget);
             term_widget.feed_child(bytes);
             glib::Propagation::Stop
         });
@@ -1160,6 +1189,7 @@ fn install_flatpak_ibus_nav_workaround(term: &vte::Terminal, smart_page_enabled:
     let bind = |keyval: gtk::gdk::Key, bytes: &'static [u8]| {
         let term_widget = term.clone();
         let action = gtk::CallbackAction::new(move |_, _| {
+            scroll_terminal_to_bottom(&term_widget);
             flush_pending_preedit(&term_widget);
             term_widget.feed_child(bytes);
             glib::Propagation::Stop
