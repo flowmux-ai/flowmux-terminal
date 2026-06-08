@@ -349,7 +349,7 @@ paned > separator {{
 .navigation-sidebar > row.activatable:selected:hover,
 .navigation-sidebar > row.activatable:selected:active,
 .navigation-sidebar > row.activatable:selected.has-open-popup {{
-    box-shadow: inset 5px 0 0 {focus_full}, inset -5px 0 0 {focus_full};
+    box-shadow: inset 2px 0 0 {focus_full}, inset -2px 0 0 {focus_full};
 }}
 /* Hover and press share one faint tint across every workspace row, so
    hovering only whispers and clicking introduces no separate color step.
