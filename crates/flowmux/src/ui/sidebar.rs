@@ -826,6 +826,7 @@ fn row_widget(
         // Claim the sequence up front so the row's primary-click gesture
         // and the ListBox don't also act on this press.
         gesture.set_state(gtk::EventSequenceState::Claimed);
+        flowmux_config::notify_debug!("sidebar/ctxmenu", "menu opened ws={id}");
         let popover = gtk::Popover::new();
         let v = gtk::Box::new(gtk::Orientation::Vertical, 0);
         v.set_margin_top(4);
@@ -846,6 +847,7 @@ fn row_widget(
         let bridge_for_rename = bridge.clone();
         let pop = popover.clone();
         rename_btn.connect_clicked(move |_| {
+            flowmux_config::notify_debug!("sidebar/ctxmenu", "click rename ws={id}");
             pop.popdown();
             let bridge = bridge_for_rename.clone();
             gtk::glib::MainContext::default().spawn_local(async move {
@@ -858,6 +860,7 @@ fn row_widget(
         let bridge_for_color = bridge.clone();
         let pop = popover.clone();
         color_btn.connect_clicked(move |_| {
+            flowmux_config::notify_debug!("sidebar/ctxmenu", "click color ws={id}");
             pop.popdown();
             let bridge = bridge_for_color.clone();
             gtk::glib::MainContext::default().spawn_local(async move {
@@ -872,6 +875,7 @@ fn row_widget(
         let on_close_clone = on_close_for_menu.clone();
         let pop = popover.clone();
         close_btn.connect_clicked(move |_| {
+            flowmux_config::notify_debug!("sidebar/ctxmenu", "click close-tab ws={id}");
             pop.popdown();
             on_close_clone(id);
         });
@@ -883,6 +887,7 @@ fn row_widget(
         let bridge_for_close_all = bridge.clone();
         let pop = popover.clone();
         close_all_btn.connect_clicked(move |_| {
+            flowmux_config::notify_debug!("sidebar/ctxmenu", "click close-all ws={id}");
             pop.popdown();
             let bridge = bridge_for_close_all.clone();
             gtk::glib::MainContext::default().spawn_local(async move {
@@ -906,6 +911,7 @@ fn row_widget(
         let bridge_for_show = bridge.clone();
         let pop = popover.clone();
         show_btn.connect_clicked(move |_| {
+            flowmux_config::notify_debug!("sidebar/ctxmenu", "click show-folder ws={id}");
             pop.popdown();
             let bridge = bridge_for_show.clone();
             gtk::glib::MainContext::default().spawn_local(async move {
@@ -925,6 +931,7 @@ fn row_widget(
         let bridge_for_copy = bridge.clone();
         let pop = popover.clone();
         copy_btn.connect_clicked(move |_| {
+            flowmux_config::notify_debug!("sidebar/ctxmenu", "click copy-path ws={id}");
             pop.popdown();
             let bridge = bridge_for_copy.clone();
             gtk::glib::MainContext::default().spawn_local(async move {
