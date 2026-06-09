@@ -823,6 +823,9 @@ fn row_widget(
     let row_for_click = row.clone();
     let on_close_for_menu = on_close.clone();
     click.connect_pressed(move |gesture, _n_press, x, y| {
+        // Claim the sequence up front so the row's primary-click gesture
+        // and the ListBox don't also act on this press.
+        gesture.set_state(gtk::EventSequenceState::Claimed);
         let popover = gtk::Popover::new();
         let v = gtk::Box::new(gtk::Orientation::Vertical, 0);
         v.set_margin_top(4);
@@ -938,8 +941,15 @@ fn row_widget(
         popover.set_has_arrow(false);
         crate::ui::popover_pos::anchor_at_click(&popover, &row_for_click, x, y);
         popover.connect_closed(|p| p.unparent());
-        popover.popup();
-        gesture.set_state(gtk::EventSequenceState::Claimed);
+        // Pop up after the right-button press event fully settles. On
+        // GTK 4.6 (Ubuntu 22.04), calling popup() synchronously inside
+        // the press handler — while the button is still physically down —
+        // left the autohide popover's input grab unstable, so the first
+        // clicks on its menu items were dropped intermittently (the bug
+        // looked timing-dependent: it "worked sometimes"). Deferring to
+        // an idle callback lets the press resolve and the grab settle
+        // before the popover takes its own grab.
+        gtk::glib::idle_add_local_once(move || popover.popup());
     });
     row.add_controller(click);
 
