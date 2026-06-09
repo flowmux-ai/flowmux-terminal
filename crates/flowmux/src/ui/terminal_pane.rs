@@ -275,6 +275,12 @@ impl TerminalPane {
         // even when the foreground app has hidden the terminal cursor.
         install_preedit_redraw_on_keystroke(&container, &term);
 
+        // On the ibus path, recover Shift+symbol keys (notably `?`) that
+        // get swallowed while a Korean input mode is active.
+        if ibus_im_module_active() {
+            install_ibus_shifted_symbol_passthrough(&container, &term);
+        }
+
         // Order Enter behind a still-composing IME syllable so "안녕하세요"
         // + Enter submits "…요\n" and never "…세\n요". Only the ibus
         // immodule has the asynchronous-commit hazard this fixes.
@@ -816,6 +822,52 @@ fn install_preedit_redraw_on_keystroke(container: &gtk::Overlay, term: &vte::Ter
             term_follow.queue_draw();
         });
         glib::Propagation::Proceed
+    });
+    container.add_controller(key);
+}
+
+/// Recover Shift+symbol keys that the ibus sync-mode path swallows while
+/// a Korean (ibus-hangul) input mode is active.
+///
+/// Symptom: with `GTK_IM_MODULE=ibus` + `IBUS_ENABLE_SYNC_MODE=1` (both
+/// forced on the Ubuntu/IBus terminal path), pressing `?` (Shift+`/`) —
+/// or other Shift+symbol combos — in Korean mode types nothing.
+/// ibus-hangul correctly declines the non-jamo key, but the
+/// synchronously-forwarded event never reaches the PTY.
+///
+/// Fix: at the container capture phase — the same safe vantage point as
+/// [`install_preedit_redraw_on_keystroke`], never a capture controller
+/// directly on VTE (which would suppress inline Hangul preedit) — feed
+/// the layout-resolved character straight to the PTY, committing any
+/// pending preedit first so a half-composed syllable lands before the
+/// symbol rather than after it. Scoped to keys whose only modifier is
+/// Shift and whose resolved character is ASCII punctuation, so jamo
+/// (letters, including Shift+letter double consonants) and Ctrl/Alt
+/// bindings are untouched.
+fn install_ibus_shifted_symbol_passthrough(container: &gtk::Overlay, term: &vte::Terminal) {
+    use gtk::gdk::ModifierType;
+    let key = gtk::EventControllerKey::new();
+    key.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let term_widget = term.clone();
+    key.connect_key_pressed(move |_, keyval, _keycode, state| {
+        let relevant =
+            state & (ModifierType::CONTROL_MASK | ModifierType::ALT_MASK | ModifierType::SHIFT_MASK);
+        if relevant != ModifierType::SHIFT_MASK {
+            return glib::Propagation::Proceed;
+        }
+        let Some(ch) = keyval.to_unicode() else {
+            return glib::Propagation::Proceed;
+        };
+        if !ch.is_ascii_punctuation() {
+            return glib::Propagation::Proceed;
+        }
+        // Commit any in-progress Hangul syllable, then feed the symbol so
+        // ordering stays correct (e.g. "안?" not "?안").
+        flush_pending_preedit(&term_widget);
+        scroll_terminal_to_bottom(&term_widget);
+        let mut buf = [0u8; 4];
+        term_widget.feed_child(ch.encode_utf8(&mut buf).as_bytes());
+        glib::Propagation::Stop
     });
     container.add_controller(key);
 }
