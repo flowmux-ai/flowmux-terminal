@@ -350,9 +350,9 @@ paned > separator {{
 .navigation-sidebar > row.activatable:selected:active,
 .navigation-sidebar > row.activatable:selected.has-open-popup {{
     box-shadow: inset 2px 0 0 {focus_full}, inset -2px 0 0 {focus_full};
-    /* Nudge the selected row's content 10px right (base left padding is
+    /* Nudge the selected row's content 5px right (base left padding is
        10px) so the active workspace reads as indented. */
-    padding-left: 20px;
+    padding-left: 15px;
 }}
 /* Hover and press share one faint tint across every workspace row, so
    hovering only whispers and clicking introduces no separate color step.
