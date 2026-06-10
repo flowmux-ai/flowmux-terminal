@@ -970,15 +970,18 @@ fn row_widget(
             click_pt.y() as f64,
         );
         popover.connect_closed(|p| p.unparent());
-        // Pop up after the right-button press event fully settles. On
-        // GTK 4.6 (Ubuntu 22.04), calling popup() synchronously inside
-        // the press handler — while the button is still physically down —
-        // left the autohide popover's input grab unstable, so the first
-        // clicks on its menu items were dropped intermittently (the bug
-        // looked timing-dependent: it "worked sometimes"). Deferring to
-        // an idle callback lets the press resolve and the grab settle
-        // before the popover takes its own grab.
-        gtk::glib::idle_add_local_once(move || popover.popup());
+        // Pop up synchronously, inside the press handler — exactly like
+        // the terminal context menu, which works on every host. An
+        // earlier fix deferred popup() to an idle callback, but on X11
+        // sessions an autohide popover popped up outside the input
+        // event that triggered it never acquires pointer input: the
+        // menu is visible yet every item is dead (debug traces showed
+        // "menu opened" with zero item clicks). Wayland tolerates the
+        // deferred popup, which is why only Ubuntu 22.04-on-Xorg broke.
+        // The intermittent first-click drops that motivated the idle
+        // defer were really the row-rebuild unparenting bug, fixed
+        // above by parenting the popover to the ListBox.
+        popover.popup();
     });
     row.add_controller(click);
 
