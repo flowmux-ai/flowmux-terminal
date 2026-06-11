@@ -275,6 +275,10 @@ impl TerminalPane {
         // even when the foreground app has hidden the terminal cursor.
         install_preedit_redraw_on_keystroke(&container, &term);
 
+        if crate::platform::running_under_wsl() {
+            install_wsl_ctrl_c_interrupt_passthrough(&container, &term);
+        }
+
         // On the ibus path, recover Shift+symbol keys (notably `?`) that
         // get swallowed while a Korean input mode is active.
         if ibus_im_module_active() {
@@ -824,6 +828,39 @@ fn install_preedit_redraw_on_keystroke(container: &gtk::Overlay, term: &vte::Ter
         glib::Propagation::Proceed
     });
     container.add_controller(key);
+}
+
+/// WSLg can lose plain Ctrl+C before VTE turns it into the terminal VINTR byte.
+/// Keep terminal semantics by feeding ETX directly, while leaving Ctrl+Shift+C
+/// available for Copy.
+fn install_wsl_ctrl_c_interrupt_passthrough(container: &gtk::Overlay, term: &vte::Terminal) {
+    let key = gtk::EventControllerKey::new();
+    key.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let term_widget = term.clone();
+    key.connect_key_pressed(move |_, keyval, _keycode, state| {
+        if !is_plain_ctrl_c(keyval, state) {
+            return glib::Propagation::Proceed;
+        }
+        scroll_terminal_to_bottom(&term_widget);
+        term_widget.feed_child(b"\x03");
+        glib::Propagation::Stop
+    });
+    container.add_controller(key);
+}
+
+fn is_plain_ctrl_c(keyval: gtk::gdk::Key, state: gtk::gdk::ModifierType) -> bool {
+    use gtk::gdk::ModifierType;
+
+    let relevant = state
+        & (ModifierType::CONTROL_MASK
+            | ModifierType::ALT_MASK
+            | ModifierType::SHIFT_MASK
+            | ModifierType::SUPER_MASK
+            | ModifierType::META_MASK);
+    relevant == ModifierType::CONTROL_MASK
+        && keyval
+            .to_unicode()
+            .is_some_and(|ch| ch == 'c' || ch == 'C')
 }
 
 /// Recover Shift+symbol keys that the ibus sync-mode path swallows while
@@ -1654,6 +1691,23 @@ mod tests {
                 "{value:?} should keep the native VTE IM path"
             );
         }
+    }
+
+    #[test]
+    fn ctrl_c_bypass_only_matches_plain_ctrl_c() {
+        use gtk::gdk::{Key, ModifierType};
+
+        assert!(is_plain_ctrl_c(Key::c, ModifierType::CONTROL_MASK));
+        assert!(!is_plain_ctrl_c(Key::c, ModifierType::empty()));
+        assert!(!is_plain_ctrl_c(
+            Key::c,
+            ModifierType::CONTROL_MASK | ModifierType::SHIFT_MASK
+        ));
+        assert!(!is_plain_ctrl_c(
+            Key::c,
+            ModifierType::CONTROL_MASK | ModifierType::ALT_MASK
+        ));
+        assert!(!is_plain_ctrl_c(Key::v, ModifierType::CONTROL_MASK));
     }
 
     #[test]
