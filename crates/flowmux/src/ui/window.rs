@@ -117,16 +117,6 @@ fn install_window_resize_handles(window: &adw::ApplicationWindow, overlay: &gtk:
     add_resize_handle(
         window,
         overlay,
-        gtk::gdk::SurfaceEdge::North,
-        "n-resize",
-        gtk::Align::Fill,
-        gtk::Align::Start,
-        -1,
-        EDGE,
-    );
-    add_resize_handle(
-        window,
-        overlay,
         gtk::gdk::SurfaceEdge::South,
         "s-resize",
         gtk::Align::Fill,
@@ -155,27 +145,9 @@ fn install_window_resize_handles(window: &adw::ApplicationWindow, overlay: &gtk:
         -1,
     );
 
-    // Corners are added last so diagonal resize wins where edge handles overlap.
-    add_resize_handle(
-        window,
-        overlay,
-        gtk::gdk::SurfaceEdge::NorthWest,
-        "nw-resize",
-        gtk::Align::Start,
-        gtk::Align::Start,
-        CORNER,
-        CORNER,
-    );
-    add_resize_handle(
-        window,
-        overlay,
-        gtk::gdk::SurfaceEdge::NorthEast,
-        "ne-resize",
-        gtk::Align::End,
-        gtk::Align::Start,
-        CORNER,
-        CORNER,
-    );
+    // Keep the CSD header bar clear: WSLg can miss libadwaita's resize
+    // hit-test, but covering the top edge also steals the window controls.
+    // Bottom corners still provide diagonal resize without blocking Close.
     add_resize_handle(
         window,
         overlay,
@@ -208,12 +180,20 @@ fn add_resize_handle(
     width: i32,
     height: i32,
 ) {
+    const TITLEBAR_CONTROL_SAFE_TOP: i32 = 48;
+
     let handle = gtk::Box::new(gtk::Orientation::Vertical, 0);
     handle.set_halign(halign);
     handle.set_valign(valign);
     handle.set_can_focus(false);
     handle.set_can_target(true);
     handle.set_cursor_from_name(Some(cursor));
+    if matches!(
+        edge,
+        gtk::gdk::SurfaceEdge::East | gtk::gdk::SurfaceEdge::West
+    ) {
+        handle.set_margin_top(TITLEBAR_CONTROL_SAFE_TOP);
+    }
     if width > 0 {
         handle.set_width_request(width);
     } else {
