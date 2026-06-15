@@ -23,9 +23,11 @@ P0 ("contract and agent usability") is implemented:
   the last-pane / last-tab case so an agent call never blocks on a confirm
   dialog. Top-level `workspace close` is intentionally omitted (destructive;
   the GUI confirm dialog guards it).
-- P0-6 — `flowmux read-screen` behind the opt-in `vte-text` feature (kept
-  off by default to preserve the Ubuntu 22.04 VTE `v0_70` floor; enabled in
-  the patched-VTE install and Flatpak builds). `send-keys` already existed.
+- P0-6 — `send-keys` (literal/raw input), `send-key` (named-key,
+  tmux-style), and `read-screen` (terminal buffer dump). `read-screen` is
+  behind the opt-in `vte-text` feature, kept off by default to preserve the
+  Ubuntu 22.04 VTE `v0_70` floor and enabled in the patched-VTE install and
+  Flatpak builds.
 
 P1/P2 below are not started.
 

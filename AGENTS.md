@@ -117,7 +117,8 @@ flowmux --json capabilities    # supported browser verbs + unsupported (CDP-only
 flowmux --json tree            # workspace -> pane -> tab tree, with the active tab marked
 
 # Terminal automation (tmux-style) — drive another terminal pane
-flowmux send-keys pane:$OTHER 'npm run dev\n'   # type into a pane (escapes accepted)
+flowmux send-keys pane:$OTHER 'npm run dev'     # type literal text (escapes accepted)
+flowmux send-key  Enter --pane pane:$OTHER      # send one named key (Enter/Tab/ArrowUp/…)
 flowmux read-screen pane:$OTHER                 # dump that pane's buffer text*
 
 # Workspace / pane / tab control
