@@ -162,6 +162,13 @@ pub enum GtkCommand {
         keys: String,
         ack: oneshot::Sender<Result<(), String>>,
     },
+    /// Read the terminal buffer text of a pane (`flowmux read-screen`).
+    /// `Ok(None)` means the build lacks the `vte-text` feature; `Err`
+    /// means the pane id did not resolve to a terminal.
+    PaneReadScreen {
+        pane: PaneId,
+        ack: oneshot::Sender<Result<Option<String>, String>>,
+    },
     /// Split the focused pane and re-render its workspace. Used by
     /// keyboard shortcuts (the IPC verb path goes through the daemon
     /// directly via `Request::PaneSplit`).

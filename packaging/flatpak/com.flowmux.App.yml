@@ -70,7 +70,9 @@ modules:
       build-args:
         - --share=network
     build-commands:
-      - cargo build --release --manifest-path Cargo.toml -p flowmux -p flowmux-cli
+      # vte-text enables `flowmux read-screen`; the bundled VTE is 0.78.4
+      # (built above), which supports the required text-extraction API.
+      - cargo build --release --manifest-path Cargo.toml -p flowmux -p flowmux-cli --features flowmux/vte-text
       - install -Dm755 target/release/flowmux    /app/bin/flowmux
       - install -Dm755 target/release/flowmuxctl /app/lib/flowmux/flowmuxctl
       # Expose flowmuxctl on /app/bin so `flatpak run --command=flowmuxctl

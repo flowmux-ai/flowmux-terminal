@@ -210,6 +210,12 @@ pub enum Request {
         keys: String,
     },
 
+    /// `flowmux read-screen <pane>` — plain-text dump of a terminal
+    /// pane's buffer. Read-only.
+    PaneReadScreen {
+        pane: PaneId,
+    },
+
     /// `flowmux notify --pane <id> --title ... --body ...`
     Notify {
         pane: Option<PaneId>,
@@ -452,6 +458,10 @@ pub enum Response {
     /// been activated yet (e.g. an empty just-launched window).
     WorkspaceCurrent {
         id: Option<WorkspaceId>,
+    },
+    /// Reply to `PaneReadScreen` — the terminal buffer text.
+    ScreenContents {
+        text: String,
     },
     SurfaceCreated {
         id: SurfaceId,

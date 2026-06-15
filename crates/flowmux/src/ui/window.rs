@@ -2271,6 +2271,14 @@ impl WindowController {
                 };
                 let _ = ack.send(res);
             }
+            GtkCommand::PaneReadScreen { pane, ack } => {
+                let registry = self.pane_registry.borrow();
+                let res = match registry.active_terminal(pane) {
+                    Some(p) => Ok(p.screen_text()),
+                    None => Err(format!("pane not found: {pane}")),
+                };
+                let _ = ack.send(res);
+            }
             GtkCommand::NotificationOnPane { pane, title, body } => {
                 tracing::info!(%pane, %title, %body, "pane notification");
                 // TODO: paint blue ring + sidebar badge.

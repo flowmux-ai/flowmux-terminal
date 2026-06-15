@@ -128,6 +128,11 @@ enum Cmd {
     /// Send keystrokes to a pane (escape sequences accepted).
     SendKeys { pane: PaneId, keys: String },
 
+    /// Print a terminal pane's buffer text (`pane:<uuid>` or bare uuid;
+    /// falls back to `$FLOWMUX_PANE_ID`). Requires a flowmux built with
+    /// the `vte-text` feature.
+    ReadScreen { pane: Option<PaneId> },
+
     /// In-app browser automation: `flowmux browser <op> …`. This is the
     /// documented agent-facing surface (see `AGENTS.md`). The older
     /// hyphenated `browser-*` commands remain as hidden compatibility
@@ -896,6 +901,12 @@ fn build_request(cmd: Cmd) -> anyhow::Result<Request> {
             Request::PaneSplit { pane, direction }
         }
         Cmd::SendKeys { pane, keys } => Request::PaneSendKeys { pane, keys },
+        Cmd::ReadScreen { pane } => {
+            let pane = pane.or_else(pane_from_env).ok_or_else(|| {
+                anyhow::anyhow!("no pane: pass pane:<uuid> or set FLOWMUX_PANE_ID")
+            })?;
+            Request::PaneReadScreen { pane }
+        }
         Cmd::Browser { op } => browser_op_to_request(op),
         Cmd::Ssh { target } => Request::SshConnect { target },
         Cmd::NotifyStream { .. } => unreachable!("handled before request build"),
@@ -1472,6 +1483,12 @@ fn print_response(r: &Response, json_mode: bool) -> anyhow::Result<()> {
             }
             return Ok(());
         }
+        if let Response::ScreenContents { text } = r {
+            // Raw terminal text — print as-is (already newline-terminated
+            // per row), no extra framing.
+            print!("{text}");
+            return Ok(());
+        }
     }
     let s = if json_mode {
         // Single-line JSON — easier to parse from agent scripts
@@ -1719,6 +1736,33 @@ mod tests {
         assert!(matches!(
             parse_build!("count", &pane_arg, ".result-row"),
             Request::BrowserCount { selector, .. } if selector == ".result-row"
+        ));
+    }
+
+    #[test]
+    fn read_screen_parses_pane_arg_and_env_fallback() {
+        let pane = PaneId::new();
+        // Explicit pane: arg.
+        let cli =
+            Cli::try_parse_from(["flowmuxctl", "read-screen", &format!("pane:{pane}")]).unwrap();
+        assert!(matches!(
+            build_request(cli.cmd).unwrap(),
+            Request::PaneReadScreen { pane: got } if got == pane
+        ));
+
+        // Omitted pane falls back to FLOWMUX_PANE_ID.
+        let _g = flowmux_pane_env_lock();
+        unsafe {
+            std::env::set_var("FLOWMUX_PANE_ID", pane.to_string());
+        }
+        let cli = Cli::try_parse_from(["flowmuxctl", "read-screen"]).unwrap();
+        let built = build_request(cli.cmd);
+        unsafe {
+            std::env::remove_var("FLOWMUX_PANE_ID");
+        }
+        assert!(matches!(
+            built.unwrap(),
+            Request::PaneReadScreen { pane: got } if got == pane
         ));
     }
 

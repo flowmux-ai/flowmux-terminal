@@ -118,6 +118,25 @@ impl Handler for GuiHandler {
                         Err(_) => Response::Error(RpcError::Internal("bridge closed".into())),
                     }
                 }
+                Request::PaneReadScreen { pane } => {
+                    let (tx, rx) = oneshot::channel();
+                    let _ = self
+                        .bridge
+                        .tx
+                        .send(GtkCommand::PaneReadScreen { pane, ack: tx })
+                        .await;
+                    match rx.await {
+                        Ok(Ok(Some(text))) => Response::ScreenContents { text },
+                        // `None` = built without the `vte-text` feature, so the
+                        // VTE text API is unavailable. Report it explicitly
+                        // rather than returning empty output.
+                        Ok(Ok(None)) => Response::Error(RpcError::Unimplemented(
+                            "read-screen requires building flowmux with --features vte-text".into(),
+                        )),
+                        Ok(Err(e)) => Response::Error(RpcError::NotFound(e)),
+                        Err(_) => Response::Error(RpcError::Internal("bridge closed".into())),
+                    }
+                }
                 Request::BrowserOpen {
                     url,
                     target_pane,

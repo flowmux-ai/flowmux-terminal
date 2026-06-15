@@ -39,6 +39,16 @@ assets = [
 name = "flowmux"
 path = "src/main.rs"
 
+[features]
+# Opt-in: expose `flowmux read-screen` (P0-6) by enabling VTE's text
+# extraction API. This raises the compile-time VTE floor to v0_76, so it
+# is OFF by default to keep the default build at the v0_70 floor that the
+# Ubuntu 22.04 backports-PPA path may depend on. The shipped builds
+# (scripts/install-host.sh + Flatpak) link the patched VTE 0.78.4 and
+# turn this on. Without it, `read-screen` returns an explicit
+# not-supported error instead of failing ambiguously.
+vte-text = ["vte/v0_76"]
+
 [dependencies]
 flowmux-core = { workspace = true }
 flowmux-config = { workspace = true }

@@ -23,7 +23,11 @@ echo "==> building flowmux against patched VTE ($PREFIX)"
 # of the system one. PKG_CONFIG_PATH so the build links the patched headers/.so.
 export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 export RUSTFLAGS="-C link-arg=-Wl,-rpath,$PREFIX/lib ${RUSTFLAGS:-}"
-cargo build --release -p flowmux -p flowmux-cli
+# The patched VTE built above is 0.78.4, so it supports the text
+# extraction API behind `vte-text` — enable it here to ship
+# `flowmux read-screen`. The default (system-VTE) build leaves it off to
+# keep the v0_70 compatibility floor.
+cargo build --release -p flowmux -p flowmux-cli --features flowmux/vte-text
 
 for dir in "$HOME/.local/bin" "$HOME/.cargo/bin"; do
     if [ -d "$dir" ]; then

@@ -549,6 +549,25 @@ impl TerminalPane {
         self.widget.feed_child(bytes);
     }
 
+    /// Plain-text dump of the terminal buffer for `flowmux read-screen`
+    /// (P0-6). Read-only — VTE's text extraction does not mutate the
+    /// grid, selection, or scroll position.
+    ///
+    /// Returns `None` when built without the `vte-text` feature (the
+    /// extraction API needs VTE ≥ 0.76, above the default v0_70 floor);
+    /// the IPC layer turns that into an explicit not-supported error.
+    #[cfg(feature = "vte-text")]
+    pub fn screen_text(&self) -> Option<String> {
+        self.widget
+            .text_format(vte::Format::Text)
+            .map(|g| g.to_string())
+    }
+
+    #[cfg(not(feature = "vte-text"))]
+    pub fn screen_text(&self) -> Option<String> {
+        None
+    }
+
     /// Feed `bytes` to the child, but only *after* any IME syllable still
     /// in preedit (e.g. a composing Hangul block) has been committed —
     /// otherwise the bytes overtake ibus's asynchronous commit and the
