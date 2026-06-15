@@ -188,6 +188,10 @@ pub enum Request {
     /// `flowmux tree` — full workspace → leaf-pane → tab inspection.
     WorkspaceTree,
 
+    /// `flowmux workspace current` — the most-recently-activated
+    /// (currently focused) workspace id, if any.
+    WorkspaceCurrent,
+
     /// `flowmux surface new <workspace>` — opens a new surface (tab).
     SurfaceCreate {
         workspace: WorkspaceId,
@@ -443,6 +447,11 @@ pub enum Response {
     /// Reply to `WorkspaceTree`.
     Tree {
         workspaces: Vec<TreeWorkspace>,
+    },
+    /// Reply to `WorkspaceCurrent`. `id = None` when no workspace has
+    /// been activated yet (e.g. an empty just-launched window).
+    WorkspaceCurrent {
+        id: Option<WorkspaceId>,
     },
     SurfaceCreated {
         id: SurfaceId,

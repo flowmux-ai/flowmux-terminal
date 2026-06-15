@@ -568,6 +568,8 @@ enum WorkspaceOp {
     },
     /// List active workspace IDs.
     Ls,
+    /// Print the currently-focused workspace id (or `(none)`).
+    Current,
 }
 
 #[tokio::main]
@@ -854,6 +856,9 @@ fn build_request(cmd: Cmd) -> anyhow::Result<Request> {
         Cmd::Workspace {
             op: WorkspaceOp::Ls,
         } => Request::WorkspaceList,
+        Cmd::Workspace {
+            op: WorkspaceOp::Current,
+        } => Request::WorkspaceCurrent,
         Cmd::Notify {
             pane,
             title,
@@ -1460,6 +1465,13 @@ fn print_response(r: &Response, json_mode: bool) -> anyhow::Result<()> {
             print!("{}", render_tree(workspaces));
             return Ok(());
         }
+        if let Response::WorkspaceCurrent { id } = r {
+            match id {
+                Some(id) => println!("{id}"),
+                None => println!("(none)"),
+            }
+            return Ok(());
+        }
     }
     let s = if json_mode {
         // Single-line JSON — easier to parse from agent scripts
@@ -1707,6 +1719,15 @@ mod tests {
         assert!(matches!(
             parse_build!("count", &pane_arg, ".result-row"),
             Request::BrowserCount { selector, .. } if selector == ".result-row"
+        ));
+    }
+
+    #[test]
+    fn workspace_current_parses_and_maps_to_request() {
+        let cli = Cli::try_parse_from(["flowmuxctl", "workspace", "current"]).unwrap();
+        assert!(matches!(
+            build_request(cli.cmd).unwrap(),
+            Request::WorkspaceCurrent
         ));
     }
 

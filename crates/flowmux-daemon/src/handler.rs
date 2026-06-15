@@ -96,6 +96,13 @@ impl Handler for DaemonHandler {
                     }
                 }
 
+                Request::WorkspaceCurrent => {
+                    let state = self.store.snapshot().await;
+                    Response::WorkspaceCurrent {
+                        id: state.active_workspace,
+                    }
+                }
+
                 Request::Notify {
                     pane,
                     surface: _,
@@ -210,6 +217,30 @@ mod tests {
             handler.store().get_workspace(id).await.unwrap().name,
             "demo"
         );
+    }
+
+    #[tokio::test]
+    async fn workspace_current_is_none_until_a_workspace_exists() {
+        let handler = DaemonHandler::new(StateStore::new_lazy(State::default()));
+        match handler.handle(Request::WorkspaceCurrent).await {
+            Response::WorkspaceCurrent { id } => assert_eq!(id, None),
+            other => panic!("expected current, got {other:?}"),
+        }
+        let created = match handler
+            .handle(Request::WorkspaceCreate {
+                name: None,
+                root: std::path::PathBuf::from("/tmp/flowmux-current-test"),
+            })
+            .await
+        {
+            Response::WorkspaceCreated { id } => id,
+            other => panic!("expected creation, got {other:?}"),
+        };
+        // The first workspace becomes the active one.
+        match handler.handle(Request::WorkspaceCurrent).await {
+            Response::WorkspaceCurrent { id } => assert_eq!(id, Some(created)),
+            other => panic!("expected current, got {other:?}"),
+        }
     }
 
     #[tokio::test]
