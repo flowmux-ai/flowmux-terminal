@@ -162,6 +162,54 @@ impl Handler for GuiHandler {
                         Err(_) => Response::Error(RpcError::Internal("bridge closed".into())),
                     }
                 }
+                Request::SurfaceFocus { pane, surface } => {
+                    // Validate the pane against live state (reusing the
+                    // tree flattener), then fire the same ActivateSurface
+                    // the tab bar uses. Non-destructive, no dialog.
+                    let known = flowmux_ipc::protocol::describe_workspaces(
+                        &self.inner.store().snapshot().await.workspaces,
+                    )
+                    .iter()
+                    .flat_map(|w| &w.panes)
+                    .any(|p| p.id == pane);
+                    if known {
+                        let _ = self
+                            .bridge
+                            .tx
+                            .send(GtkCommand::ActivateSurface { pane, surface })
+                            .await;
+                        Response::Ok
+                    } else {
+                        Response::Error(RpcError::NotFound(format!("pane not found: {pane}")))
+                    }
+                }
+                Request::SurfaceClose { pane, surface } => {
+                    // Refuse the last-tab-of-last-pane case up front so the
+                    // agent never trips CloseSurface's confirm dialog.
+                    let tabs = self.inner.store().tab_count_in_pane(pane).await;
+                    let panes = self.inner.store().workspace_pane_count_for(pane).await;
+                    if tabs == Some(1) && matches!(panes, Some((_, 1))) {
+                        Response::Error(RpcError::InvalidArgument(
+                            "refusing to close the last tab of the workspace's last pane".into(),
+                        ))
+                    } else {
+                        let (tx, rx) = oneshot::channel();
+                        let _ = self
+                            .bridge
+                            .tx
+                            .send(GtkCommand::CloseSurface {
+                                pane,
+                                surface,
+                                ack: tx,
+                            })
+                            .await;
+                        match rx.await {
+                            Ok(Ok(())) => Response::Ok,
+                            Ok(Err(e)) => Response::Error(RpcError::NotFound(e)),
+                            Err(_) => Response::Error(RpcError::Internal("bridge closed".into())),
+                        }
+                    }
+                }
                 Request::PaneFocus { pane } => {
                     let (tx, rx) = oneshot::channel();
                     let _ = self

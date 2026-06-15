@@ -236,6 +236,21 @@ pub enum Request {
         pane: PaneId,
     },
 
+    /// `flowmux focus-tab <surface> [--pane]` — make a tab (surface) the
+    /// active one in its pane. Non-destructive.
+    SurfaceFocus {
+        pane: PaneId,
+        surface: SurfaceId,
+    },
+
+    /// `flowmux close-tab <surface> [--pane]` — close a tab. Refuses
+    /// (without a dialog) when it is the last tab of the workspace's
+    /// last pane, so an agent's call never blocks on confirmation.
+    SurfaceClose {
+        pane: PaneId,
+        surface: SurfaceId,
+    },
+
     /// `flowmux notify --pane <id> --title ... --body ...`
     Notify {
         pane: Option<PaneId>,

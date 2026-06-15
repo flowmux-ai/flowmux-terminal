@@ -140,6 +140,22 @@ enum Cmd {
     /// a workspace's last pane.
     ClosePane { pane: Option<PaneId> },
 
+    /// Make a tab the active one in its pane. `--pane` falls back to
+    /// `$FLOWMUX_PANE_ID`.
+    FocusTab {
+        surface: SurfaceId,
+        #[arg(long)]
+        pane: Option<PaneId>,
+    },
+
+    /// Close a tab. `--pane` falls back to `$FLOWMUX_PANE_ID`. Refuses
+    /// to close the last tab of a workspace's last pane.
+    CloseTab {
+        surface: SurfaceId,
+        #[arg(long)]
+        pane: Option<PaneId>,
+    },
+
     /// In-app browser automation: `flowmux browser <op> …`. This is the
     /// documented agent-facing surface (see `AGENTS.md`). The older
     /// hyphenated `browser-*` commands remain as hidden compatibility
@@ -930,6 +946,18 @@ fn build_request(cmd: Cmd) -> anyhow::Result<Request> {
                 anyhow::anyhow!("no pane: pass pane:<uuid> or set FLOWMUX_PANE_ID")
             })?;
             Request::PaneClose { pane }
+        }
+        Cmd::FocusTab { surface, pane } => {
+            let pane = pane.or_else(pane_from_env).ok_or_else(|| {
+                anyhow::anyhow!("no pane: pass --pane <uuid> or set FLOWMUX_PANE_ID")
+            })?;
+            Request::SurfaceFocus { pane, surface }
+        }
+        Cmd::CloseTab { surface, pane } => {
+            let pane = pane.or_else(pane_from_env).ok_or_else(|| {
+                anyhow::anyhow!("no pane: pass --pane <uuid> or set FLOWMUX_PANE_ID")
+            })?;
+            Request::SurfaceClose { pane, surface }
         }
         Cmd::Browser { op } => browser_op_to_request(op),
         Cmd::Ssh { target } => Request::SshConnect { target },
@@ -1787,6 +1815,43 @@ mod tests {
         assert!(matches!(
             built.unwrap(),
             Request::PaneReadScreen { pane: got } if got == pane
+        ));
+    }
+
+    #[test]
+    fn focus_tab_and_close_tab_parse_and_map() {
+        let _g = flowmux_pane_env_lock();
+        let pane = PaneId::new();
+        let surface = SurfaceId::new();
+        unsafe {
+            std::env::set_var("FLOWMUX_PANE_ID", pane.to_string());
+        }
+        let focus = build_request(
+            Cli::try_parse_from(["flowmuxctl", "focus-tab", &surface.to_string()])
+                .unwrap()
+                .cmd,
+        );
+        let close = build_request(
+            Cli::try_parse_from([
+                "flowmuxctl",
+                "close-tab",
+                &surface.to_string(),
+                "--pane",
+                &format!("pane:{pane}"),
+            ])
+            .unwrap()
+            .cmd,
+        );
+        unsafe {
+            std::env::remove_var("FLOWMUX_PANE_ID");
+        }
+        assert!(matches!(
+            focus.unwrap(),
+            Request::SurfaceFocus { pane: gp, surface: gs } if gp == pane && gs == surface
+        ));
+        assert!(matches!(
+            close.unwrap(),
+            Request::SurfaceClose { pane: gp, surface: gs } if gp == pane && gs == surface
         ));
     }
 
