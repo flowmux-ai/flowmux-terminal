@@ -114,14 +114,13 @@ enum Cmd {
     /// Send keystrokes to a pane (escape sequences accepted).
     SendKeys { pane: PaneId, keys: String },
 
-    /// Open URL in a new in-app browser pane (splits next to the
-    /// currently focused pane). Default split direction is right.
+    /// In-app browser automation: `flowmux browser <op> …`. This is the
+    /// documented agent-facing surface (see `AGENTS.md`). The older
+    /// hyphenated `browser-*` commands remain as hidden compatibility
+    /// aliases.
     Browser {
-        url: String,
-        #[arg(long, conflicts_with = "down")]
-        right: bool,
-        #[arg(long)]
-        down: bool,
+        #[command(subcommand)]
+        op: BrowserOp,
     },
 
     /// Open a remote workspace over SSH.
@@ -179,39 +178,56 @@ enum Cmd {
         args: Vec<String>,
     },
 
+    // ---- Compatibility aliases ----
+    // The hyphenated `browser-*` commands below predate the documented
+    // `flowmux browser <op>` namespace (see `BrowserOp`). They are kept
+    // working but hidden from `--help` so existing scripts/hooks that
+    // call them do not break.
     /// Take a JSON snapshot of the page in a browser pane.
+    #[command(hide = true)]
     BrowserSnapshot { pane: PaneId },
 
     /// Run JS in a browser pane and print the result.
+    #[command(hide = true)]
     BrowserEval { pane: PaneId, source: String },
 
     /// Navigate a browser pane to a new URL.
+    #[command(hide = true)]
     BrowserNavigate { pane: PaneId, url: String },
     /// Move a browser pane backward in session history.
+    #[command(hide = true)]
     BrowserBack { pane: PaneId },
     /// Move a browser pane forward in session history.
+    #[command(hide = true)]
     BrowserForward { pane: PaneId },
     /// Reload the current page in a browser pane.
+    #[command(hide = true)]
     BrowserReload { pane: PaneId },
     /// Print the current URL of a browser pane.
+    #[command(hide = true)]
     BrowserUrl { pane: PaneId },
     /// Print the current page title of a browser pane.
+    #[command(hide = true)]
     BrowserTitle { pane: PaneId },
-    /// Click an element by its `data-flowmux-ref` id (from a snapshot).
+    /// Click an element by its ref id (from a snapshot).
+    #[command(hide = true)]
     BrowserClick { pane: PaneId, target: String },
     /// Fill an input/textarea by ref id with `value`.
+    #[command(hide = true)]
     BrowserFill {
         pane: PaneId,
         target: String,
         value: String,
     },
     /// Select a `<select>` option by value or visible text.
+    #[command(hide = true)]
     BrowserSelect {
         pane: PaneId,
         target: String,
         value: String,
     },
     /// Scroll an element into view, then offset the viewport by (x, y).
+    #[command(hide = true)]
     BrowserScroll {
         pane: PaneId,
         target: String,
@@ -219,14 +235,19 @@ enum Cmd {
         y: i32,
     },
     /// Type literal text into the active element of a browser pane.
+    #[command(hide = true)]
     BrowserType { pane: PaneId, text: String },
     /// Press a single named key (Enter, Tab, ArrowDown, …).
+    #[command(hide = true)]
     BrowserPress { pane: PaneId, key: String },
     /// Read innerText of an element.
+    #[command(hide = true)]
     BrowserText { pane: PaneId, target: String },
     /// Read .value of an input/textarea/select.
+    #[command(hide = true)]
     BrowserValue { pane: PaneId, target: String },
     /// Read an attribute (`href`, `id`, `class`, …) of an element.
+    #[command(hide = true)]
     BrowserAttr {
         pane: PaneId,
         target: String,
@@ -283,6 +304,98 @@ enum Cmd {
     /// it's safe to re-run after installing Claude / Codex / OpenCode
     /// for the first time.
     Fix,
+}
+
+/// `flowmux browser <op>` — the documented agent-facing browser surface.
+///
+/// Every pane argument accepts `pane:<uuid>`, `surface:<uuid>`, or a bare
+/// `<uuid>` (handled by `PaneId`'s `FromStr`). Refs (`eN`) come from the
+/// most recent `browser snapshot` of the same pane and are resolved
+/// server-side via the daemon's `RefStore`.
+#[derive(Subcommand)]
+enum BrowserOp {
+    /// Open URL in a new in-app browser pane (splits next to the
+    /// currently focused pane). Default split direction is right.
+    Open {
+        url: String,
+        #[arg(long, conflicts_with = "down")]
+        right: bool,
+        #[arg(long)]
+        down: bool,
+    },
+    /// Take a JSON snapshot of the page. Markdown tree + refs map; the
+    /// live DOM is never modified.
+    Snapshot { pane: PaneId },
+    /// Run JS in a browser pane and print the result.
+    Eval { pane: PaneId, source: String },
+    /// Navigate a browser pane to a new URL.
+    Navigate { pane: PaneId, url: String },
+    /// Move a browser pane backward in session history.
+    Back { pane: PaneId },
+    /// Move a browser pane forward in session history.
+    Forward { pane: PaneId },
+    /// Reload the current page in a browser pane.
+    Reload { pane: PaneId },
+    /// Print the current URL of a browser pane.
+    Url { pane: PaneId },
+    /// Print the current page title of a browser pane.
+    Title { pane: PaneId },
+    /// Click an element by ref id (from a snapshot).
+    Click { pane: PaneId, target: String },
+    /// Fill an input/textarea by ref id with `value`.
+    Fill {
+        pane: PaneId,
+        target: String,
+        value: String,
+    },
+    /// Select a `<select>` option by value or visible text.
+    Select {
+        pane: PaneId,
+        target: String,
+        value: String,
+    },
+    /// Scroll an element into view, then offset the viewport by (x, y).
+    Scroll {
+        pane: PaneId,
+        target: String,
+        x: i32,
+        y: i32,
+    },
+    /// Type literal text into the active element of a browser pane.
+    Type { pane: PaneId, text: String },
+    /// Press a single named key (Enter, Tab, ArrowDown, …).
+    Press { pane: PaneId, key: String },
+    /// Read innerText of an element.
+    Text { pane: PaneId, target: String },
+    /// Read .value of an input/textarea/select.
+    Value { pane: PaneId, target: String },
+    /// Read an attribute (`href`, `id`, `class`, …) of an element.
+    Attr {
+        pane: PaneId,
+        target: String,
+        name: String,
+    },
+    /// Double-click an element by ref id.
+    #[command(name = "dblclick")]
+    DblClick { pane: PaneId, target: String },
+    /// Hover the pointer over an element by ref id.
+    Hover { pane: PaneId, target: String },
+    /// Focus an element by ref id.
+    Focus { pane: PaneId, target: String },
+    /// Blur (unfocus) an element by ref id.
+    Blur { pane: PaneId, target: String },
+    /// Check a checkbox/radio by ref id.
+    Check { pane: PaneId, target: String },
+    /// Uncheck a checkbox by ref id.
+    Uncheck { pane: PaneId, target: String },
+    /// Print `true`/`false` for an element's visibility.
+    IsVisible { pane: PaneId, target: String },
+    /// Print `true`/`false` for whether an element is enabled.
+    IsEnabled { pane: PaneId, target: String },
+    /// Print `true`/`false` for whether a checkbox/radio is checked.
+    IsChecked { pane: PaneId, target: String },
+    /// Count elements matching a CSS selector.
+    Count { pane: PaneId, selector: String },
 }
 
 #[derive(Subcommand)]
@@ -576,6 +689,79 @@ async fn notify_stream(client: &Client, pane: Option<PaneId>) -> anyhow::Result<
     Ok(())
 }
 
+/// Map a `flowmux browser <op>` invocation to its IPC request. Every
+/// arm maps 1:1 to an existing `Request::Browser*` variant, so the new
+/// namespace and the hidden hyphenated aliases share one handler path.
+fn browser_op_to_request(op: BrowserOp) -> Request {
+    match op {
+        BrowserOp::Open {
+            url,
+            right: _,
+            down,
+        } => {
+            // `--down` splits horizontally; everything else (including the
+            // default and `--right`) splits vertically, matching the prior
+            // `flowmux browser <url>` behavior.
+            let direction = if down {
+                SplitDirection::Horizontal
+            } else {
+                SplitDirection::Vertical
+            };
+            // When invoked from a terminal that flowmux spawned, the PTY's
+            // `FLOWMUX_PANE_ID` lets the daemon resolve "next to me" without
+            // the caller passing a pane id explicitly.
+            Request::BrowserOpen {
+                url,
+                target_pane: pane_from_env(),
+                direction,
+            }
+        }
+        BrowserOp::Snapshot { pane } => Request::BrowserSnapshot { pane },
+        BrowserOp::Eval { pane, source } => Request::BrowserEval { pane, source },
+        BrowserOp::Navigate { pane, url } => Request::BrowserNavigate { pane, url },
+        BrowserOp::Back { pane } => Request::BrowserBack { pane },
+        BrowserOp::Forward { pane } => Request::BrowserForward { pane },
+        BrowserOp::Reload { pane } => Request::BrowserReload { pane },
+        BrowserOp::Url { pane } => Request::BrowserUrl { pane },
+        BrowserOp::Title { pane } => Request::BrowserTitle { pane },
+        BrowserOp::Click { pane, target } => Request::BrowserClick { pane, target },
+        BrowserOp::Fill {
+            pane,
+            target,
+            value,
+        } => Request::BrowserFill {
+            pane,
+            target,
+            value,
+        },
+        BrowserOp::Select {
+            pane,
+            target,
+            value,
+        } => Request::BrowserSelect {
+            pane,
+            target,
+            value,
+        },
+        BrowserOp::Scroll { pane, target, x, y } => Request::BrowserScroll { pane, target, x, y },
+        BrowserOp::Type { pane, text } => Request::BrowserType { pane, text },
+        BrowserOp::Press { pane, key } => Request::BrowserPress { pane, key },
+        BrowserOp::Text { pane, target } => Request::BrowserText { pane, target },
+        BrowserOp::Value { pane, target } => Request::BrowserValue { pane, target },
+        BrowserOp::Attr { pane, target, name } => Request::BrowserAttr { pane, target, name },
+        BrowserOp::DblClick { pane, target } => Request::BrowserDblClick { pane, target },
+        BrowserOp::Hover { pane, target } => Request::BrowserHover { pane, target },
+        BrowserOp::Focus { pane, target } => Request::BrowserFocus { pane, target },
+        BrowserOp::Blur { pane, target } => Request::BrowserBlur { pane, target },
+        BrowserOp::Check { pane, target } => Request::BrowserCheck { pane, target },
+        BrowserOp::Uncheck { pane, target } => Request::BrowserUncheck { pane, target },
+        BrowserOp::IsVisible { pane, target } => Request::BrowserIsVisible { pane, target },
+        BrowserOp::IsEnabled { pane, target } => Request::BrowserIsEnabled { pane, target },
+        BrowserOp::IsChecked { pane, target } => Request::BrowserIsChecked { pane, target },
+        BrowserOp::Count { pane, selector } => Request::BrowserCount { pane, selector },
+    }
+}
+
 fn build_request(cmd: Cmd) -> anyhow::Result<Request> {
     Ok(match cmd {
         Cmd::Ping => Request::Ping,
@@ -625,24 +811,7 @@ fn build_request(cmd: Cmd) -> anyhow::Result<Request> {
             Request::PaneSplit { pane, direction }
         }
         Cmd::SendKeys { pane, keys } => Request::PaneSendKeys { pane, keys },
-        Cmd::Browser { url, right, down } => {
-            let direction = if down {
-                SplitDirection::Horizontal
-            } else if right {
-                SplitDirection::Vertical
-            } else {
-                SplitDirection::Vertical
-            };
-            // When invoked from a terminal that flowmux spawned, the
-            // PTY's `FLOWMUX_PANE_ID` lets the daemon resolve "next to me"
-            // without the caller passing a pane id explicitly. cmux's
-            // CLI uses the same fallback (`CMUX_SURFACE_ID`).
-            Request::BrowserOpen {
-                url,
-                target_pane: pane_from_env(),
-                direction,
-            }
-        }
+        Cmd::Browser { op } => browser_op_to_request(op),
         Cmd::Ssh { target } => Request::SshConnect { target },
         Cmd::NotifyStream { .. } => unreachable!("handled before request build"),
         Cmd::ClaudeTeams { count, root, args } => Request::ClaudeTeams {
@@ -777,8 +946,13 @@ async fn run_hooks_doctor(socket: Option<PathBuf>) {
     let resolved = env_socket
         .clone()
         .unwrap_or_else(flowmux_config::paths::runtime_socket);
-    println!("socket primary   : {resolved:?} (source={})",
-        if env_socket.is_some() { "env" } else { "fallback" }
+    println!(
+        "socket primary   : {resolved:?} (source={})",
+        if env_socket.is_some() {
+            "env"
+        } else {
+            "fallback"
+        }
     );
     println!(
         "  exists?        : {} symlink_target?={:?}",
@@ -911,22 +1085,46 @@ async fn run_claude_hook_event(
         ClaudeHookEvent::Stop => {
             let body = input.last_assistant_message.as_deref();
             reqs.push(build_stop_notify("Claude", body, pane, surface));
-            reqs.push(build_activity_update("claude", Some(Idle), pid, pane, surface));
+            reqs.push(build_activity_update(
+                "claude",
+                Some(Idle),
+                pid,
+                pane,
+                surface,
+            ));
         }
         ClaudeHookEvent::Notification => {
             let msg = input.message.as_deref();
             reqs.push(build_notification_notify("Claude", msg, pane, surface));
-            reqs.push(build_activity_update("claude", Some(NeedsInput), pid, pane, surface));
+            reqs.push(build_activity_update(
+                "claude",
+                Some(NeedsInput),
+                pid,
+                pane,
+                surface,
+            ));
         }
         // SessionStart registers the agent's presence (and PID, for the
         // liveness sweep) without claiming it is working yet.
         ClaudeHookEvent::SessionStart => {
-            reqs.push(build_activity_update("claude", Some(Idle), pid, pane, surface));
+            reqs.push(build_activity_update(
+                "claude",
+                Some(Idle),
+                pid,
+                pane,
+                surface,
+            ));
         }
         // A new prompt or an imminent tool call means the agent is
         // actively working this turn — and clears any "needs input".
         ClaudeHookEvent::PromptSubmit | ClaudeHookEvent::PreToolUse => {
-            reqs.push(build_activity_update("claude", Some(Running), pid, pane, surface));
+            reqs.push(build_activity_update(
+                "claude",
+                Some(Running),
+                pid,
+                pane,
+                surface,
+            ));
         }
         // Real teardown (covers Ctrl+C, where Stop never fires). The
         // daemon PID sweep is the backstop for a hard kill that skips
@@ -981,7 +1179,13 @@ async fn run_generic_agent_hook_event(
             let input = read_codex_hook_input(args);
             let msg = input.message.as_deref();
             reqs.push(build_notification_notify(agent, msg, pane, surface));
-            reqs.push(build_activity_update(agent, Some(NeedsInput), pid, pane, surface));
+            reqs.push(build_activity_update(
+                agent,
+                Some(NeedsInput),
+                pid,
+                pane,
+                surface,
+            ));
         }
         // Codex / OpenCode register presence on session start (no
         // wrapper PID for these, so the daemon clears them via Stop→Idle
@@ -997,10 +1201,7 @@ async fn run_generic_agent_hook_event(
             }
         }
         None => {
-            flowmux_config::notify_debug!(
-                "cli/hook",
-                "daemon not reachable — request dropped"
-            );
+            flowmux_config::notify_debug!("cli/hook", "daemon not reachable — request dropped");
         }
     }
     Ok(())
@@ -1271,6 +1472,134 @@ mod tests {
         ));
     }
 
+    /// The `flowmux browser <op> pane:<uuid> …` namespace is the
+    /// documented agent contract (`AGENTS.md`). Parse the literal argv
+    /// the docs show — including the `pane:` prefix — and confirm it
+    /// reaches the right IPC request without translation.
+    #[test]
+    fn browser_namespace_parses_documented_examples() {
+        let pane = PaneId::new();
+        let pane_arg = format!("pane:{pane}");
+
+        let cli = Cli::try_parse_from(["flowmuxctl", "browser", "snapshot", &pane_arg])
+            .expect("`browser snapshot pane:<uuid>` must parse");
+        let req = build_request(cli.cmd).unwrap();
+        assert!(matches!(req, Request::BrowserSnapshot { pane: got } if got == pane));
+
+        let cli = Cli::try_parse_from(["flowmuxctl", "browser", "click", &pane_arg, "e3"])
+            .expect("`browser click pane:<uuid> e3` must parse");
+        let req = build_request(cli.cmd).unwrap();
+        assert!(
+            matches!(req, Request::BrowserClick { pane: got, target } if got == pane && target == "e3")
+        );
+
+        let cli = Cli::try_parse_from([
+            "flowmuxctl",
+            "browser",
+            "fill",
+            &pane_arg,
+            "e1",
+            "user@example.com",
+        ])
+        .expect("`browser fill pane:<uuid> e1 <value>` must parse");
+        let req = build_request(cli.cmd).unwrap();
+        assert!(matches!(
+            req,
+            Request::BrowserFill { pane: got, target, value }
+                if got == pane && target == "e1" && value == "user@example.com"
+        ));
+    }
+
+    /// The `open` verb keeps the env-based "next to me" fallback the old
+    /// bare `flowmux browser <url>` form had.
+    #[test]
+    fn browser_open_namespace_uses_pane_env_fallback() {
+        let _g = flowmux_pane_env_lock();
+        let pane = PaneId::new();
+        unsafe {
+            std::env::set_var("FLOWMUX_PANE_ID", pane.to_string());
+        }
+        let cli =
+            Cli::try_parse_from(["flowmuxctl", "browser", "open", "https://example.com"]).unwrap();
+        let req = build_request(cli.cmd).unwrap();
+        unsafe {
+            std::env::remove_var("FLOWMUX_PANE_ID");
+        }
+        assert!(matches!(
+            req,
+            Request::BrowserOpen { url, target_pane, direction: _ }
+                if url == "https://example.com" && target_pane == Some(pane)
+        ));
+    }
+
+    /// Every Phase-5 verb that previously existed only in IPC must now be
+    /// reachable from the CLI namespace and map to its request 1:1.
+    #[test]
+    fn browser_namespace_exposes_phase5_verbs() {
+        let pane = PaneId::new();
+        let pane_arg = format!("pane:{pane}");
+        // (argv verb, then assert the resulting Request variant)
+        macro_rules! parse_build {
+            ($($arg:expr),+ $(,)?) => {{
+                let cli = Cli::try_parse_from(["flowmuxctl", "browser", $($arg),+])
+                    .expect("verb must parse");
+                build_request(cli.cmd).unwrap()
+            }};
+        }
+
+        assert!(matches!(
+            parse_build!("dblclick", &pane_arg, "e3"),
+            Request::BrowserDblClick { target, .. } if target == "e3"
+        ));
+        assert!(matches!(
+            parse_build!("hover", &pane_arg, "e3"),
+            Request::BrowserHover { .. }
+        ));
+        assert!(matches!(
+            parse_build!("focus", &pane_arg, "e3"),
+            Request::BrowserFocus { .. }
+        ));
+        assert!(matches!(
+            parse_build!("blur", &pane_arg, "e3"),
+            Request::BrowserBlur { .. }
+        ));
+        assert!(matches!(
+            parse_build!("check", &pane_arg, "e3"),
+            Request::BrowserCheck { .. }
+        ));
+        assert!(matches!(
+            parse_build!("uncheck", &pane_arg, "e3"),
+            Request::BrowserUncheck { .. }
+        ));
+        assert!(matches!(
+            parse_build!("is-visible", &pane_arg, "e3"),
+            Request::BrowserIsVisible { .. }
+        ));
+        assert!(matches!(
+            parse_build!("is-enabled", &pane_arg, "e3"),
+            Request::BrowserIsEnabled { .. }
+        ));
+        assert!(matches!(
+            parse_build!("is-checked", &pane_arg, "e7"),
+            Request::BrowserIsChecked { target, .. } if target == "e7"
+        ));
+        assert!(matches!(
+            parse_build!("count", &pane_arg, ".result-row"),
+            Request::BrowserCount { selector, .. } if selector == ".result-row"
+        ));
+    }
+
+    /// The hidden hyphenated aliases must keep mapping to the same
+    /// requests so pre-namespace scripts/hooks do not break.
+    #[test]
+    fn browser_hyphenated_aliases_still_work() {
+        let pane = PaneId::new();
+        let cli =
+            Cli::try_parse_from(["flowmuxctl", "browser-click", &pane.to_string(), "e3"]).unwrap();
+        let req = build_request(cli.cmd).unwrap();
+        assert!(matches!(req, Request::BrowserClick { target, .. } if target == "e3"));
+    }
+
     /// Serialize every test that reads/writes FLOWMUX_PANE_ID — cargo
     /// runs tests in parallel within a single binary, and they share
     /// process-global env. Without this lock, a `set_var` from one
@@ -1292,9 +1621,11 @@ mod tests {
         }
 
         let req = build_request(Cmd::Browser {
-            url: "https://example.com".into(),
-            right: false,
-            down: false,
+            op: BrowserOp::Open {
+                url: "https://example.com".into(),
+                right: false,
+                down: false,
+            },
         })
         .unwrap();
         assert!(matches!(
@@ -1317,9 +1648,11 @@ mod tests {
         }
 
         let req = build_request(Cmd::Browser {
-            url: "https://example.com".into(),
-            right: false,
-            down: false,
+            op: BrowserOp::Open {
+                url: "https://example.com".into(),
+                right: false,
+                down: false,
+            },
         })
         .unwrap();
 
@@ -1341,9 +1674,11 @@ mod tests {
         }
 
         let req = build_request(Cmd::Browser {
-            url: "https://example.com".into(),
-            right: false,
-            down: false,
+            op: BrowserOp::Open {
+                url: "https://example.com".into(),
+                right: false,
+                down: false,
+            },
         })
         .unwrap();
 
@@ -1368,9 +1703,11 @@ mod tests {
         }
 
         let req = build_request(Cmd::Browser {
-            url: "https://a.test".into(),
-            right: true,
-            down: false,
+            op: BrowserOp::Open {
+                url: "https://a.test".into(),
+                right: true,
+                down: false,
+            },
         })
         .unwrap();
         assert!(matches!(
@@ -1391,9 +1728,11 @@ mod tests {
         }
 
         let req = build_request(Cmd::Browser {
-            url: "https://a.test".into(),
-            right: false,
-            down: true,
+            op: BrowserOp::Open {
+                url: "https://a.test".into(),
+                right: false,
+                down: true,
+            },
         })
         .unwrap();
         assert!(matches!(
@@ -1820,13 +2159,15 @@ mod tests {
         ])
         .expect("clap must parse the OpenCode plugin's argv shape");
         let Cmd::Hooks {
-            op: HooksOp::Opencode {
-                event: AgentHookEvent::Stop {
-                    pane: got_pane,
-                    surface: got_surface,
-                    args,
+            op:
+                HooksOp::Opencode {
+                    event:
+                        AgentHookEvent::Stop {
+                            pane: got_pane,
+                            surface: got_surface,
+                            args,
+                        },
                 },
-            },
         } = cli.cmd
         else {
             panic!("expected hooks opencode stop variant");
@@ -1854,13 +2195,15 @@ mod tests {
         ])
         .expect("flags-before-payload must parse");
         let Cmd::Hooks {
-            op: HooksOp::Opencode {
-                event: AgentHookEvent::Notification {
-                    pane: got_pane,
-                    surface,
-                    args,
+            op:
+                HooksOp::Opencode {
+                    event:
+                        AgentHookEvent::Notification {
+                            pane: got_pane,
+                            surface,
+                            args,
+                        },
                 },
-            },
         } = cli.cmd
         else {
             panic!("expected hooks opencode notification variant");
@@ -1878,13 +2221,15 @@ mod tests {
         let cli = Cli::try_parse_from(["flowmuxctl", "hooks", "opencode", "stop"])
             .expect("flag-less stop must still parse");
         let Cmd::Hooks {
-            op: HooksOp::Opencode {
-                event: AgentHookEvent::Stop {
-                    pane,
-                    surface,
-                    args,
+            op:
+                HooksOp::Opencode {
+                    event:
+                        AgentHookEvent::Stop {
+                            pane,
+                            surface,
+                            args,
+                        },
                 },
-            },
         } = cli.cmd
         else {
             panic!("expected hooks opencode stop variant");
@@ -1910,11 +2255,10 @@ mod tests {
         ])
         .expect("codex must accept the same flag");
         let Cmd::Hooks {
-            op: HooksOp::Codex {
-                event: AgentHookEvent::Stop {
-                    pane: got_pane, ..
+            op:
+                HooksOp::Codex {
+                    event: AgentHookEvent::Stop { pane: got_pane, .. },
                 },
-            },
         } = cli.cmd
         else {
             panic!("expected hooks codex stop variant");
