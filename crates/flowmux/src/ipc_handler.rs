@@ -705,3 +705,108 @@ fn shell_escape(arg: String) -> String {
     let escaped = arg.replace('\'', "'\\''");
     format!("'{escaped}'")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flowmux_core::{PaneId, SurfaceId, WorkspaceId};
+    use flowmux_daemon::StateStore;
+    use flowmux_state::State;
+
+    /// A GuiHandler over a store holding one workspace (one pane, one
+    /// tab). The bridge receiver is returned so the caller keeps it
+    /// alive; the safety branches under test all return *before* sending
+    /// a GtkCommand, so no GTK loop is needed to drive them.
+    async fn single_pane_handler() -> (
+        GuiHandler,
+        async_channel::Receiver<GtkCommand>,
+        PaneId,
+        SurfaceId,
+    ) {
+        let store = StateStore::new_lazy(State::default());
+        store
+            .create_workspace(
+                Some("t".into()),
+                std::path::PathBuf::from("/tmp/flowmux-ipc-test"),
+            )
+            .await;
+        let ws = store
+            .snapshot()
+            .await
+            .workspaces
+            .into_iter()
+            .next()
+            .unwrap();
+        let tree = flowmux_ipc::protocol::describe_workspaces(std::slice::from_ref(&ws));
+        let pane = tree[0].panes[0].id;
+        let tab = tree[0].panes[0].tabs[0].id;
+        let (bridge, rx) = Bridge::new();
+        let handler = GuiHandler::new(DaemonHandler::new(store), bridge);
+        (handler, rx, pane, tab)
+    }
+
+    /// close-pane on the workspace's only pane must be refused up front —
+    /// this is the guard that stops an agent's IPC call from tripping the
+    /// confirm dialog (and destroying the workspace).
+    #[tokio::test]
+    async fn close_pane_refuses_the_last_pane_without_a_dialog() {
+        let (handler, _rx, pane, _tab) = single_pane_handler().await;
+        assert!(matches!(
+            handler.handle(Request::PaneClose { pane }).await,
+            Response::Error(RpcError::InvalidArgument(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn close_pane_reports_not_found_for_unknown_pane() {
+        let (handler, _rx, _pane, _tab) = single_pane_handler().await;
+        assert!(matches!(
+            handler
+                .handle(Request::PaneClose {
+                    pane: PaneId::new()
+                })
+                .await,
+            Response::Error(RpcError::NotFound(_))
+        ));
+    }
+
+    /// close-tab on the last tab of the last pane would also destroy the
+    /// workspace — it must be refused without a dialog.
+    #[tokio::test]
+    async fn close_tab_refuses_last_tab_of_last_pane() {
+        let (handler, _rx, pane, tab) = single_pane_handler().await;
+        assert!(matches!(
+            handler
+                .handle(Request::SurfaceClose { pane, surface: tab })
+                .await,
+            Response::Error(RpcError::InvalidArgument(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn workspace_focus_reports_not_found_for_unknown_id() {
+        let (handler, _rx, _pane, _tab) = single_pane_handler().await;
+        assert!(matches!(
+            handler
+                .handle(Request::WorkspaceFocus {
+                    workspace: WorkspaceId::new()
+                })
+                .await,
+            Response::Error(RpcError::NotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn surface_focus_reports_not_found_for_unknown_pane() {
+        let (handler, _rx, _pane, _tab) = single_pane_handler().await;
+        assert!(matches!(
+            handler
+                .handle(Request::SurfaceFocus {
+                    pane: PaneId::new(),
+                    surface: SurfaceId::new(),
+                })
+                .await,
+            Response::Error(RpcError::NotFound(_))
+        ));
+    }
+}
