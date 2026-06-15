@@ -133,6 +133,13 @@ enum Cmd {
     /// the `vte-text` feature.
     ReadScreen { pane: Option<PaneId> },
 
+    /// Grab keyboard focus for a pane (falls back to `$FLOWMUX_PANE_ID`).
+    FocusPane { pane: Option<PaneId> },
+
+    /// Close a pane (falls back to `$FLOWMUX_PANE_ID`). Refuses to close
+    /// a workspace's last pane.
+    ClosePane { pane: Option<PaneId> },
+
     /// In-app browser automation: `flowmux browser <op> …`. This is the
     /// documented agent-facing surface (see `AGENTS.md`). The older
     /// hyphenated `browser-*` commands remain as hidden compatibility
@@ -911,6 +918,18 @@ fn build_request(cmd: Cmd) -> anyhow::Result<Request> {
                 anyhow::anyhow!("no pane: pass pane:<uuid> or set FLOWMUX_PANE_ID")
             })?;
             Request::PaneReadScreen { pane }
+        }
+        Cmd::FocusPane { pane } => {
+            let pane = pane.or_else(pane_from_env).ok_or_else(|| {
+                anyhow::anyhow!("no pane: pass pane:<uuid> or set FLOWMUX_PANE_ID")
+            })?;
+            Request::PaneFocus { pane }
+        }
+        Cmd::ClosePane { pane } => {
+            let pane = pane.or_else(pane_from_env).ok_or_else(|| {
+                anyhow::anyhow!("no pane: pass pane:<uuid> or set FLOWMUX_PANE_ID")
+            })?;
+            Request::PaneClose { pane }
         }
         Cmd::Browser { op } => browser_op_to_request(op),
         Cmd::Ssh { target } => Request::SshConnect { target },
@@ -1768,6 +1787,22 @@ mod tests {
         assert!(matches!(
             built.unwrap(),
             Request::PaneReadScreen { pane: got } if got == pane
+        ));
+    }
+
+    #[test]
+    fn focus_pane_and_close_pane_parse_and_map() {
+        let pane = PaneId::new();
+        let cli =
+            Cli::try_parse_from(["flowmuxctl", "focus-pane", &format!("pane:{pane}")]).unwrap();
+        assert!(matches!(
+            build_request(cli.cmd).unwrap(),
+            Request::PaneFocus { pane: got } if got == pane
+        ));
+        let cli = Cli::try_parse_from(["flowmuxctl", "close-pane", &pane.to_string()]).unwrap();
+        assert!(matches!(
+            build_request(cli.cmd).unwrap(),
+            Request::PaneClose { pane: got } if got == pane
         ));
     }
 

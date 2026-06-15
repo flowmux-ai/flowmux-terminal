@@ -2279,6 +2279,18 @@ impl WindowController {
                 };
                 let _ = ack.send(res);
             }
+            GtkCommand::FocusPane { pane, ack } => {
+                // Existence check up front so a bad id is reported rather
+                // than silently no-op'd by focus_pane. Reuses the same
+                // grab-focus primitive the notification-click path uses.
+                let known = self.pane_registry.borrow().pane_frame(pane).is_some();
+                if known {
+                    self.focus_pane(pane);
+                    let _ = ack.send(Ok(()));
+                } else {
+                    let _ = ack.send(Err(format!("pane not found: {pane}")));
+                }
+            }
             GtkCommand::NotificationOnPane { pane, title, body } => {
                 tracing::info!(%pane, %title, %body, "pane notification");
                 // TODO: paint blue ring + sidebar badge.
@@ -6257,6 +6269,33 @@ mod tests {
         assert!(
             controller.notifications.find(id_b).unwrap().read,
             "entry b should be marked read after workspace activation"
+        );
+    }
+
+    /// `FocusPane` (the `flowmux focus-pane` path) grabs focus for a
+    /// known pane id and returns a clean error for an unknown one rather
+    /// than silently no-op'ing.
+    #[gtk::test]
+    async fn focus_pane_command_acks_known_pane_and_errors_unknown() {
+        let (controller, _ws_id, pane) =
+            build_single_workspace_controller("com.flowmux.App.UiTest.FocusPane").await;
+
+        let (tx, rx) = oneshot::channel();
+        controller
+            .dispatch(GtkCommand::FocusPane { pane, ack: tx })
+            .await;
+        assert!(rx.await.unwrap().is_ok(), "known pane should focus");
+
+        let (tx, rx) = oneshot::channel();
+        controller
+            .dispatch(GtkCommand::FocusPane {
+                pane: PaneId::new(),
+                ack: tx,
+            })
+            .await;
+        assert!(
+            rx.await.unwrap().is_err(),
+            "unknown pane id must return an error, not silently no-op"
         );
     }
 

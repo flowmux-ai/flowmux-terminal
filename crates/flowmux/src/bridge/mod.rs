@@ -169,6 +169,12 @@ pub enum GtkCommand {
         pane: PaneId,
         ack: oneshot::Sender<Result<Option<String>, String>>,
     },
+    /// Grab keyboard focus for a pane by id (`flowmux focus-pane`).
+    /// `Err` when the id is not a live pane. Non-destructive.
+    FocusPane {
+        pane: PaneId,
+        ack: oneshot::Sender<Result<(), String>>,
+    },
     /// Split the focused pane and re-render its workspace. Used by
     /// keyboard shortcuts (the IPC verb path goes through the daemon
     /// directly via `Request::PaneSplit`).

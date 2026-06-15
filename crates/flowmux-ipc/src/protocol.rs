@@ -223,6 +223,19 @@ pub enum Request {
         pane: PaneId,
     },
 
+    /// `flowmux focus-pane <pane>` — grab keyboard focus for a pane.
+    /// Non-destructive.
+    PaneFocus {
+        pane: PaneId,
+    },
+
+    /// `flowmux close-pane <pane>` — close a pane. Refuses (without a
+    /// dialog) when it is the workspace's last pane, so an agent's call
+    /// never blocks on a GUI confirmation.
+    PaneClose {
+        pane: PaneId,
+    },
+
     /// `flowmux notify --pane <id> --title ... --body ...`
     Notify {
         pane: Option<PaneId>,

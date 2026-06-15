@@ -162,6 +162,51 @@ impl Handler for GuiHandler {
                         Err(_) => Response::Error(RpcError::Internal("bridge closed".into())),
                     }
                 }
+                Request::PaneFocus { pane } => {
+                    let (tx, rx) = oneshot::channel();
+                    let _ = self
+                        .bridge
+                        .tx
+                        .send(GtkCommand::FocusPane { pane, ack: tx })
+                        .await;
+                    match rx.await {
+                        Ok(Ok(())) => Response::Ok,
+                        Ok(Err(e)) => Response::Error(RpcError::NotFound(e)),
+                        Err(_) => Response::Error(RpcError::Internal("bridge closed".into())),
+                    }
+                }
+                Request::PaneClose { pane } => {
+                    // Peek the pane count up front. Closing the workspace's
+                    // last pane is what triggers CloseFocused's confirm
+                    // dialog; refuse it here (with a clear error) so an
+                    // agent's IPC call never blocks on user input.
+                    match self.inner.store().workspace_pane_count_for(pane).await {
+                        None => {
+                            Response::Error(RpcError::NotFound(format!("pane not found: {pane}")))
+                        }
+                        Some((_, 1)) => Response::Error(RpcError::InvalidArgument(
+                            "refusing to close the workspace's last pane; close the workspace \
+                             instead"
+                                .into(),
+                        )),
+                        Some((_, _)) => {
+                            // >1 pane: CloseFocused takes the no-dialog path.
+                            let (tx, rx) = oneshot::channel();
+                            let _ = self
+                                .bridge
+                                .tx
+                                .send(GtkCommand::CloseFocused { pane, ack: tx })
+                                .await;
+                            match rx.await {
+                                Ok(Ok(())) => Response::Ok,
+                                Ok(Err(e)) => Response::Error(RpcError::NotFound(e)),
+                                Err(_) => {
+                                    Response::Error(RpcError::Internal("bridge closed".into()))
+                                }
+                            }
+                        }
+                    }
+                }
                 Request::BrowserOpen {
                     url,
                     target_pane,
