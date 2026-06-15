@@ -7,7 +7,7 @@
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use flowmux_config::paths;
-use flowmux_core::{NotificationLevel, PaneId, SplitDirection, SurfaceId};
+use flowmux_core::{NotificationLevel, PaneId, SplitDirection, SurfaceId, WorkspaceId};
 use flowmux_ipc::{client::Client, protocol::Request, protocol::Response};
 use std::ffi::OsString;
 use std::io::Read;
@@ -575,6 +575,8 @@ enum WorkspaceOp {
     Ls,
     /// Print the currently-focused workspace id (or `(none)`).
     Current,
+    /// Make a workspace the active one (like clicking its sidebar row).
+    Focus { workspace: WorkspaceId },
 }
 
 #[tokio::main]
@@ -864,6 +866,9 @@ fn build_request(cmd: Cmd) -> anyhow::Result<Request> {
         Cmd::Workspace {
             op: WorkspaceOp::Current,
         } => Request::WorkspaceCurrent,
+        Cmd::Workspace {
+            op: WorkspaceOp::Focus { workspace },
+        } => Request::WorkspaceFocus { workspace },
         Cmd::Notify {
             pane,
             title,
@@ -1772,6 +1777,17 @@ mod tests {
         assert!(matches!(
             build_request(cli.cmd).unwrap(),
             Request::WorkspaceCurrent
+        ));
+    }
+
+    #[test]
+    fn workspace_focus_parses_and_maps_to_request() {
+        let ws = flowmux_core::WorkspaceId::new();
+        let cli =
+            Cli::try_parse_from(["flowmuxctl", "workspace", "focus", &ws.to_string()]).unwrap();
+        assert!(matches!(
+            build_request(cli.cmd).unwrap(),
+            Request::WorkspaceFocus { workspace } if workspace == ws
         ));
     }
 

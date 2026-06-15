@@ -101,6 +101,31 @@ impl Handler for GuiHandler {
                         }
                     }
                 }
+                Request::WorkspaceFocus { workspace } => {
+                    // Validate against live state so a bad id returns a
+                    // clean NotFound instead of a silent no-op. The focus
+                    // itself reuses ActivateWorkspace — the exact operation
+                    // a sidebar row click performs: no dialog, reversible,
+                    // creates/destroys nothing.
+                    let exists = self
+                        .inner
+                        .store()
+                        .snapshot()
+                        .await
+                        .workspaces
+                        .iter()
+                        .any(|w| w.id == workspace);
+                    if exists {
+                        let _ = self
+                            .bridge
+                            .tx
+                            .send(GtkCommand::ActivateWorkspace { id: workspace })
+                            .await;
+                        Response::Ok
+                    } else {
+                        Response::Error(RpcError::NotFound(workspace.to_string()))
+                    }
+                }
                 Request::PaneSendKeys { pane, keys } => {
                     let (tx, rx) = oneshot::channel();
                     let _ = self

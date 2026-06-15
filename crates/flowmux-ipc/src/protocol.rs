@@ -192,6 +192,13 @@ pub enum Request {
     /// (currently focused) workspace id, if any.
     WorkspaceCurrent,
 
+    /// `flowmux workspace focus <id>` — make a workspace the active one
+    /// (same operation as clicking its sidebar row). Reversible; does
+    /// not create or destroy anything.
+    WorkspaceFocus {
+        workspace: WorkspaceId,
+    },
+
     /// `flowmux surface new <workspace>` — opens a new surface (tab).
     SurfaceCreate {
         workspace: WorkspaceId,
