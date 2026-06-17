@@ -154,6 +154,7 @@ pub struct PaneCallbacks {
     pub on_new_surface: Rc<RefCell<dyn FnMut(PaneId)>>,
     /// Pane-local new browser tab.
     pub on_new_browser_surface: Rc<RefCell<dyn FnMut(PaneId)>>,
+    pub on_show_file_browser: Rc<RefCell<dyn FnMut(PaneId)>>,
     /// Pane-local close tab.
     pub on_close_surface: Rc<RefCell<dyn FnMut(PaneId, SurfaceId)>>,
     /// Pane-local rename tab.

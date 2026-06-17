@@ -9,6 +9,7 @@ use crate::bridge::{
 use crate::keybindings::FocusedPane;
 use crate::notifications::{NotificationStore, RemoveOutcome, SetDesktopIdResult};
 use crate::theme::ResolvedTheme;
+use crate::ui::file_browser::FileBrowserPanel;
 use crate::ui::sidebar::Sidebar;
 use crate::ui::terminal_pane::PaneCallbacks;
 use crate::ui::workspace_view::{
@@ -38,6 +39,8 @@ pub struct WindowController {
     /// Outermost `gtk::Paned` separating the side panel and content area.
     /// Its position is saved to the store on exit and restored on next launch.
     sidebar_split: gtk::Paned,
+    file_browser_split: gtk::Paned,
+    file_browser: FileBrowserPanel,
     stack: gtk::Stack,
     surfaces: Rc<RefCell<HashMap<WorkspaceId, gtk::Widget>>>,
     pane_registry: Rc<RefCell<PaneRegistry>>,
@@ -324,8 +327,23 @@ impl WindowController {
             .position(stored_sidebar_pos)
             .build();
 
+        let file_browser = FileBrowserPanel::new();
+        let file_browser_for_close = file_browser.clone();
+        file_browser.connect_close(move || file_browser_for_close.hide());
+
+        let file_browser_split = gtk::Paned::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .start_child(&split)
+            .end_child(file_browser.widget())
+            .resize_start_child(true)
+            .resize_end_child(false)
+            .shrink_start_child(false)
+            .shrink_end_child(false)
+            .position(980)
+            .build();
+
         let content_overlay = gtk::Overlay::new();
-        content_overlay.set_child(Some(&split));
+        content_overlay.set_child(Some(&file_browser_split));
         let clipboard_toast = ClipboardToast::new();
         content_overlay.add_overlay(clipboard_toast.widget());
 
@@ -362,6 +380,8 @@ impl WindowController {
             focused_pane,
             sidebar,
             sidebar_split: split,
+            file_browser_split,
+            file_browser,
             stack,
             surfaces,
             pane_registry,
@@ -1181,6 +1201,55 @@ impl WindowController {
     /// Updates both store and side panel. The daemon setter is idempotent so
     /// repeated calls for the same ws_id, such as cwd polling, only mark disk
     /// dirty and rebuild GTK when values actually change.
+    async fn file_browser_root_for_pane(&self, pane: PaneId) -> Option<std::path::PathBuf> {
+        if let Some(dir) = self.pane_registry.borrow().current_dir_for_pane(pane) {
+            return Some(dir);
+        }
+
+        let ws_id = self.pane_registry.borrow().workspace_of_pane(pane)?;
+        let active_surface = self.pane_registry.borrow().active_surface(pane);
+        let ws = self.store.get_workspace(ws_id).await?;
+
+        if let Some(surface) = active_surface {
+            if let Some(surface) = ws
+                .surfaces
+                .iter()
+                .find_map(|surface_root| surface_root.root_pane.find_surface(pane, surface))
+            {
+                if let SurfaceKind::Terminal { cwd: Some(cwd), .. } = surface.kind {
+                    return Some(cwd);
+                }
+            }
+        }
+
+        Some(ws.root_dir)
+    }
+
+    async fn show_file_browser_for_pane(&self, pane: PaneId) {
+        let root = self
+            .file_browser_root_for_pane(pane)
+            .await
+            .or_else(|| std::env::current_dir().ok());
+
+        if let Some(root) = root {
+            let width = self.window.width();
+            if width > 420 {
+                self.file_browser_split.set_position((width - 320).max(240));
+            }
+            self.file_browser.show_for_root(root);
+        }
+    }
+
+    async fn refresh_file_browser_from_focus(&self) {
+        if !self.file_browser.widget().is_visible() {
+            return;
+        }
+
+        if let Some(pane) = self.focused_pane.get() {
+            self.show_file_browser_for_pane(pane).await;
+        }
+    }
+
     async fn sync_workspace_label(&self, ws_id: WorkspaceId) {
         let Some(ws) = self.store.get_workspace(ws_id).await else {
             return;
@@ -1419,6 +1488,7 @@ impl WindowController {
         if let Some(ws_id) = ws_id {
             self.sync_workspace_label(ws_id).await;
         }
+        self.refresh_file_browser_from_focus().await;
     }
 
     /// True when the GUI is the foreground window AND the user is
@@ -1699,6 +1769,9 @@ impl WindowController {
                         .await;
                 }
             }
+            GtkCommand::ShowFileBrowser { pane } => {
+                self.show_file_browser_for_pane(pane).await;
+            }
             GtkCommand::OpenUrlInBrowserTab { pane, url } => {
                 // Open a Ctrl-clicked terminal URL in a new browser tab in the
                 // same pane. BrowserPane::build receives the URL as initial_url
@@ -1878,6 +1951,7 @@ impl WindowController {
                 if let Some(ws_id) = ws_id {
                     self.sync_workspace_label(ws_id).await;
                 }
+                self.refresh_file_browser_from_focus().await;
             }
             GtkCommand::BrowserUriChanged { pane, surface, url } => {
                 let _ = self.store.update_browser_url(pane, surface, url).await;
@@ -1932,6 +2006,7 @@ impl WindowController {
             }
             GtkCommand::PaneFocused { pane } => {
                 self.on_pane_focused(pane).await;
+                self.refresh_file_browser_from_focus().await;
             }
             GtkCommand::NewWorkspace { root } => {
                 // Prefer the focused pane's cwd so a new tab opens
@@ -2287,6 +2362,7 @@ impl WindowController {
                 if known {
                     self.focus_pane(pane);
                     let _ = ack.send(Ok(()));
+                    self.refresh_file_browser_from_focus().await;
                 } else {
                     let _ = ack.send(Err(format!("pane not found: {pane}")));
                 }
@@ -3255,6 +3331,15 @@ fn make_callbacks(
                 let bridge = bridge.clone();
                 glib::MainContext::default().spawn_local(async move {
                     let _ = bridge.tx.send(GtkCommand::NewBrowserSurface { pane }).await;
+                });
+            }))
+        },
+        on_show_file_browser: {
+            let bridge = bridge.clone();
+            Rc::new(RefCell::new(move |pane| {
+                let bridge = bridge.clone();
+                glib::MainContext::default().spawn_local(async move {
+                    let _ = bridge.tx.send(GtkCommand::ShowFileBrowser { pane }).await;
                 });
             }))
         },

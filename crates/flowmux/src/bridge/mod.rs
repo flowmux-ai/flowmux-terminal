@@ -200,6 +200,8 @@ pub enum GtkCommand {
     NewSurface { pane: PaneId },
     /// Add an empty about:blank browser tab to the same pane.
     NewBrowserSurface { pane: PaneId },
+    /// Show the right-side FileBrowser rooted at `pane`'s current directory.
+    ShowFileBrowser { pane: PaneId },
     /// Open a Ctrl-clicked terminal URL in a new browser tab in the same
     /// pane. `pane` is the source terminal pane and `url` has already had
     /// trailing punctuation trimmed.

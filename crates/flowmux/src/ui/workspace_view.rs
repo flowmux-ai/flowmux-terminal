@@ -109,6 +109,26 @@ impl PaneRegistry {
             .copied()
     }
 
+    pub fn current_dir_for_pane(&self, pane: PaneId) -> Option<std::path::PathBuf> {
+        if let Some(surface) = self.active_terminal_by_pane.get(&pane) {
+            if let Some(dir) = self
+                .terminals
+                .get(surface)
+                .and_then(|term| term.current_dir())
+            {
+                return Some(dir);
+            }
+        }
+
+        self.surface_tabs.get(&pane).and_then(|tabs| {
+            tabs.iter().find_map(|(surface, _)| {
+                self.terminals
+                    .get(surface)
+                    .and_then(|term| term.current_dir())
+            })
+        })
+    }
+
     pub fn next_surface(&self, pane: PaneId) -> Option<SurfaceId> {
         self.adjacent_surface(pane, 1)
     }
@@ -814,6 +834,14 @@ fn build_leaf_pane(
         add_browser.connect_clicked(move |_| (cb.borrow_mut())(pane_id));
     }
     tools.append(&add_browser);
+
+    let file_browser = pane_tool_button("folder-symbolic", "File browser");
+    {
+        let cb = callbacks.on_show_file_browser.clone();
+        let pane_id = pane_id;
+        file_browser.connect_clicked(move |_| (cb.borrow_mut())(pane_id));
+    }
+    tools.append(&file_browser);
 
     stack.set_visible_child_name(&active.to_string());
     tabbar.append(&tabs);

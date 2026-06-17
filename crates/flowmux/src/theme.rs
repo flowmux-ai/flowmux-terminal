@@ -405,6 +405,27 @@ paned > separator {{
 .flowmux-pane-tab.flowmux-pane-tab-drop-after {{
     box-shadow: inset -2px 0 0 rgba(96, 165, 250, 0.95);
 }}
+.flowmux-file-browser {{
+    background-color: {sidebar};
+    color: {fg};
+    border-left: 1px solid {border};
+}}
+.flowmux-file-browser-header {{
+    padding: 8px 8px 6px 10px;
+    border-bottom: 1px solid {border};
+}}
+.flowmux-file-browser-list {{
+    background: transparent;
+}}
+.flowmux-file-browser-row {{
+    min-height: 24px;
+}}
+.flowmux-file-browser-row:hover {{
+    background-color: {sidebar_hover};
+}}
+.flowmux-file-browser-row:selected {{
+    background-color: {control_hover};
+}}
 .flowmux-clipboard-toast {{
     background-color: {toast_bg};
     color: {fg};
