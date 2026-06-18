@@ -24,6 +24,7 @@ pub struct FileBrowserPanel {
     status: gtk::Label,
     close_button: gtk::Button,
     model: Rc<RefCell<FileBrowserModel>>,
+    delete_handler: Rc<RefCell<Box<dyn Fn(&Path) -> io::Result<()>>>>,
     on_focus_out: Rc<RefCell<Option<Box<dyn Fn(FocusDir)>>>>,
     on_escape: Rc<RefCell<Option<Box<dyn Fn()>>>>,
 }
@@ -134,6 +135,7 @@ impl FileBrowserPanel {
             status,
             close_button,
             model: Rc::new(RefCell::new(FileBrowserModel::default())),
+            delete_handler: Rc::new(RefCell::new(Box::new(move_to_trash))),
             on_focus_out: Rc::new(RefCell::new(None)),
             on_escape: Rc::new(RefCell::new(None)),
         };
@@ -159,6 +161,11 @@ impl FileBrowserPanel {
 
     pub fn connect_escape<F: Fn() + 'static>(&self, f: F) {
         *self.on_escape.borrow_mut() = Some(Box::new(f));
+    }
+
+    #[cfg(test)]
+    fn set_delete_handler<F: Fn(&Path) -> io::Result<()> + 'static>(&self, f: F) {
+        *self.delete_handler.borrow_mut() = Box::new(f);
     }
 
     pub fn show_for_root(&self, root: PathBuf) {
@@ -323,6 +330,15 @@ impl FileBrowserPanel {
             return glib::Propagation::Stop;
         }
 
+        if keyval == gdk::Key::Delete {
+            if state.contains(gdk::ModifierType::SHIFT_MASK) {
+                self.show_delete_confirmation();
+            } else {
+                self.delete_focused_to_trash();
+            }
+            return glib::Propagation::Stop;
+        }
+
         glib::Propagation::Proceed
     }
 
@@ -390,6 +406,98 @@ impl FileBrowserPanel {
             Ok(false) => {}
             Err(err) => self.show_status(&format!("Paste failed: {err}")),
         }
+    }
+
+    fn delete_focused_to_trash(&self) {
+        let (path, next_focus) = {
+            let mut model = self.model.borrow_mut();
+            let Some(path) = model.focused_path() else {
+                return;
+            };
+            let next_focus = model.focus_candidate_after_removed_path(&path);
+            (path, next_focus)
+        };
+
+        let result = (self.delete_handler.borrow())(&path);
+        match result {
+            Ok(()) => self.finish_deleted_path(&path, next_focus),
+            Err(err) => self.show_status(&format!("Delete failed: {err}")),
+        }
+    }
+
+    fn show_delete_confirmation(&self) {
+        let Some(path) = self.model.borrow_mut().focused_path() else {
+            return;
+        };
+
+        let popup = gtk::Window::builder()
+            .modal(true)
+            .title("Delete permanently?")
+            .default_width(360)
+            .resizable(false)
+            .build();
+
+        if let Some(window) = self
+            .root
+            .root()
+            .and_then(|root| root.downcast::<gtk::Window>().ok())
+        {
+            popup.set_transient_for(Some(&window));
+        }
+
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        content.set_margin_top(12);
+        content.set_margin_bottom(12);
+        content.set_margin_start(12);
+        content.set_margin_end(12);
+
+        let label = gtk::Label::new(Some(&format!(
+            "Really delete \"{}\" permanently?",
+            display_name(&path)
+        )));
+        label.set_xalign(0.0);
+        label.set_wrap(true);
+        content.append(&label);
+
+        let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        buttons.set_halign(gtk::Align::End);
+        let cancel = gtk::Button::with_label("Cancel");
+        let yes = gtk::Button::with_label("Yes");
+        yes.add_css_class("destructive-action");
+        buttons.append(&cancel);
+        buttons.append(&yes);
+        content.append(&buttons);
+        popup.set_child(Some(&content));
+
+        let popup_for_cancel = popup.clone();
+        cancel.connect_clicked(move |_| popup_for_cancel.close());
+
+        let panel = self.clone();
+        let popup_for_yes = popup.clone();
+        yes.connect_clicked(move |_| {
+            panel.delete_path_permanently(path.clone());
+            popup_for_yes.close();
+        });
+
+        popup.present();
+    }
+
+    fn delete_path_permanently(&self, path: PathBuf) {
+        let next_focus = self
+            .model
+            .borrow()
+            .focus_candidate_after_removed_path(&path);
+        match permanently_delete_path(&path) {
+            Ok(()) => self.finish_deleted_path(&path, next_focus),
+            Err(err) => self.show_status(&format!("Delete failed: {err}")),
+        }
+    }
+
+    fn finish_deleted_path(&self, path: &Path, next_focus: Option<PathBuf>) {
+        self.model
+            .borrow_mut()
+            .forget_removed_path(path, next_focus);
+        self.refresh();
     }
 
     fn show_rename_dialog(&self) {
@@ -677,6 +785,39 @@ impl FileBrowserModel {
         } else {
             false
         }
+    }
+
+    fn focus_candidate_after_removed_path(&self, removed: &Path) -> Option<PathBuf> {
+        let rows = self.visible_rows();
+        let index = rows.iter().position(|row| row.path == removed)?;
+        rows.iter()
+            .skip(index + 1)
+            .find(|row| !path_is_or_under(&row.path, removed))
+            .or_else(|| {
+                rows[..index]
+                    .iter()
+                    .rev()
+                    .find(|row| !path_is_or_under(&row.path, removed))
+            })
+            .map(|row| row.path.clone())
+    }
+
+    fn forget_removed_path(&mut self, removed: &Path, next_focus: Option<PathBuf>) {
+        self.expanded
+            .retain(|path| !path_is_or_under(path, removed));
+        if let Some(clipboard) = self.clipboard.as_mut() {
+            clipboard
+                .paths
+                .retain(|path| !path_is_or_under(path, removed));
+        }
+        if self
+            .clipboard
+            .as_ref()
+            .is_some_and(|clipboard| clipboard.paths.is_empty())
+        {
+            self.clipboard = None;
+        }
+        self.focused = next_focus;
     }
 
     fn move_focus(&mut self, delta: isize) -> bool {
@@ -1056,6 +1197,26 @@ fn key_to_focus_dir(key: gdk::Key) -> Option<FocusDir> {
     }
 }
 
+fn path_is_or_under(path: &Path, parent: &Path) -> bool {
+    path == parent || path.starts_with(parent)
+}
+
+fn move_to_trash(path: &Path) -> io::Result<()> {
+    gio::File::for_path(path)
+        .trash(None::<&gio::Cancellable>)
+        .map(|_| ())
+        .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))
+}
+
+fn permanently_delete_path(path: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    }
+}
+
 fn valid_file_name(name: &str) -> io::Result<&str> {
     use std::path::Component;
 
@@ -1179,10 +1340,38 @@ mod tests {
         None
     }
 
+    fn find_button(widget: &gtk::Widget, label: &str) -> Option<gtk::Button> {
+        if let Ok(button) = widget.clone().downcast::<gtk::Button>() {
+            if button.label().as_deref() == Some(label) {
+                return Some(button);
+            }
+        }
+
+        let mut child = widget.first_child();
+        while let Some(widget) = child {
+            if let Some(button) = find_button(&widget, label) {
+                return Some(button);
+            }
+            child = widget.next_sibling();
+        }
+
+        None
+    }
+
     fn close_rename_windows() {
         for widget in gtk::Window::list_toplevels() {
             if let Ok(window) = widget.downcast::<gtk::Window>() {
                 if window.title().as_deref() == Some("Rename") {
+                    window.close();
+                }
+            }
+        }
+    }
+
+    fn close_delete_windows() {
+        for widget in gtk::Window::list_toplevels() {
+            if let Ok(window) = widget.downcast::<gtk::Window>() {
+                if window.title().as_deref() == Some("Delete permanently?") {
                     window.close();
                 }
             }
@@ -1607,5 +1796,79 @@ mod tests {
         assert!(!file.exists());
         assert!(dest.join("a.txt").exists());
         assert!(panel.model.borrow().rows().iter().all(|row| !row.cut));
+    }
+
+    #[gtk::test]
+    fn behavior_delete_moves_focused_entry_to_trash_and_refreshes_visible_rows() {
+        let tmp = TestDir::new("behavior-delete");
+        let file = tmp.file("a.txt");
+        tmp.file("b.txt");
+
+        let panel = FileBrowserPanel::new();
+        panel.show_for_root(tmp.path.clone());
+        panel.focus_path(file.clone());
+
+        let deleted = Rc::new(RefCell::new(None));
+        let deleted_for_handler = deleted.clone();
+        panel.set_delete_handler(move |path| {
+            *deleted_for_handler.borrow_mut() = Some(path.to_path_buf());
+            fs::remove_file(path)
+        });
+
+        assert_eq!(
+            panel.handle_key(gdk::Key::Delete, gdk::ModifierType::empty()),
+            glib::Propagation::Stop
+        );
+
+        assert_eq!(deleted.borrow().as_ref(), Some(&file));
+        assert!(!file.exists());
+        assert_eq!(panel_row_names(&panel), vec!["b.txt"]);
+        assert_eq!(panel_focused_path(&panel), Some(tmp.path.join("b.txt")));
+    }
+
+    #[gtk::test]
+    fn behavior_shift_delete_requires_confirmation_before_permanent_delete() {
+        let tmp = TestDir::new("behavior-shift-delete");
+        let file = tmp.file("a.txt");
+        tmp.file("b.txt");
+
+        let panel = FileBrowserPanel::new();
+        panel.show_for_root(tmp.path.clone());
+        panel.focus_path(file.clone());
+
+        assert_eq!(
+            panel.handle_key(gdk::Key::Delete, gdk::ModifierType::SHIFT_MASK),
+            glib::Propagation::Stop
+        );
+        assert!(file.exists());
+
+        let popup = gtk::Window::list_toplevels()
+            .into_iter()
+            .filter_map(|widget| widget.downcast::<gtk::Window>().ok())
+            .find(|window| window.title().as_deref() == Some("Delete permanently?"))
+            .expect("Shift+Delete should open a permanent delete confirmation popup");
+        let yes = find_button(popup.upcast_ref(), "Yes")
+            .expect("permanent delete confirmation should include a Yes button");
+
+        yes.emit_clicked();
+
+        assert!(!file.exists());
+        assert_eq!(panel_row_names(&panel), vec!["b.txt"]);
+        assert_eq!(panel_focused_path(&panel), Some(tmp.path.join("b.txt")));
+        close_delete_windows();
+    }
+
+    #[test]
+    fn permanently_delete_path_removes_files_and_directories() {
+        let tmp = TestDir::new("permanent-delete");
+        let file = tmp.file("file.txt");
+        let dir = tmp.dir("dir");
+        fs::write(dir.join("child.txt"), "child").unwrap();
+
+        permanently_delete_path(&file).unwrap();
+        permanently_delete_path(&dir).unwrap();
+
+        assert!(!file.exists());
+        assert!(!dir.exists());
     }
 }
