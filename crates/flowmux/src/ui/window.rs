@@ -36,6 +36,7 @@ pub struct WindowController {
     pub window: adw::ApplicationWindow,
     pub focused_pane: FocusedPane,
     file_browser_source_pane: FocusedPane,
+    file_browser_active: Rc<Cell<bool>>,
     sidebar: Sidebar,
     /// Outermost `gtk::Paned` separating the side panel and content area.
     /// Its position is saved to the store on exit and restored on next launch.
@@ -259,6 +260,7 @@ impl WindowController {
     ) -> Self {
         let focused_pane: FocusedPane = Rc::new(Cell::new(None));
         let file_browser_source_pane: FocusedPane = Rc::new(Cell::new(None));
+        let file_browser_active = Rc::new(Cell::new(false));
         let notifications = NotificationStore::new();
         let stack = gtk::Stack::new();
         stack.set_transition_type(gtk::StackTransitionType::Crossfade);
@@ -331,7 +333,11 @@ impl WindowController {
 
         let file_browser = FileBrowserPanel::new();
         let file_browser_for_close = file_browser.clone();
-        file_browser.connect_close(move || file_browser_for_close.hide());
+        let file_browser_active_for_close = file_browser_active.clone();
+        file_browser.connect_close(move || {
+            file_browser_active_for_close.set(false);
+            file_browser_for_close.hide();
+        });
         let file_browser_bridge = bridge.clone();
         file_browser.connect_focus_out(move |dir| {
             let bridge = file_browser_bridge.clone();
@@ -401,6 +407,7 @@ impl WindowController {
             window,
             focused_pane,
             file_browser_source_pane,
+            file_browser_active,
             sidebar,
             sidebar_split: split,
             file_browser_split,
@@ -1256,6 +1263,7 @@ impl WindowController {
             .or_else(|| std::env::current_dir().ok());
 
         if let Some(root) = root {
+            self.file_browser_active.set(true);
             let width = self.window.width();
             if width > 420 {
                 self.file_browser_split.set_position((width - 320).max(240));
@@ -1269,11 +1277,13 @@ impl WindowController {
             if let Some(pane) = self.focused_pane.get() {
                 self.file_browser_source_pane.set(Some(pane));
             }
+            self.file_browser_active.set(true);
             self.file_browser.grab_focus();
         }
     }
 
     fn focus_out_of_file_browser(&self, dir: FocusDir) {
+        self.file_browser_active.set(false);
         let Some(from) =
             file_browser_return_pane(self.focused_pane.get(), self.file_browser_source_pane.get())
         else {
@@ -1295,12 +1305,28 @@ impl WindowController {
     }
 
     fn close_file_browser_and_restore_focus(&self) {
+        self.file_browser_active.set(false);
         self.file_browser.hide();
         if let Some(pane) =
             file_browser_return_pane(self.focused_pane.get(), self.file_browser_source_pane.get())
         {
             self.focused_pane.set(Some(pane));
             self.focus_pane(pane);
+        }
+    }
+
+    async fn focus_direction_from_command(&self, from: Option<PaneId>, dir: FocusDir) {
+        if self.file_browser_active.get()
+            && self.file_browser_source_pane.get().is_some()
+            && (from.is_none() || from == self.file_browser_source_pane.get())
+        {
+            self.focus_out_of_file_browser(dir);
+            return;
+        }
+
+        match from {
+            Some(pane) => self.focus_direction_or_file_browser(pane, dir),
+            None => self.focus_first_leaf_of_active_workspace().await,
         }
     }
 
@@ -1818,10 +1844,9 @@ impl WindowController {
                     }
                 }
             }
-            GtkCommand::FocusDirection { from, dir } => match from {
-                Some(p) => self.focus_direction_or_file_browser(p, dir),
-                None => self.focus_first_leaf_of_active_workspace().await,
-            },
+            GtkCommand::FocusDirection { from, dir } => {
+                self.focus_direction_from_command(from, dir).await;
+            }
             GtkCommand::FileBrowserFocusOut { dir } => {
                 self.focus_out_of_file_browser(dir);
             }
@@ -5066,6 +5091,40 @@ mod tests {
         controller.focus_out_of_file_browser(FocusDir::Left);
 
         assert_eq!(controller.focused_pane.get(), Some(pane));
+    }
+
+    #[gtk::test]
+    async fn file_browser_focus_direction_command_uses_file_browser_focus_out() {
+        let (controller, _ws_id, pane) =
+            build_single_workspace_controller("com.flowmux.App.UiTest.FileBrowserFocusCommand")
+                .await;
+
+        controller.file_browser.widget().set_visible(true);
+        controller.file_browser_source_pane.set(Some(pane));
+        controller.file_browser_active.set(true);
+        controller.focused_pane.set(None);
+
+        controller
+            .dispatch(GtkCommand::FocusDirection {
+                from: Some(pane),
+                dir: FocusDir::Left,
+            })
+            .await;
+
+        assert_eq!(controller.focused_pane.get(), Some(pane));
+        assert!(!controller.file_browser_active.get());
+
+        controller.file_browser_active.set(true);
+        controller.focused_pane.set(None);
+        controller
+            .dispatch(GtkCommand::FocusDirection {
+                from: None,
+                dir: FocusDir::Left,
+            })
+            .await;
+
+        assert_eq!(controller.focused_pane.get(), Some(pane));
+        assert!(!controller.file_browser_active.get());
     }
 
     #[gtk::test]

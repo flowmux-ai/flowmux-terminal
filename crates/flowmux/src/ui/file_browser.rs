@@ -1208,9 +1208,9 @@ fn open_file(path: &Path) {
 }
 
 fn key_to_focus_dir(key: gdk::Key) -> Option<FocusDir> {
-    if key == gdk::Key::Left {
+    if key == gdk::Key::Left || key == gdk::Key::Back {
         Some(FocusDir::Left)
-    } else if key == gdk::Key::Right {
+    } else if key == gdk::Key::Right || key == gdk::Key::Forward {
         Some(FocusDir::Right)
     } else if key == gdk::Key::Up {
         Some(FocusDir::Up)
@@ -1822,6 +1822,18 @@ mod tests {
             glib::Propagation::Stop
         );
         assert_eq!(*focus_out.borrow(), Some(FocusDir::Left));
+
+        assert_eq!(
+            panel.handle_key(gdk::Key::Back, gdk::ModifierType::ALT_MASK),
+            glib::Propagation::Stop
+        );
+        assert_eq!(*focus_out.borrow(), Some(FocusDir::Left));
+
+        assert_eq!(
+            panel.handle_key(gdk::Key::Forward, gdk::ModifierType::ALT_MASK),
+            glib::Propagation::Stop
+        );
+        assert_eq!(*focus_out.borrow(), Some(FocusDir::Right));
 
         *focus_out.borrow_mut() = None;
         assert_eq!(
