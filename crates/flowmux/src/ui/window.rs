@@ -35,6 +35,7 @@ use webkit6::prelude::*;
 pub struct WindowController {
     pub window: adw::ApplicationWindow,
     pub focused_pane: FocusedPane,
+    file_browser_source_pane: FocusedPane,
     sidebar: Sidebar,
     /// Outermost `gtk::Paned` separating the side panel and content area.
     /// Its position is saved to the store on exit and restored on next launch.
@@ -257,6 +258,7 @@ impl WindowController {
         tokio_handle: Option<tokio::runtime::Handle>,
     ) -> Self {
         let focused_pane: FocusedPane = Rc::new(Cell::new(None));
+        let file_browser_source_pane: FocusedPane = Rc::new(Cell::new(None));
         let notifications = NotificationStore::new();
         let stack = gtk::Stack::new();
         stack.set_transition_type(gtk::StackTransitionType::Crossfade);
@@ -334,7 +336,20 @@ impl WindowController {
         file_browser.connect_focus_out(move |dir| {
             let bridge = file_browser_bridge.clone();
             glib::MainContext::default().spawn_local(async move {
-                let _ = bridge.tx.send(GtkCommand::FileBrowserFocusOut { dir }).await;
+                let _ = bridge
+                    .tx
+                    .send(GtkCommand::FileBrowserFocusOut { dir })
+                    .await;
+            });
+        });
+        let file_browser_bridge = bridge.clone();
+        file_browser.connect_escape(move || {
+            let bridge = file_browser_bridge.clone();
+            glib::MainContext::default().spawn_local(async move {
+                let _ = bridge
+                    .tx
+                    .send(GtkCommand::FileBrowserCloseAndRestoreFocus)
+                    .await;
             });
         });
 
@@ -385,6 +400,7 @@ impl WindowController {
         let controller = Self {
             window,
             focused_pane,
+            file_browser_source_pane,
             sidebar,
             sidebar_split: split,
             file_browser_split,
@@ -1233,6 +1249,7 @@ impl WindowController {
     }
 
     async fn show_file_browser_for_pane(&self, pane: PaneId) {
+        self.file_browser_source_pane.set(Some(pane));
         let root = self
             .file_browser_root_for_pane(pane)
             .await
@@ -1249,17 +1266,41 @@ impl WindowController {
 
     fn focus_file_browser(&self) {
         if self.file_browser.widget().is_visible() {
+            if let Some(pane) = self.focused_pane.get() {
+                self.file_browser_source_pane.set(Some(pane));
+            }
             self.file_browser.grab_focus();
         }
     }
 
     fn focus_out_of_file_browser(&self, dir: FocusDir) {
-        if let Some(from) = self.focused_pane.get() {
-            let before = self.focused_pane.get();
-            self.focus_in_direction(from, dir);
-            if self.focused_pane.get() == before {
-                self.focus_pane(from);
-            }
+        let Some(from) =
+            file_browser_return_pane(self.focused_pane.get(), self.file_browser_source_pane.get())
+        else {
+            return;
+        };
+
+        if dir == FocusDir::Left {
+            self.focused_pane.set(Some(from));
+            self.focus_pane(from);
+            return;
+        }
+
+        let before = self.focused_pane.get();
+        self.focus_in_direction(from, dir);
+        if self.focused_pane.get() == before || self.focused_pane.get().is_none() {
+            self.focused_pane.set(Some(from));
+            self.focus_pane(from);
+        }
+    }
+
+    fn close_file_browser_and_restore_focus(&self) {
+        self.file_browser.hide();
+        if let Some(pane) =
+            file_browser_return_pane(self.focused_pane.get(), self.file_browser_source_pane.get())
+        {
+            self.focused_pane.set(Some(pane));
+            self.focus_pane(pane);
         }
     }
 
@@ -1270,6 +1311,7 @@ impl WindowController {
             && self.file_browser.widget().is_visible()
             && self.focused_pane.get() == before
         {
+            self.file_browser_source_pane.set(Some(from));
             self.focus_file_browser();
         }
     }
@@ -1663,17 +1705,17 @@ impl WindowController {
                         // restart for shortcut edits to take effect.
                         // set_accels_for_action overwrites the same keys so a
                         // second pass on the live ApplicationWindow's app is safe.
-                        if let Some(app) = window
+                    if let Some(app) = window
                             .application()
                             .and_then(|a| a.downcast::<adw::Application>().ok())
-                        {
-                            crate::keybindings::install_accels(&app, &opts);
-                        } else {
-                            tracing::warn!(
+                    {
+                        crate::keybindings::install_accels(&app, &opts);
+                    } else {
+                        tracing::warn!(
                             "options applied without keybinding re-install — window had no Application; restart to pick up shortcut changes"
                         );
-                        }
-                        tracing::info!(
+                    }
+                    tracing::info!(
                             zoom_percent = opts.zoom_percent,
                             engine = ?opts.default_browser_engine,
                             focus_border_color = %opts.focus_border_color,
@@ -1782,7 +1824,10 @@ impl WindowController {
             },
             GtkCommand::FileBrowserFocusOut { dir } => {
                 self.focus_out_of_file_browser(dir);
-            },
+            }
+            GtkCommand::FileBrowserCloseAndRestoreFocus => {
+                self.close_file_browser_and_restore_focus();
+            }
             GtkCommand::NewSurface { pane } => {
                 let cwd = {
                     let r = self.pane_registry.borrow();
@@ -3955,6 +4000,10 @@ pub fn spawn_dispatch_loop(rx: async_channel::Receiver<GtkCommand>, controller: 
     });
 }
 
+fn file_browser_return_pane(focused: Option<PaneId>, source: Option<PaneId>) -> Option<PaneId> {
+    source.or(focused)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4993,6 +5042,34 @@ mod tests {
     /// grab_focus on the new workspace's first leaf; that grab_focus updates
     /// focused_pane through on_focus. If this flow breaks, focused_pane still
     /// points at the previous workspace and Alt+arrow starts from the wrong pane.
+    #[test]
+    fn file_browser_return_pane_prefers_saved_source_when_no_pane_is_focused() {
+        let focused = PaneId::new();
+        let source = PaneId::new();
+
+        assert_eq!(file_browser_return_pane(None, Some(source)), Some(source));
+        assert_eq!(
+            file_browser_return_pane(Some(focused), Some(source)),
+            Some(source)
+        );
+        assert_eq!(file_browser_return_pane(Some(focused), None), Some(focused));
+    }
+
+    #[gtk::test]
+    async fn file_browser_escape_hides_panel_and_restores_saved_source_focus() {
+        let (controller, _ws_id, pane) =
+            build_single_workspace_controller("com.flowmux.App.UiTest.FileBrowserEscape").await;
+
+        controller.file_browser_source_pane.set(Some(pane));
+        controller.focused_pane.set(None);
+        controller.file_browser.widget().set_visible(true);
+
+        controller.close_file_browser_and_restore_focus();
+
+        assert!(!controller.file_browser.widget().is_visible());
+        assert_eq!(controller.focused_pane.get(), Some(pane));
+    }
+
     #[gtk::test]
     async fn clicking_second_workspace_moves_focus_into_it_so_alt_arrow_stays_there() {
         adw::init().expect("libadwaita should initialize in GTK test");

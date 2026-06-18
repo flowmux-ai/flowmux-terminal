@@ -204,6 +204,8 @@ pub enum GtkCommand {
     ShowFileBrowser { pane: PaneId },
     /// Move keyboard focus out of the right-side FileBrowser.
     FileBrowserFocusOut { dir: FocusDir },
+    /// Close the right-side FileBrowser and restore focus to the source pane.
+    FileBrowserCloseAndRestoreFocus,
     /// Open a Ctrl-clicked terminal URL in a new browser tab in the same
     /// pane. `pane` is the source terminal pane and `url` has already had
     /// trailing punctuation trimmed.

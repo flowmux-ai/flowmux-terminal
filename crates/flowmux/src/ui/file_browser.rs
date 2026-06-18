@@ -25,6 +25,7 @@ pub struct FileBrowserPanel {
     close_button: gtk::Button,
     model: Rc<RefCell<FileBrowserModel>>,
     on_focus_out: Rc<RefCell<Option<Box<dyn Fn(FocusDir)>>>>,
+    on_escape: Rc<RefCell<Option<Box<dyn Fn()>>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,6 +135,7 @@ impl FileBrowserPanel {
             close_button,
             model: Rc::new(RefCell::new(FileBrowserModel::default())),
             on_focus_out: Rc::new(RefCell::new(None)),
+            on_escape: Rc::new(RefCell::new(None)),
         };
 
         panel.install_focus_style();
@@ -153,6 +155,10 @@ impl FileBrowserPanel {
 
     pub fn connect_focus_out<F: Fn(FocusDir) + 'static>(&self, f: F) {
         *self.on_focus_out.borrow_mut() = Some(Box::new(f));
+    }
+
+    pub fn connect_escape<F: Fn() + 'static>(&self, f: F) {
+        *self.on_escape.borrow_mut() = Some(Box::new(f));
     }
 
     pub fn show_for_root(&self, root: PathBuf) {
@@ -237,6 +243,13 @@ impl FileBrowserPanel {
         let key = gtk::EventControllerKey::new();
         let panel = self.clone();
         key.connect_key_pressed(move |_, keyval, _, state| {
+            if keyval == gdk::Key::Escape {
+                if let Some(cb) = panel.on_escape.borrow().as_ref() {
+                    cb();
+                }
+                return glib::Propagation::Stop;
+            }
+
             if state.contains(gdk::ModifierType::ALT_MASK) {
                 if let Some(dir) = key_to_focus_dir(keyval) {
                     if let Some(cb) = panel.on_focus_out.borrow().as_ref() {
