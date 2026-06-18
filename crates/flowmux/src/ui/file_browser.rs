@@ -359,7 +359,8 @@ impl FileBrowserPanel {
     }
 
     fn paste_from_clipboard(&self) {
-        match self.model.borrow_mut().paste_from_clipboard() {
+        let result = { self.model.borrow_mut().paste_from_clipboard() };
+        match result {
             Ok(true) => self.refresh(),
             Ok(false) => {}
             Err(err) => self.show_status(&format!("Paste failed: {err}")),
@@ -423,11 +424,8 @@ impl FileBrowserPanel {
         let popup_for_rename = popup.clone();
         rename.connect_clicked(move |_| {
             let new_name = entry_for_rename.text().to_string();
-            match panel.model.borrow_mut().rename_focused(&new_name) {
-                Ok(_) => {
-                    panel.refresh();
-                    popup_for_rename.close();
-                }
+            match panel.rename_focused_entry(&new_name) {
+                Ok(()) => popup_for_rename.close(),
                 Err(err) => {
                     error_for_rename.set_text(&format!("{err}"));
                     error_for_rename.set_visible(true);
@@ -440,6 +438,11 @@ impl FileBrowserPanel {
 
         popup.present();
         entry.grab_focus();
+    }
+
+    fn rename_focused_entry(&self, new_name: &str) -> io::Result<()> {
+        let result = { self.model.borrow_mut().rename_focused(new_name) };
+        result.map(|_| self.refresh())
     }
 
     fn show_status(&self, message: &str) {
@@ -1315,5 +1318,41 @@ mod tests {
         let pasted = dest.join("a.txt");
         assert!(pasted.exists());
         assert!(row_paths(&model).contains(&pasted));
+    }
+
+    #[gtk::test]
+    fn panel_rename_refreshes_after_model_borrow_drops() {
+        let tmp = TestDir::new("panel-rename");
+        tmp.file("old.txt");
+
+        let panel = FileBrowserPanel::new();
+        panel.show_for_root(tmp.path.clone());
+
+        panel.rename_focused_entry("new.txt").unwrap();
+
+        assert!(!tmp.path.join("old.txt").exists());
+        assert!(tmp.path.join("new.txt").exists());
+        assert_eq!(
+            panel.model.borrow().focused.as_ref(),
+            Some(&tmp.path.join("new.txt"))
+        );
+    }
+
+    #[gtk::test]
+    fn panel_paste_refreshes_after_model_borrow_drops() {
+        let tmp = TestDir::new("panel-paste");
+        tmp.file("a.txt");
+
+        let panel = FileBrowserPanel::new();
+        panel.show_for_root(tmp.path.clone());
+        panel.copy_focused();
+
+        panel.paste_from_clipboard();
+
+        assert!(tmp.path.join("a copy.txt").exists());
+        assert_eq!(
+            panel.model.borrow().focused.as_ref(),
+            Some(&tmp.path.join("a copy.txt"))
+        );
     }
 }
