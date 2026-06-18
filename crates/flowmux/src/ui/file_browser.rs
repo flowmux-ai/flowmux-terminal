@@ -241,6 +241,7 @@ impl FileBrowserPanel {
 
     fn install_keyboard(&self) {
         let key = gtk::EventControllerKey::new();
+        key.set_propagation_phase(gtk::PropagationPhase::Capture);
         let panel = self.clone();
         key.connect_key_pressed(move |_, keyval, _, state| panel.handle_key(keyval, state));
         self.root.add_controller(key);
@@ -254,7 +255,13 @@ impl FileBrowserPanel {
             return glib::Propagation::Stop;
         }
 
-        if state.contains(gdk::ModifierType::ALT_MASK) {
+        let plain_alt = state.contains(gdk::ModifierType::ALT_MASK)
+            && !state.intersects(
+                gdk::ModifierType::CONTROL_MASK
+                    | gdk::ModifierType::SHIFT_MASK
+                    | gdk::ModifierType::SUPER_MASK,
+            );
+        if plain_alt {
             if let Some(dir) = key_to_focus_dir(keyval) {
                 if let Some(cb) = self.on_focus_out.borrow().as_ref() {
                     cb(dir);
@@ -1513,6 +1520,16 @@ mod tests {
             glib::Propagation::Stop
         );
         assert_eq!(*focus_out.borrow(), Some(FocusDir::Left));
+
+        *focus_out.borrow_mut() = None;
+        assert_eq!(
+            panel.handle_key(
+                gdk::Key::Left,
+                gdk::ModifierType::ALT_MASK | gdk::ModifierType::CONTROL_MASK
+            ),
+            glib::Propagation::Proceed
+        );
+        assert_eq!(*focus_out.borrow(), None);
 
         assert_eq!(
             panel.handle_key(gdk::Key::Escape, gdk::ModifierType::empty()),
