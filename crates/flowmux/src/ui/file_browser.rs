@@ -39,6 +39,21 @@ struct FileBrowserRow {
     cut: bool,
 }
 
+#[derive(Clone)]
+enum FileIcon {
+    System(gio::Icon),
+    Named(&'static str),
+}
+
+impl FileIcon {
+    fn image(&self) -> gtk::Image {
+        match self {
+            Self::System(icon) => gtk::Image::from_gicon(icon),
+            Self::Named(name) => gtk::Image::from_icon_name(name),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct FsEntry {
     path: PathBuf,
@@ -678,11 +693,7 @@ impl FileBrowserPanel {
         disclosure.set_pixel_size(12);
         disclosure.set_size_request(14, 14);
 
-        let icon = if row.is_dir {
-            gtk::Image::from_icon_name("folder-symbolic")
-        } else {
-            gtk::Image::from_icon_name("text-x-generic-symbolic")
-        };
+        let icon = file_icon_for_path(&row.path, row.is_dir).image();
         icon.set_pixel_size(16);
 
         let label = gtk::Label::new(Some(&display_name(&row.path)));
@@ -1220,6 +1231,32 @@ fn set_adjustment_value(adjustment: &gtk::Adjustment, value: f64) {
     adjustment.set_value(value.clamp(lower, upper));
 }
 
+fn file_icon_for_path(path: &Path, is_dir: bool) -> FileIcon {
+    system_file_icon(path).map_or_else(
+        || FileIcon::Named(fallback_icon_name(is_dir)),
+        FileIcon::System,
+    )
+}
+
+fn system_file_icon(path: &Path) -> Option<gio::Icon> {
+    gio::File::for_path(path)
+        .query_info(
+            "standard::icon",
+            gio::FileQueryInfoFlags::NONE,
+            None::<&gio::Cancellable>,
+        )
+        .ok()
+        .and_then(|info| info.icon())
+}
+
+fn fallback_icon_name(is_dir: bool) -> &'static str {
+    if is_dir {
+        "folder-symbolic"
+    } else {
+        "text-x-generic-symbolic"
+    }
+}
+
 fn move_to_trash(path: &Path) -> io::Result<()> {
     gio::File::for_path(path)
         .trash(None::<&gio::Cancellable>)
@@ -1403,6 +1440,32 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn file_icon_prefers_system_icon_for_existing_file() {
+        let tmp = TestDir::new("icon-system");
+        let file = tmp.file("document.txt");
+
+        assert!(matches!(
+            file_icon_for_path(&file, false),
+            FileIcon::System(_)
+        ));
+    }
+
+    #[test]
+    fn file_icon_falls_back_when_system_icon_is_unavailable() {
+        let tmp = TestDir::new("icon-fallback");
+        let missing = tmp.path.join("missing.txt");
+
+        assert!(matches!(
+            file_icon_for_path(&missing, false),
+            FileIcon::Named("text-x-generic-symbolic")
+        ));
+        assert!(matches!(
+            file_icon_for_path(&missing, true),
+            FileIcon::Named("folder-symbolic")
+        ));
     }
 
     #[test]
@@ -1872,7 +1935,7 @@ mod tests {
         panel.show_for_root(tmp.path.clone());
         panel.focus_path(file.clone());
         set_panel_scroll(&panel, 180.0);
-    panel.set_delete_handler(|path| fs::remove_file(path));
+        panel.set_delete_handler(|path| fs::remove_file(path));
 
         panel.delete_focused_to_trash();
 
