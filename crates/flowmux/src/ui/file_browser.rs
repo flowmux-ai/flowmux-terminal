@@ -25,6 +25,7 @@ pub struct FileBrowserPanel {
     close_button: gtk::Button,
     model: Rc<RefCell<FileBrowserModel>>,
     delete_handler: Rc<RefCell<Box<dyn Fn(&Path) -> io::Result<()>>>>,
+    path_clipboard_writer: Rc<RefCell<Box<dyn Fn(&str)>>>,
     on_focus_out: Rc<RefCell<Option<Box<dyn Fn(FocusDir)>>>>,
     on_escape: Rc<RefCell<Option<Box<dyn Fn()>>>>,
 }
@@ -142,6 +143,7 @@ impl FileBrowserPanel {
         root.append(&scroll);
         root.append(&status);
 
+        let clipboard_root = root.clone();
         let panel = Self {
             root,
             path_label,
@@ -151,6 +153,9 @@ impl FileBrowserPanel {
             close_button,
             model: Rc::new(RefCell::new(FileBrowserModel::default())),
             delete_handler: Rc::new(RefCell::new(Box::new(move_to_trash))),
+            path_clipboard_writer: Rc::new(RefCell::new(Box::new(move |path| {
+                clipboard_root.clipboard().set_text(path);
+            }))),
             on_focus_out: Rc::new(RefCell::new(None)),
             on_escape: Rc::new(RefCell::new(None)),
         };
@@ -181,6 +186,11 @@ impl FileBrowserPanel {
     #[cfg(test)]
     fn set_delete_handler<F: Fn(&Path) -> io::Result<()> + 'static>(&self, f: F) {
         *self.delete_handler.borrow_mut() = Box::new(f);
+    }
+
+    #[cfg(test)]
+    fn set_path_clipboard_writer<F: Fn(&str) + 'static>(&self, f: F) {
+        *self.path_clipboard_writer.borrow_mut() = Box::new(f);
     }
 
     pub fn show_for_root(&self, root: PathBuf) {
@@ -302,6 +312,16 @@ impl FileBrowserPanel {
             }
         }
 
+        if state.contains(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK)
+            && !state.intersects(gdk::ModifierType::ALT_MASK | gdk::ModifierType::SUPER_MASK)
+            && keyval
+                .to_unicode()
+                .is_some_and(|ch| ch.eq_ignore_ascii_case(&'k'))
+        {
+            self.copy_focused_path_to_clipboard();
+            return glib::Propagation::Stop;
+        }
+
         if state.contains(gdk::ModifierType::CONTROL_MASK)
             && !state.intersects(gdk::ModifierType::ALT_MASK | gdk::ModifierType::SUPER_MASK)
         {
@@ -416,6 +436,15 @@ impl FileBrowserPanel {
         if self.model.borrow_mut().copy_focused() {
             self.sync_focus_classes();
         }
+    }
+
+    fn copy_focused_path_to_clipboard(&self) {
+        let Some(path) = self.model.borrow_mut().focused_path() else {
+            return;
+        };
+        let path = path.display().to_string();
+        (self.path_clipboard_writer.borrow())(&path);
+        self.show_status(&format!("Copied path: {path}"));
     }
 
     fn cut_focused(&self) {
@@ -1850,6 +1879,35 @@ mod tests {
             glib::Propagation::Stop
         );
         assert!(closed.get());
+    }
+
+    #[gtk::test]
+    fn behavior_ctrl_shift_k_copies_focused_item_path() {
+        let tmp = TestDir::new("behavior-copy-path");
+        let file = tmp.file("focused.txt");
+
+        let panel = FileBrowserPanel::new();
+        panel.show_for_root(tmp.path.clone());
+        panel.focus_path(file.clone());
+
+        let copied = Rc::new(RefCell::new(None));
+        let copied_for_writer = copied.clone();
+        panel.set_path_clipboard_writer(move |path| {
+            *copied_for_writer.borrow_mut() = Some(path.to_string());
+        });
+
+        assert_eq!(
+            panel.handle_key(
+                key("k"),
+                gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK
+            ),
+            glib::Propagation::Stop
+        );
+
+        let file_path = file.display().to_string();
+        let root_path = tmp.path.display().to_string();
+        assert_eq!(copied.borrow().as_deref(), Some(file_path.as_str()));
+        assert_ne!(copied.borrow().as_deref(), Some(root_path.as_str()));
     }
 
     #[gtk::test]
