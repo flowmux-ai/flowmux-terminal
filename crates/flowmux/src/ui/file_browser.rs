@@ -403,6 +403,7 @@ impl FileBrowserPanel {
             .default_width(360)
             .resizable(false)
             .build();
+        install_rename_popup_escape(&popup);
         if let Some(window) = self
             .root
             .root()
@@ -1007,6 +1008,23 @@ fn show_context_menu(parent: &impl IsA<gtk::Widget>, path: &Path, x: f64, y: f64
     popover.popup();
 }
 
+fn install_rename_popup_escape(popup: &gtk::Window) {
+    let key = gtk::EventControllerKey::new();
+    key.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let popup_for_key = popup.clone();
+    key.connect_key_pressed(move |_, keyval, _, _| handle_rename_popup_key(&popup_for_key, keyval));
+    popup.add_controller(key);
+}
+
+fn handle_rename_popup_key(popup: &gtk::Window, keyval: gdk::Key) -> glib::Propagation {
+    if keyval == gdk::Key::Escape {
+        popup.close();
+        return glib::Propagation::Stop;
+    }
+
+    glib::Propagation::Proceed
+}
+
 fn show_path_in_folder(path: &Path) {
     let dir = if path.is_dir() {
         path
@@ -1497,6 +1515,11 @@ mod tests {
             .expect("F2 should open a Rename popup");
         let entry = find_entry(rename.upcast_ref()).expect("Rename popup should include an entry");
         assert_eq!(entry.text().as_str(), "old.txt");
+        assert_eq!(
+            handle_rename_popup_key(&rename, gdk::Key::Escape),
+            glib::Propagation::Stop
+        );
+        assert!(!rename.is_visible());
         close_rename_windows();
     }
 
