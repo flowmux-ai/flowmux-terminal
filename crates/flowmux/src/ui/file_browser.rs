@@ -551,26 +551,15 @@ impl FileBrowserPanel {
     }
 
     fn delete_focused_to_trash(&self) {
-        let (path, next_focus) = {
-            let mut model = self.model.borrow_mut();
-            let Some(path) = model.focused_path() else {
-                return;
-            };
-            let next_focus = model.focus_candidate_after_removed_path(&path);
-            (path, next_focus)
-        };
-
-        let result = (self.delete_handler.borrow())(&path);
-        match result {
-            Ok(()) => self.finish_deleted_path(&path, next_focus),
-            Err(err) => self.show_status(&format!("Delete failed: {err}")),
-        }
+        let paths = self.model.borrow_mut().deletion_targets();
+        self.delete_paths_with(paths, |path| (self.delete_handler.borrow())(path));
     }
 
     fn show_delete_confirmation(&self) {
-        let Some(path) = self.model.borrow_mut().focused_path() else {
+        let paths = self.model.borrow_mut().deletion_targets();
+        if paths.is_empty() {
             return;
-        };
+        }
 
         let popup = gtk::Window::builder()
             .modal(true)
@@ -593,10 +582,12 @@ impl FileBrowserPanel {
         content.set_margin_start(12);
         content.set_margin_end(12);
 
-        let label = gtk::Label::new(Some(&format!(
-            "Really delete \"{}\" permanently?",
-            display_name(&path)
-        )));
+        let label_text = if paths.len() == 1 {
+            format!("Really delete \"{}\" permanently?", display_name(&paths[0]))
+        } else {
+            format!("Really delete {} items permanently?", paths.len())
+        };
+        let label = gtk::Label::new(Some(&label_text));
         label.set_xalign(0.0);
         label.set_wrap(true);
         content.append(&label);
@@ -617,28 +608,57 @@ impl FileBrowserPanel {
         let panel = self.clone();
         let popup_for_yes = popup.clone();
         yes.connect_clicked(move |_| {
-            panel.delete_path_permanently(path.clone());
+            panel.delete_paths_permanently(paths.clone());
             popup_for_yes.close();
         });
 
         popup.present();
     }
 
-    fn delete_path_permanently(&self, path: PathBuf) {
+    fn delete_paths_permanently(&self, paths: Vec<PathBuf>) {
+        self.delete_paths_with(paths, permanently_delete_path);
+    }
+
+    fn delete_paths_with<F>(&self, paths: Vec<PathBuf>, mut delete: F)
+    where
+        F: FnMut(&Path) -> io::Result<()>,
+    {
+        let paths = compact_removed_paths(paths);
+        if paths.is_empty() {
+            return;
+        }
+
         let next_focus = self
             .model
             .borrow()
-            .focus_candidate_after_removed_path(&path);
-        match permanently_delete_path(&path) {
-            Ok(()) => self.finish_deleted_path(&path, next_focus),
-            Err(err) => self.show_status(&format!("Delete failed: {err}")),
+            .focus_candidate_after_removed_paths(&paths);
+        let mut deleted = Vec::new();
+        let mut failed = Vec::new();
+
+        for path in paths {
+            match delete(&path) {
+                Ok(()) => deleted.push(path),
+                Err(err) => failed.push((path, err)),
+            }
+        }
+
+        let next_focus = failed.first().map(|(path, _)| path.clone()).or(next_focus);
+        if !deleted.is_empty() {
+            self.finish_deleted_paths(&deleted, next_focus);
+        }
+        if let Some((_, err)) = failed.first() {
+            if failed.len() == 1 {
+                self.show_status(&format!("Delete failed: {err}"));
+            } else {
+                self.show_status(&format!("Delete failed for {} items: {err}", failed.len()));
+            }
         }
     }
 
-    fn finish_deleted_path(&self, path: &Path, next_focus: Option<PathBuf>) {
+    fn finish_deleted_paths(&self, paths: &[PathBuf], next_focus: Option<PathBuf>) {
         self.model
             .borrow_mut()
-            .forget_removed_path(path, next_focus);
+            .forget_removed_paths(paths, next_focus);
         self.refresh();
     }
 
@@ -1022,37 +1042,54 @@ impl FileBrowserModel {
         self.selection_anchor = Some(anchor.to_path_buf());
     }
 
-    fn focus_candidate_after_removed_path(&self, removed: &Path) -> Option<PathBuf> {
+    fn deletion_targets(&self) -> Vec<PathBuf> {
         let rows = self.visible_rows();
-        let index = rows.iter().position(|row| row.path == removed)?;
+        let mut paths: Vec<PathBuf> = rows
+            .iter()
+            .filter(|row| self.selected.contains(&row.path))
+            .map(|row| row.path.clone())
+            .collect();
+        if paths.is_empty() {
+            if let Some(focused) = self.focused.clone() {
+                paths.push(focused);
+            }
+        }
+        compact_removed_paths(paths)
+    }
+
+    fn focus_candidate_after_removed_paths(&self, removed: &[PathBuf]) -> Option<PathBuf> {
+        let rows = self.visible_rows();
+        let first_removed = rows
+            .iter()
+            .position(|row| path_is_under_any(&row.path, removed))?;
         rows.iter()
-            .skip(index + 1)
-            .find(|row| !path_is_or_under(&row.path, removed))
+            .skip(first_removed)
+            .find(|row| !path_is_under_any(&row.path, removed))
             .or_else(|| {
-                rows[..index]
+                rows[..first_removed]
                     .iter()
                     .rev()
-                    .find(|row| !path_is_or_under(&row.path, removed))
+                    .find(|row| !path_is_under_any(&row.path, removed))
             })
             .map(|row| row.path.clone())
     }
 
-    fn forget_removed_path(&mut self, removed: &Path, next_focus: Option<PathBuf>) {
+    fn forget_removed_paths(&mut self, removed: &[PathBuf], next_focus: Option<PathBuf>) {
         self.expanded
-            .retain(|path| !path_is_or_under(path, removed));
+            .retain(|path| !path_is_under_any(path, removed));
         self.selected
-            .retain(|path| !path_is_or_under(path, removed));
+            .retain(|path| !path_is_under_any(path, removed));
         if self
             .selection_anchor
             .as_ref()
-            .is_some_and(|path| path_is_or_under(path, removed))
+            .is_some_and(|path| path_is_under_any(path, removed))
         {
             self.selection_anchor = None;
         }
         if let Some(clipboard) = self.clipboard.as_mut() {
             clipboard
                 .paths
-                .retain(|path| !path_is_or_under(path, removed));
+                .retain(|path| !path_is_under_any(path, removed));
         }
         if self
             .clipboard
@@ -1473,6 +1510,25 @@ fn key_to_focus_dir(key: gdk::Key) -> Option<FocusDir> {
 
 fn path_is_or_under(path: &Path, parent: &Path) -> bool {
     path == parent || path.starts_with(parent)
+}
+
+fn path_is_under_any(path: &Path, parents: &[PathBuf]) -> bool {
+    parents.iter().any(|parent| path_is_or_under(path, parent))
+}
+
+fn compact_removed_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut compacted: Vec<PathBuf> = Vec::new();
+    for path in paths {
+        if compacted
+            .iter()
+            .any(|parent| path_is_or_under(&path, parent))
+        {
+            continue;
+        }
+        compacted.retain(|child| !path_is_or_under(child, &path));
+        compacted.push(path);
+    }
+    compacted
 }
 
 fn set_adjustment_value(adjustment: &gtk::Adjustment, value: f64) {
@@ -2419,6 +2475,158 @@ mod tests {
     }
 
     #[gtk::test]
+    fn behavior_delete_removes_all_ctrl_selected_entries_in_one_pass() {
+        let tmp = TestDir::new("behavior-delete-ctrl-multi");
+        let a = tmp.file("a.txt");
+        let b = tmp.file("b.txt");
+        let c = tmp.file("c.txt");
+        let d = tmp.file("d.txt");
+        let panel = FileBrowserPanel::new();
+        panel.show_for_root(tmp.path.clone());
+        panel.focus_path(a.clone());
+        panel.toggle_path_selection(c.clone());
+        assert_eq!(panel_selected_names(&panel), vec!["a.txt", "c.txt"]);
+
+        let deleted = Rc::new(RefCell::new(Vec::new()));
+        let deleted_for_handler = deleted.clone();
+        panel.set_delete_handler(move |path| {
+            deleted_for_handler.borrow_mut().push(display_name(path));
+            fs::remove_file(path)
+        });
+
+        panel.delete_focused_to_trash();
+
+        assert_eq!(deleted.borrow().as_slice(), ["a.txt", "c.txt"]);
+        assert!(!a.exists());
+        assert!(b.exists());
+        assert!(!c.exists());
+        assert!(d.exists());
+        assert_eq!(panel_selected_names(&panel), vec!["b.txt"]);
+        assert_eq!(panel_focused_path(&panel), Some(b.clone()));
+
+        panel.delete_focused_to_trash();
+
+        assert_eq!(deleted.borrow().as_slice(), ["a.txt", "c.txt", "b.txt"]);
+        assert!(!b.exists());
+        assert!(d.exists());
+        assert_eq!(panel_selected_names(&panel), vec!["d.txt"]);
+        assert_eq!(panel_focused_path(&panel), Some(d));
+    }
+
+    #[gtk::test]
+    fn behavior_delete_removes_shift_selected_range_in_visible_order() {
+        let tmp = TestDir::new("behavior-delete-shift-range");
+        let a = tmp.file("a.txt");
+        let b = tmp.file("b.txt");
+        let c = tmp.file("c.txt");
+        let d = tmp.file("d.txt");
+        let panel = FileBrowserPanel::new();
+        panel.show_for_root(tmp.path.clone());
+        panel.focus_path(a.clone());
+        assert_eq!(
+            panel.handle_key(gdk::Key::Down, gdk::ModifierType::SHIFT_MASK),
+            glib::Propagation::Stop
+        );
+        assert_eq!(
+            panel.handle_key(gdk::Key::Down, gdk::ModifierType::SHIFT_MASK),
+            glib::Propagation::Stop
+        );
+        assert_eq!(
+            panel_selected_names(&panel),
+            vec!["a.txt", "b.txt", "c.txt"]
+        );
+
+        let deleted = Rc::new(RefCell::new(Vec::new()));
+        let deleted_for_handler = deleted.clone();
+        panel.set_delete_handler(move |path| {
+            deleted_for_handler.borrow_mut().push(display_name(path));
+            fs::remove_file(path)
+        });
+
+        panel.delete_focused_to_trash();
+
+        assert_eq!(deleted.borrow().as_slice(), ["a.txt", "b.txt", "c.txt"]);
+        assert!(!a.exists());
+        assert!(!b.exists());
+        assert!(!c.exists());
+        assert!(d.exists());
+        assert_eq!(panel_selected_names(&panel), vec!["d.txt"]);
+        assert_eq!(panel_focused_path(&panel), Some(d));
+    }
+
+    #[gtk::test]
+    fn behavior_delete_compacts_selected_parent_and_child() {
+        let tmp = TestDir::new("behavior-delete-parent-child");
+        let folder = tmp.dir("folder");
+        let child = tmp.file("folder/child.txt");
+        let other = tmp.file("other.txt");
+        let panel = FileBrowserPanel::new();
+        panel.show_for_root(tmp.path.clone());
+        panel.focus_path(folder.clone());
+        panel.expand_focused();
+        panel.extend_selection_to_path(child);
+        assert_eq!(panel_selected_names(&panel), vec!["folder", "child.txt"]);
+
+        let deleted = Rc::new(RefCell::new(Vec::new()));
+        let deleted_for_handler = deleted.clone();
+        panel.set_delete_handler(move |path| {
+            deleted_for_handler.borrow_mut().push(display_name(path));
+            if path.is_dir() {
+                fs::remove_dir_all(path)
+            } else {
+                fs::remove_file(path)
+            }
+        });
+
+        panel.delete_focused_to_trash();
+
+        assert_eq!(deleted.borrow().as_slice(), ["folder"]);
+        assert!(!folder.exists());
+        assert!(other.exists());
+        assert_eq!(panel_selected_names(&panel), vec!["other.txt"]);
+        assert_eq!(panel_focused_path(&panel), Some(other));
+    }
+
+    #[gtk::test]
+    fn behavior_delete_keeps_failed_selected_entries_selected() {
+        let tmp = TestDir::new("behavior-delete-partial-failure");
+        let a = tmp.file("a.txt");
+        let b = tmp.file("b.txt");
+        let c = tmp.file("c.txt");
+        let d = tmp.file("d.txt");
+        let panel = FileBrowserPanel::new();
+        panel.show_for_root(tmp.path.clone());
+        panel.focus_path(a.clone());
+        panel.extend_selection_to_path(c.clone());
+        assert_eq!(
+            panel_selected_names(&panel),
+            vec!["a.txt", "b.txt", "c.txt"]
+        );
+
+        let attempted = Rc::new(RefCell::new(Vec::new()));
+        let attempted_for_handler = attempted.clone();
+        let failed = b.clone();
+        panel.set_delete_handler(move |path| {
+            attempted_for_handler.borrow_mut().push(display_name(path));
+            if path == failed {
+                Err(io::Error::new(io::ErrorKind::Other, "blocked"))
+            } else {
+                fs::remove_file(path)
+            }
+        });
+
+        panel.delete_focused_to_trash();
+
+        assert_eq!(attempted.borrow().as_slice(), ["a.txt", "b.txt", "c.txt"]);
+        assert!(!a.exists());
+        assert!(b.exists());
+        assert!(!c.exists());
+        assert!(d.exists());
+        assert_eq!(panel_selected_names(&panel), vec!["b.txt"]);
+        assert_eq!(panel_focused_path(&panel), Some(b));
+    }
+
+    #[gtk::test]
     fn behavior_shift_delete_requires_confirmation_before_permanent_delete() {
         let tmp = TestDir::new("behavior-shift-delete");
         let file = tmp.file("a.txt");
@@ -2448,6 +2656,30 @@ mod tests {
         assert_eq!(panel_row_names(&panel), vec!["b.txt"]);
         assert_eq!(panel_focused_path(&panel), Some(tmp.path.join("b.txt")));
         close_delete_windows();
+    }
+
+    #[gtk::test]
+    fn behavior_permanent_delete_removes_multi_selection() {
+        let tmp = TestDir::new("behavior-permanent-delete-multi");
+        let a = tmp.file("a.txt");
+        let b = tmp.file("b.txt");
+        let c = tmp.file("c.txt");
+        let d = tmp.file("d.txt");
+        let panel = FileBrowserPanel::new();
+        panel.show_for_root(tmp.path.clone());
+        panel.focus_path(a.clone());
+        panel.toggle_path_selection(c.clone());
+        assert_eq!(panel_selected_names(&panel), vec!["a.txt", "c.txt"]);
+
+        let targets = panel.model.borrow().deletion_targets();
+        panel.delete_paths_permanently(targets);
+
+        assert!(!a.exists());
+        assert!(b.exists());
+        assert!(!c.exists());
+        assert!(d.exists());
+        assert_eq!(panel_selected_names(&panel), vec!["b.txt"]);
+        assert_eq!(panel_focused_path(&panel), Some(b));
     }
 
     #[test]
