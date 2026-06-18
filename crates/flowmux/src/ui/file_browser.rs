@@ -11,6 +11,7 @@ use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -259,6 +260,10 @@ impl FileBrowserPanel {
                 panel.activate_focused();
                 return glib::Propagation::Stop;
             }
+            if keyval == gdk::Key::F2 {
+                panel.show_rename_dialog();
+                return glib::Propagation::Stop;
+            }
 
             glib::Propagation::Proceed
         });
@@ -305,6 +310,82 @@ impl FileBrowserPanel {
             self.root.grab_focus();
         }
         self.activate_focused();
+    }
+
+    fn show_rename_dialog(&self) {
+        let Some(path) = self.model.borrow_mut().focused_path() else {
+            return;
+        };
+
+        let popup = gtk::Window::builder()
+            .modal(true)
+            .title("Rename")
+            .default_width(360)
+            .resizable(false)
+            .build();
+        if let Some(window) = self
+            .root
+            .root()
+            .and_then(|root| root.downcast::<gtk::Window>().ok())
+        {
+            popup.set_transient_for(Some(&window));
+        }
+
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        content.set_margin_top(12);
+        content.set_margin_bottom(12);
+        content.set_margin_start(12);
+        content.set_margin_end(12);
+
+        let label = gtk::Label::new(Some("Name"));
+        label.set_xalign(0.0);
+        let entry = gtk::Entry::new();
+        entry.set_text(&display_name(&path));
+        entry.select_region(0, -1);
+        let error = gtk::Label::new(None);
+        error.add_css_class("error");
+        error.set_xalign(0.0);
+        error.set_wrap(true);
+        error.set_visible(false);
+        content.append(&label);
+        content.append(&entry);
+        content.append(&error);
+
+        let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        buttons.set_halign(gtk::Align::End);
+        let cancel = gtk::Button::with_label("Cancel");
+        let rename = gtk::Button::with_label("Rename");
+        rename.add_css_class("suggested-action");
+        buttons.append(&cancel);
+        buttons.append(&rename);
+        content.append(&buttons);
+        popup.set_child(Some(&content));
+
+        let popup_for_cancel = popup.clone();
+        cancel.connect_clicked(move |_| popup_for_cancel.close());
+        let panel = self.clone();
+        let entry_for_rename = entry.clone();
+        let error_for_rename = error.clone();
+        let popup_for_rename = popup.clone();
+        rename.connect_clicked(move |_| {
+            let new_name = entry_for_rename.text().to_string();
+            match panel.model.borrow_mut().rename_focused(&new_name) {
+                Ok(_) => {
+                    panel.refresh();
+                    popup_for_rename.close();
+                }
+                Err(err) => {
+                    error_for_rename.set_text(&format!("{err}"));
+                    error_for_rename.set_visible(true);
+                }
+            }
+        });
+
+        let rename_for_entry = rename.clone();
+        entry.connect_activate(move |_| rename_for_entry.emit_clicked());
+
+        popup.present();
+        entry.grab_focus();
     }
 
     fn sync_focus_classes(&self) {
@@ -569,11 +650,52 @@ impl FileBrowserModel {
             .find(|row| row.path == *focused)
     }
 
+    fn focused_path(&mut self) -> Option<PathBuf> {
+        self.focused_row().map(|row| row.path)
+    }
+
     fn focused_index(&self) -> Option<usize> {
         let focused = self.focused.as_ref()?;
         self.visible_rows()
             .iter()
             .position(|row| row.path == *focused)
+    }
+
+    fn rename_focused(&mut self, new_name: &str) -> io::Result<PathBuf> {
+        let old_path = self.focused_path().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "no focused file browser row")
+        })?;
+        let name = valid_file_name(new_name)?;
+        let parent = old_path.parent().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "focused path has no parent")
+        })?;
+        let new_path = parent.join(name);
+
+        if old_path == new_path {
+            return Ok(new_path);
+        }
+        if new_path.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("{} already exists", new_path.display()),
+            ));
+        }
+
+        fs::rename(&old_path, &new_path)?;
+        self.rewrite_tracked_paths(&old_path, &new_path);
+        Ok(new_path)
+    }
+
+    fn rewrite_tracked_paths(&mut self, old_path: &Path, new_path: &Path) {
+        self.focused = self
+            .focused
+            .as_ref()
+            .map(|path| rewrite_path_prefix(path, old_path, new_path));
+        self.expanded = self
+            .expanded
+            .iter()
+            .map(|path| rewrite_path_prefix(path, old_path, new_path))
+            .collect();
     }
 }
 
@@ -649,6 +771,29 @@ fn key_to_focus_dir(key: gdk::Key) -> Option<FocusDir> {
     } else {
         None
     }
+}
+
+fn valid_file_name(name: &str) -> io::Result<&str> {
+    use std::path::Component;
+
+    let name = name.trim();
+    let mut components = Path::new(name).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(_)), None) => Ok(name),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "name must be a single file name",
+        )),
+    }
+}
+
+fn rewrite_path_prefix(path: &Path, old_path: &Path, new_path: &Path) -> PathBuf {
+    if path == old_path {
+        return new_path.to_path_buf();
+    }
+    path.strip_prefix(old_path)
+        .map(|suffix| new_path.join(suffix))
+        .unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn display_name(path: &Path) -> String {
@@ -792,5 +937,60 @@ mod tests {
         model.set_root(tmp.path.clone());
 
         assert_eq!(model.activate_focused(), FileBrowserActivation::Open(file));
+    }
+
+    #[test]
+    fn rename_focused_file_updates_rows_and_focus() {
+        let tmp = TestDir::new("rename-file");
+        tmp.file("old.txt");
+
+        let mut model = FileBrowserModel::default();
+        model.set_root(tmp.path.clone());
+
+        let renamed = model.rename_focused("new.txt").unwrap();
+
+        assert_eq!(renamed, tmp.path.join("new.txt"));
+        assert!(!tmp.path.join("old.txt").exists());
+        assert!(tmp.path.join("new.txt").exists());
+        assert_eq!(model.focused.as_ref(), Some(&tmp.path.join("new.txt")));
+        assert_eq!(row_names(&model), ["new.txt"]);
+    }
+
+    #[test]
+    fn rename_expanded_folder_preserves_expansion() {
+        let tmp = TestDir::new("rename-dir");
+        tmp.dir("old");
+        tmp.file("old/main.rs");
+
+        let mut model = FileBrowserModel::default();
+        model.set_root(tmp.path.clone());
+        assert!(model.expand_focused());
+
+        let renamed = model.rename_focused("new").unwrap();
+
+        assert_eq!(renamed, tmp.path.join("new"));
+        assert_eq!(model.focused.as_ref(), Some(&tmp.path.join("new")));
+        assert!(model.expanded.contains(&tmp.path.join("new")));
+        assert_eq!(row_names(&model), ["new", "main.rs"]);
+    }
+
+    #[test]
+    fn rename_rejects_empty_or_nested_names() {
+        let tmp = TestDir::new("rename-invalid");
+        tmp.file("old.txt");
+
+        let mut model = FileBrowserModel::default();
+        model.set_root(tmp.path.clone());
+
+        assert_eq!(
+            model.rename_focused("").unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            model.rename_focused("nested/name.txt").unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert!(tmp.path.join("old.txt").exists());
+        assert_eq!(row_names(&model), ["old.txt"]);
     }
 }
