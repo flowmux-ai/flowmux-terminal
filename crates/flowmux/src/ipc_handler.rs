@@ -172,19 +172,26 @@ impl Handler for GuiHandler {
                     // Validate the pane against live state (reusing the
                     // tree flattener), then fire the same ActivateSurface
                     // the tab bar uses. Non-destructive, no dialog.
-                    let known = flowmux_ipc::protocol::describe_workspaces(
+                    let tree = flowmux_ipc::protocol::describe_workspaces(
                         &self.inner.store().snapshot().await.workspaces,
-                    )
-                    .iter()
-                    .flat_map(|w| &w.panes)
-                    .any(|p| p.id == pane);
-                    if known {
+                    );
+                    let pane_found = tree.iter().flat_map(|w| &w.panes).any(|p| p.id == pane);
+                    let surface_found = tree
+                        .iter()
+                        .flat_map(|w| &w.panes)
+                        .find(|p| p.id == pane)
+                        .is_some_and(|p| p.tabs.iter().any(|tab| tab.id == surface));
+                    if surface_found {
                         let _ = self
                             .bridge
                             .tx
                             .send(GtkCommand::ActivateSurface { pane, surface })
                             .await;
                         Response::Ok
+                    } else if pane_found {
+                        Response::Error(RpcError::NotFound(format!(
+                            "surface not found in pane {pane}: {surface}"
+                        )))
                     } else {
                         Response::Error(RpcError::NotFound(format!("pane not found: {pane}")))
                     }
@@ -192,9 +199,24 @@ impl Handler for GuiHandler {
                 Request::SurfaceClose { pane, surface } => {
                     // Refuse the last-tab-of-last-pane case up front so the
                     // agent never trips CloseSurface's confirm dialog.
+                    let tree = flowmux_ipc::protocol::describe_workspaces(
+                        &self.inner.store().snapshot().await.workspaces,
+                    );
+                    let pane_found = tree.iter().flat_map(|w| &w.panes).any(|p| p.id == pane);
+                    let surface_found = tree
+                        .iter()
+                        .flat_map(|w| &w.panes)
+                        .find(|p| p.id == pane)
+                        .is_some_and(|p| p.tabs.iter().any(|tab| tab.id == surface));
                     let tabs = self.inner.store().tab_count_in_pane(pane).await;
                     let panes = self.inner.store().workspace_pane_count_for(pane).await;
-                    if tabs == Some(1) && matches!(panes, Some((_, 1))) {
+                    if !pane_found {
+                        Response::Error(RpcError::NotFound(format!("pane not found: {pane}")))
+                    } else if !surface_found {
+                        Response::Error(RpcError::NotFound(format!(
+                            "surface not found in pane {pane}: {surface}"
+                        )))
+                    } else if tabs == Some(1) && matches!(panes, Some((_, 1))) {
                         Response::Error(RpcError::InvalidArgument(
                             "refusing to close the last tab of the workspace's last pane".into(),
                         ))
@@ -790,6 +812,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn close_tab_reports_not_found_for_unknown_surface_in_known_pane() {
+        let (handler, rx, pane, _tab) = single_pane_handler().await;
+        assert!(matches!(
+            handler
+                .handle(Request::SurfaceClose {
+                    pane,
+                    surface: SurfaceId::new(),
+                })
+                .await,
+            Response::Error(RpcError::NotFound(_))
+        ));
+        assert!(
+            rx.try_recv().is_err(),
+            "invalid close-tab must not dispatch CloseSurface"
+        );
+    }
+
+    #[tokio::test]
     async fn workspace_focus_reports_not_found_for_unknown_id() {
         let (handler, _rx, _pane, _tab) = single_pane_handler().await;
         assert!(matches!(
@@ -814,5 +854,23 @@ mod tests {
                 .await,
             Response::Error(RpcError::NotFound(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn surface_focus_reports_not_found_for_unknown_surface_in_known_pane() {
+        let (handler, rx, pane, _tab) = single_pane_handler().await;
+        assert!(matches!(
+            handler
+                .handle(Request::SurfaceFocus {
+                    pane,
+                    surface: SurfaceId::new(),
+                })
+                .await,
+            Response::Error(RpcError::NotFound(_))
+        ));
+        assert!(
+            rx.try_recv().is_err(),
+            "invalid focus-tab must not dispatch ActivateSurface"
+        );
     }
 }

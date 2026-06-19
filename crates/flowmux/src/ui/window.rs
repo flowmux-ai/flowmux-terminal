@@ -6220,6 +6220,49 @@ mod tests {
         );
     }
 
+    #[gtk::test]
+    async fn browser_open_split_preserves_source_terminal_widget_identity() {
+        let (controller, _ws_id, pane) =
+            build_single_workspace_controller("com.flowmux.App.UiTest.BrowserOpenSplitPreserve")
+                .await;
+        let original_terminal = {
+            let registry = controller.pane_registry.borrow();
+            registry
+                .active_terminal(pane)
+                .expect("source pane should have an active terminal")
+                .widget
+                .clone()
+        };
+
+        let (ack_tx, ack_rx) = oneshot::channel();
+        controller
+            .dispatch(GtkCommand::BrowserOpenSplit {
+                target_pane: Some(pane),
+                url: "https://example.com".into(),
+                direction: SplitDirection::Vertical,
+                ack: ack_tx,
+            })
+            .await;
+        let outcome = ack_rx
+            .await
+            .expect("browser open ack should be sent")
+            .expect("browser open should succeed");
+
+        let registry = controller.pane_registry.borrow();
+        let current_terminal = registry
+            .active_terminal(pane)
+            .expect("source pane terminal should survive browser split");
+        assert!(
+            current_terminal.widget == original_terminal,
+            "CLI browser open split must reuse the source terminal widget"
+        );
+        assert!(
+            registry.active_browser(outcome.pane).is_some(),
+            "browser open split should create a browser pane"
+        );
+        assert_eq!(outcome.placement_strategy, PlacementStrategy::SplitRight);
+    }
+
     /// Regression: same terminal-identity contract across nested splits — the
     /// scenario the user reported was a deeper split tree, not a flat
     /// side-by-side. Build Pane A (claude) → split A right to get B → focus B
