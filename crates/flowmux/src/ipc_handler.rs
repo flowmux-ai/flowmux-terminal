@@ -853,6 +853,14 @@ mod tests {
             handler.handle(Request::WorkspaceList).await,
             Response::WorkspaceList { ids } if ids.len() == 1
         ));
+        assert!(matches!(
+            handler.handle(Request::WorkspaceCurrent).await,
+            Response::WorkspaceCurrent { id: Some(_) }
+        ));
+        assert!(matches!(
+            handler.handle(Request::WorkspaceTree).await,
+            Response::Tree { workspaces } if workspaces.len() == 1
+        ));
 
         assert!(
             rx.try_recv().is_err(),
