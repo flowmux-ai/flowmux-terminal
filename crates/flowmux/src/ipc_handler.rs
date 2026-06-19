@@ -770,7 +770,7 @@ fn shell_escape(arg: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flowmux_core::{NotificationLevel, PaneId, SurfaceId, WorkspaceId};
+    use flowmux_core::{AgentActivity, NotificationLevel, PaneId, SurfaceId, WorkspaceId};
     use flowmux_daemon::StateStore;
     use flowmux_state::State;
 
@@ -981,6 +981,80 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "suppressed in-app notification must not request desktop follow-up"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_activity_update_refreshes_store_and_sidebar() {
+        let (handler, rx, pane, surface) = single_pane_handler().await;
+        let expected_workspace = handler
+            .inner
+            .store()
+            .workspace_for_pane(pane)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            handler
+                .handle(Request::AgentActivityUpdate {
+                    pane: Some(pane),
+                    surface: Some(surface),
+                    agent: "codex".into(),
+                    activity: Some(AgentActivity::Running),
+                    pid: Some(1234),
+                })
+                .await,
+            Response::Ok
+        ));
+
+        let command = rx
+            .recv()
+            .await
+            .expect("activity update should dispatch SetAgentActivity");
+        assert!(matches!(
+            command,
+            GtkCommand::SetAgentActivity {
+                workspace,
+                activity: Some(AgentActivity::Running),
+            } if workspace == expected_workspace
+        ));
+        assert_eq!(
+            handler.inner.store().live_agent_presences().await,
+            vec![(expected_workspace, surface, 1234)]
+        );
+
+        assert!(matches!(
+            handler
+                .handle(Request::AgentActivityUpdate {
+                    pane: Some(pane),
+                    surface: Some(surface),
+                    agent: "codex".into(),
+                    activity: None,
+                    pid: Some(1234),
+                })
+                .await,
+            Response::Ok
+        ));
+
+        let command = rx
+            .recv()
+            .await
+            .expect("activity clear should dispatch SetAgentActivity");
+        assert!(matches!(
+            command,
+            GtkCommand::SetAgentActivity {
+                workspace,
+                activity: None,
+            } if workspace == expected_workspace
+        ));
+        assert!(
+            handler
+                .inner
+                .store()
+                .live_agent_presences()
+                .await
+                .is_empty(),
+            "clearing activity must remove the runtime presence from the store"
         );
     }
 
