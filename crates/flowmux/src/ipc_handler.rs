@@ -1762,6 +1762,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn browser_snapshot_dispatches_snapshot_and_maps_json_result() {
+        let (handler, rx, pane, _tab) = single_pane_handler().await;
+        let response = handler.handle(Request::BrowserSnapshot { pane });
+        tokio::pin!(response);
+
+        let command = tokio::select! {
+            response = &mut response => panic!("browser snapshot completed before bridge ack: {response:?}"),
+            command = rx.recv() => command.expect("browser snapshot should dispatch to GTK"),
+        };
+
+        let GtkCommand::BrowserAction {
+            pane: command_pane,
+            op,
+            ack,
+        } = command
+        else {
+            panic!("expected BrowserAction command");
+        };
+
+        assert_eq!(command_pane, pane);
+        assert!(matches!(op, BrowserOp::Snapshot));
+        ack.send(Ok(BrowserActionResult::String(
+            r#"{"tree":[],"refs":{}}"#.into(),
+        )))
+        .unwrap();
+
+        assert!(matches!(
+            response.await,
+            Response::BrowserResult { value } if value == r#"{"tree":[],"refs":{}}"#
+        ));
+    }
+
+    #[tokio::test]
     async fn browser_snapshot_reports_not_found_for_missing_browser_pane() {
         let (handler, rx, pane, _tab) = single_pane_handler().await;
         let response = handler.handle(Request::BrowserSnapshot { pane });
