@@ -61,7 +61,7 @@ fn spawn_fake_daemon(socket: PathBuf) -> mpsc::Receiver<String> {
                         let env = serde_json::json!({
                             "id": next_id,
                             "kind": "response",
-                            "notified": { "desktop_id": 1 }
+                "notified": { "desktop_id": "desktop-1" }
                         });
                         next_id += 1;
                         // Best-effort write; the tee may have closed
@@ -304,6 +304,62 @@ fn osc_777_urxvt_round_trips_with_summary_and_body() {
     assert!(
         notify.contains("\"body\":\"needs approval\""),
         "OSC 777 body missing: {notify}"
+    );
+}
+
+#[test]
+fn notify_stream_forwards_osc_payload_to_daemon_notify_request() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let socket = tmp.path().join("flowmux.sock");
+    let rx = spawn_fake_daemon(socket.clone());
+    let pane = "11111111-1111-1111-1111-111111111111";
+
+    let mut child = Command::new(flowmuxctl_path())
+        .arg("--socket")
+        .arg(&socket)
+        .arg("notify-stream")
+        .arg("--pane")
+        .arg(pane)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn flowmuxctl notify-stream");
+
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(b"\x1b]777;notify;Codex;needs approval\x07")
+        .expect("write OSC payload");
+
+    let status = child.wait().expect("wait flowmuxctl notify-stream");
+    if !status.success() {
+        let mut stderr = String::new();
+        if let Some(mut e) = child.stderr.take() {
+            let _ = e.read_to_string(&mut stderr);
+        }
+        panic!("notify-stream exited unsuccessfully: {status:?}\nstderr: {stderr}");
+    }
+
+    let notify = rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("fake daemon should receive notify request");
+    assert!(
+        notify.contains("\"verb\":\"notify\""),
+        "expected notify envelope, got {notify}"
+    );
+    assert!(
+        notify.contains(&format!("\"pane\":\"{pane}\"")),
+        "notify-stream pane attribution missing: {notify}"
+    );
+    assert!(
+        notify.contains("\"title\":\"Codex\""),
+        "notify-stream title missing: {notify}"
+    );
+    assert!(
+        notify.contains("\"body\":\"needs approval\""),
+        "notify-stream body missing: {notify}"
     );
 }
 
