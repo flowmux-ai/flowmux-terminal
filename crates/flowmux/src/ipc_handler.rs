@@ -12,6 +12,7 @@ use flowmux_core::{AgentPresence, SplitDirection};
 use flowmux_daemon::DaemonHandler;
 use flowmux_ipc::protocol::{Request, Response, RpcError};
 use flowmux_ipc::server::Handler;
+use flowmux_ssh::SshTarget;
 use std::future::Future;
 use std::pin::Pin;
 use tokio::sync::oneshot;
@@ -61,6 +62,57 @@ impl GuiHandler {
     pub fn new(inner: DaemonHandler, bridge: Bridge) -> Self {
         Self { inner, bridge }
     }
+
+    async fn open_ssh_workspace(&self, target: SshTarget) -> Response {
+        let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
+        let name = target.workspace_name();
+        let command = format!("{}\r", target.command_line());
+        let id = self
+            .inner
+            .store()
+            .create_workspace(Some(name.clone()), root.clone())
+            .await;
+
+        let (tx, rx) = oneshot::channel();
+        if let Err(e) = self
+            .bridge
+            .tx
+            .send(GtkCommand::WorkspaceCreated {
+                id,
+                name,
+                root,
+                ack: tx,
+            })
+            .await
+        {
+            return Response::Error(RpcError::Internal(e.to_string()));
+        }
+        if let Err(e) = rx.await {
+            return Response::Error(RpcError::Internal(e.to_string()));
+        }
+
+        let pane = self
+            .inner
+            .store()
+            .get_workspace(id)
+            .await
+            .and_then(|workspace| workspace.surfaces.first()?.root_pane.first_leaf_id());
+        if let Some(pane) = pane {
+            let (tx, rx) = oneshot::channel();
+            let _ = self
+                .bridge
+                .tx
+                .send(GtkCommand::PaneSendKeys {
+                    pane,
+                    keys: command,
+                    ack: tx,
+                })
+                .await;
+            let _ = rx.await;
+        }
+
+        Response::WorkspaceCreated { id }
+    }
 }
 
 impl Handler for GuiHandler {
@@ -97,6 +149,10 @@ impl Handler for GuiHandler {
                     let _ = rx.await;
                     Response::WorkspaceCreated { id }
                 }
+                Request::SshConnect { target } => match SshTarget::parse(&target) {
+                    Ok(target) => self.open_ssh_workspace(target).await,
+                    Err(e) => Response::Error(RpcError::InvalidArgument(e.to_string())),
+                },
                 Request::PaneSplit { pane, direction } => {
                     match self.inner.store().split_pane(pane, direction).await {
                         None => Response::Error(RpcError::NotFound(pane.to_string())),
@@ -262,6 +318,23 @@ impl Handler for GuiHandler {
                         Err(_) => Response::Error(RpcError::Internal("bridge closed".into())),
                     }
                 }
+                Request::PaneResize { pane, ratio } => {
+                    let (tx, rx) = oneshot::channel();
+                    let _ = self
+                        .bridge
+                        .tx
+                        .send(GtkCommand::ResizePane {
+                            pane,
+                            ratio,
+                            ack: tx,
+                        })
+                        .await;
+                    match rx.await {
+                        Ok(Ok(())) => Response::Ok,
+                        Ok(Err(e)) => Response::Error(RpcError::NotFound(e)),
+                        Err(_) => Response::Error(RpcError::Internal("bridge closed".into())),
+                    }
+                }
                 Request::PaneClose { pane } => {
                     // Peek the pane count up front. Closing the workspace's
                     // last pane is what triggers CloseFocused's confirm
@@ -370,6 +443,26 @@ impl Handler for GuiHandler {
                 }
 
                 // ---- Phase 5 P0 action gap ------------------------
+                Request::BrowserWait {
+                    pane,
+                    condition,
+                    timeout_ms,
+                    poll_ms,
+                } => {
+                    browser_action(
+                        &self.bridge,
+                        pane,
+                        BrowserOp::Wait {
+                            condition,
+                            timeout_ms,
+                            poll_ms,
+                        },
+                    )
+                    .await
+                }
+                Request::BrowserScreenshot { pane, path } => {
+                    browser_action(&self.bridge, pane, BrowserOp::Screenshot { path }).await
+                }
                 Request::BrowserDblClick { pane, target } => {
                     browser_action(&self.bridge, pane, BrowserOp::DblClick { target }).await
                 }
@@ -739,6 +832,77 @@ impl Handler for GuiHandler {
                     }
                 }
 
+                Request::NotificationsList { unread_only } => {
+                    let (tx, rx) = oneshot::channel();
+                    let _ = self
+                        .bridge
+                        .tx
+                        .send(GtkCommand::ListNotifications {
+                            unread_only,
+                            ack: tx,
+                        })
+                        .await;
+                    match rx.await {
+                        Ok((entries, unread_count)) => Response::Notifications {
+                            entries,
+                            unread_count,
+                        },
+                        Err(_) => Response::Error(RpcError::Internal("bridge closed".into())),
+                    }
+                }
+
+                Request::NotificationOpen { id } => {
+                    let (tx, rx) = oneshot::channel();
+                    let _ = self
+                        .bridge
+                        .tx
+                        .send(GtkCommand::OpenNotificationWithAck { id, ack: tx })
+                        .await;
+                    match rx.await {
+                        Ok(changed) => Response::NotificationState { changed },
+                        Err(_) => Response::Error(RpcError::Internal("bridge closed".into())),
+                    }
+                }
+
+                Request::NotificationJumpToUnread => {
+                    let (tx, rx) = oneshot::channel();
+                    let _ = self
+                        .bridge
+                        .tx
+                        .send(GtkCommand::OpenOldestUnreadNotification { ack: tx })
+                        .await;
+                    match rx.await {
+                        Ok(changed) => Response::NotificationState { changed },
+                        Err(_) => Response::Error(RpcError::Internal("bridge closed".into())),
+                    }
+                }
+
+                Request::NotificationMarkRead { id } => {
+                    let (tx, rx) = oneshot::channel();
+                    let _ = self
+                        .bridge
+                        .tx
+                        .send(GtkCommand::MarkNotificationRead { id, ack: tx })
+                        .await;
+                    match rx.await {
+                        Ok(changed) => Response::NotificationState { changed },
+                        Err(_) => Response::Error(RpcError::Internal("bridge closed".into())),
+                    }
+                }
+
+                Request::NotificationsClear => {
+                    let (tx, rx) = oneshot::channel();
+                    let _ = self
+                        .bridge
+                        .tx
+                        .send(GtkCommand::ClearNotifications { ack: tx })
+                        .await;
+                    match rx.await {
+                        Ok(changed) => Response::NotificationState { changed },
+                        Err(_) => Response::Error(RpcError::Internal("bridge closed".into())),
+                    }
+                }
+
                 // Everything else is fully GUI-independent: ping, list,
                 // notify (delegated above), ssh — delegate.
                 _ => self.inner.handle(req).await,
@@ -844,6 +1008,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ssh_connect_creates_workspace_and_sends_ssh_command() {
+        let (handler, rx, _pane, _tab) = single_pane_handler().await;
+        let response = handler.handle(Request::SshConnect {
+            target: "alice@example.com:2222".into(),
+        });
+        tokio::pin!(response);
+
+        let command = tokio::select! {
+            response = &mut response => panic!("ssh completed before workspace ack: {response:?}"),
+            command = rx.recv() => command.expect("ssh should create workspace"),
+        };
+        let GtkCommand::WorkspaceCreated { id, name, ack, .. } = command else {
+            panic!("expected WorkspaceCreated command");
+        };
+        assert_eq!(name, "ssh alice@example.com");
+        ack.send(()).unwrap();
+
+        let command = tokio::select! {
+            response = &mut response => panic!("ssh completed before send-keys ack: {response:?}"),
+            command = rx.recv() => command.expect("ssh should send command to terminal"),
+        };
+        let GtkCommand::PaneSendKeys { keys, ack, .. } = command else {
+            panic!("expected PaneSendKeys command");
+        };
+        assert_eq!(keys, "ssh -p 2222 alice@example.com\r");
+        ack.send(Ok(())).unwrap();
+
+        assert!(matches!(response.await, Response::WorkspaceCreated { id: got } if got == id));
+    }
+
+    #[tokio::test]
     async fn read_only_requests_delegate_without_gtk_dispatch() {
         let (handler, rx, _pane, _tab) = single_pane_handler().await;
 
@@ -912,6 +1107,32 @@ mod tests {
             panic!("expected FocusPane command");
         };
         assert_eq!(command_pane, pane);
+        ack.send(Ok(())).unwrap();
+
+        assert!(matches!(response.await, Response::Ok));
+    }
+
+    #[tokio::test]
+    async fn pane_resize_dispatches_resize_pane_and_waits_for_ack() {
+        let (handler, rx, pane, _tab) = single_pane_handler().await;
+        let response = handler.handle(Request::PaneResize { pane, ratio: 0.6 });
+        tokio::pin!(response);
+
+        let command = tokio::select! {
+            response = &mut response => panic!("pane resize completed before bridge ack: {response:?}"),
+            command = rx.recv() => command.expect("pane resize should dispatch to GTK"),
+        };
+
+        let GtkCommand::ResizePane {
+            pane: command_pane,
+            ratio,
+            ack,
+        } = command
+        else {
+            panic!("expected ResizePane command");
+        };
+        assert_eq!(command_pane, pane);
+        assert!((ratio - 0.6).abs() < f32::EPSILON);
         ack.send(Ok(())).unwrap();
 
         assert!(matches!(response.await, Response::Ok));
@@ -1737,6 +1958,51 @@ mod tests {
             |op| match op {
                 BrowserOp::Count { selector } => assert_eq!(selector, ".row"),
                 other => panic!("expected BrowserOp::Count, got {other:?}"),
+            },
+        )
+        .await;
+
+        assert_browser_action_dispatches(
+            &handler,
+            &rx,
+            pane,
+            Request::BrowserWait {
+                pane,
+                condition: flowmux_ipc::protocol::BrowserWaitCondition::Text("ready".into()),
+                timeout_ms: 500,
+                poll_ms: 25,
+            },
+            |op| match op {
+                BrowserOp::Wait {
+                    condition,
+                    timeout_ms,
+                    poll_ms,
+                } => {
+                    assert_eq!(
+                        condition,
+                        flowmux_ipc::protocol::BrowserWaitCondition::Text("ready".into())
+                    );
+                    assert_eq!(timeout_ms, 500);
+                    assert_eq!(poll_ms, 25);
+                }
+                other => panic!("expected BrowserOp::Wait, got {other:?}"),
+            },
+        )
+        .await;
+
+        assert_browser_action_dispatches(
+            &handler,
+            &rx,
+            pane,
+            Request::BrowserScreenshot {
+                pane,
+                path: std::path::PathBuf::from("/tmp/page.png"),
+            },
+            |op| match op {
+                BrowserOp::Screenshot { path } => {
+                    assert_eq!(path, std::path::PathBuf::from("/tmp/page.png"));
+                }
+                other => panic!("expected BrowserOp::Screenshot, got {other:?}"),
             },
         )
         .await;

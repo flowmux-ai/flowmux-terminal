@@ -7,8 +7,13 @@
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use flowmux_config::paths;
-use flowmux_core::{NotificationLevel, PaneId, SplitDirection, SurfaceId, WorkspaceId};
-use flowmux_ipc::{client::Client, protocol::Request, protocol::Response};
+use flowmux_core::{
+    NotificationId, NotificationLevel, PaneId, SplitDirection, SurfaceId, WorkspaceId,
+};
+use flowmux_ipc::{
+    client::Client,
+    protocol::{BrowserWaitCondition, Request, Response},
+};
 use std::ffi::OsString;
 use std::io::Read;
 use std::path::PathBuf;
@@ -152,6 +157,12 @@ enum Cmd {
         pane: Option<PaneId>,
     },
 
+    /// Inspect and manage flowmux notification state.
+    Notifications {
+        #[command(subcommand)]
+        op: NotificationOp,
+    },
+
     /// Split a pane.
     Split {
         pane: PaneId,
@@ -177,6 +188,18 @@ enum Cmd {
     /// falls back to `$FLOWMUX_PANE_ID`). Requires a flowmux built with
     /// the `vte-text` feature.
     ReadScreen { pane: Option<PaneId> },
+    /// tmux-compatible alias for `read-screen`.
+    CapturePane { pane: Option<PaneId> },
+    /// tmux-compatible alias for `tree`.
+    ListPanes,
+    /// tmux-compatible alias for `focus-pane`.
+    SelectPane { pane: PaneId },
+    /// Resize a pane's parent split to an absolute first-child ratio.
+    ResizePane {
+        pane: PaneId,
+        #[arg(long)]
+        ratio: f32,
+    },
 
     /// Grab keyboard focus for a pane (falls back to `$FLOWMUX_PANE_ID`).
     FocusPane { pane: Option<PaneId> },
@@ -400,6 +423,30 @@ enum Cmd {
 /// most recent `browser snapshot` of the same pane and are resolved
 /// server-side via the daemon's `RefStore`.
 #[derive(Subcommand)]
+enum NotificationOp {
+    /// List notifications, oldest first.
+    List {
+        /// Only show unread notifications.
+        #[arg(long)]
+        unread: bool,
+    },
+
+    /// Mark a notification read and focus its source pane when known.
+    Open { id: NotificationId },
+
+    /// Open the oldest unread notification.
+    #[command(name = "jump-to-unread")]
+    JumpToUnread,
+
+    /// Mark one notification as read without focusing its source pane.
+    #[command(name = "mark-read")]
+    MarkRead { id: NotificationId },
+
+    /// Clear all notifications.
+    Clear,
+}
+
+#[derive(Subcommand)]
 enum BrowserOp {
     /// Open URL in a new in-app browser pane (splits next to the
     /// currently focused pane). Default split direction is right.
@@ -481,6 +528,38 @@ enum BrowserOp {
     IsEnabled { pane: PaneId, target: String },
     /// Print `true`/`false` for whether a checkbox/radio is checked.
     IsChecked { pane: PaneId, target: String },
+    /// Poll until a page condition is true. Network-idle waits are not supported.
+    #[command(group(
+        clap::ArgGroup::new("condition")
+            .required(true)
+            .args(["selector", "text", "url", "ready_state", "js"])
+    ))]
+    Wait {
+        pane: PaneId,
+        /// CSS selector that must resolve to at least one element.
+        #[arg(long)]
+        selector: Option<String>,
+        /// Text that must appear in document.body.innerText.
+        #[arg(long)]
+        text: Option<String>,
+        /// Substring that must appear in location.href.
+        #[arg(long)]
+        url: Option<String>,
+        /// Required document.readyState value (loading, interactive, complete).
+        #[arg(long)]
+        ready_state: Option<String>,
+        /// JavaScript expression or function body that evaluates truthy.
+        #[arg(long)]
+        js: Option<String>,
+        /// Maximum wait time in milliseconds.
+        #[arg(long, default_value_t = 5000)]
+        timeout_ms: u64,
+        /// Poll interval in milliseconds.
+        #[arg(long, default_value_t = 100)]
+        poll_ms: u64,
+    },
+    /// Save the visible browser viewport to a PNG file.
+    Screenshot { pane: PaneId, path: PathBuf },
     /// Count elements matching a CSS selector.
     Count { pane: PaneId, selector: String },
 }
@@ -788,8 +867,8 @@ async fn notify_stream(client: &Client, pane: Option<PaneId>) -> anyhow::Result<
 /// Map a `flowmux browser <op>` invocation to its IPC request. Every
 /// arm maps 1:1 to an existing `Request::Browser*` variant, so the new
 /// namespace and the hidden hyphenated aliases share one handler path.
-fn browser_op_to_request(op: BrowserOp) -> Request {
-    match op {
+fn browser_op_to_request(op: BrowserOp) -> anyhow::Result<Request> {
+    let request = match op {
         BrowserOp::Open {
             url,
             right: _,
@@ -854,8 +933,59 @@ fn browser_op_to_request(op: BrowserOp) -> Request {
         BrowserOp::IsVisible { pane, target } => Request::BrowserIsVisible { pane, target },
         BrowserOp::IsEnabled { pane, target } => Request::BrowserIsEnabled { pane, target },
         BrowserOp::IsChecked { pane, target } => Request::BrowserIsChecked { pane, target },
+        BrowserOp::Wait {
+            pane,
+            selector,
+            text,
+            url,
+            ready_state,
+            js,
+            timeout_ms,
+            poll_ms,
+        } => {
+            if timeout_ms == 0 {
+                anyhow::bail!("--timeout-ms must be greater than 0");
+            }
+            if poll_ms == 0 {
+                anyhow::bail!("--poll-ms must be greater than 0");
+            }
+            Request::BrowserWait {
+                pane,
+                condition: browser_wait_condition(selector, text, url, ready_state, js)?,
+                timeout_ms,
+                poll_ms,
+            }
+        }
+        BrowserOp::Screenshot { pane, path } => Request::BrowserScreenshot { pane, path },
         BrowserOp::Count { pane, selector } => Request::BrowserCount { pane, selector },
+    };
+    Ok(request)
+}
+
+fn browser_wait_condition(
+    selector: Option<String>,
+    text: Option<String>,
+    url: Option<String>,
+    ready_state: Option<String>,
+    js: Option<String>,
+) -> anyhow::Result<BrowserWaitCondition> {
+    let mut conditions = [
+        selector.map(BrowserWaitCondition::Selector),
+        text.map(BrowserWaitCondition::Text),
+        url.map(BrowserWaitCondition::Url),
+        ready_state.map(BrowserWaitCondition::ReadyState),
+        js.map(BrowserWaitCondition::Js),
+    ]
+    .into_iter()
+    .flatten();
+
+    let Some(condition) = conditions.next() else {
+        anyhow::bail!("one wait condition is required");
+    };
+    if conditions.next().is_some() {
+        anyhow::bail!("only one wait condition may be used");
     }
+    Ok(condition)
 }
 
 /// The calling agent's flowmux context, resolved from the `FLOWMUX_*`
@@ -963,6 +1093,15 @@ fn build_request(cmd: Cmd) -> anyhow::Result<Request> {
                 level: NotificationLevel::AttentionNeeded,
             }
         }
+        Cmd::Notifications { op } => match op {
+            NotificationOp::List { unread } => Request::NotificationsList {
+                unread_only: unread,
+            },
+            NotificationOp::Open { id } => Request::NotificationOpen { id },
+            NotificationOp::JumpToUnread => Request::NotificationJumpToUnread,
+            NotificationOp::MarkRead { id } => Request::NotificationMarkRead { id },
+            NotificationOp::Clear => Request::NotificationsClear,
+        },
         Cmd::Split { pane, right, down } => {
             let direction = if down {
                 SplitDirection::Horizontal
@@ -981,6 +1120,12 @@ fn build_request(cmd: Cmd) -> anyhow::Result<Request> {
         Cmd::ReadScreen { pane } => Request::PaneReadScreen {
             pane: resolve_pane(pane)?,
         },
+        Cmd::CapturePane { pane } => Request::PaneReadScreen {
+            pane: resolve_pane(pane)?,
+        },
+        Cmd::ListPanes => Request::WorkspaceTree,
+        Cmd::SelectPane { pane } => Request::PaneFocus { pane },
+        Cmd::ResizePane { pane, ratio } => Request::PaneResize { pane, ratio },
         Cmd::FocusPane { pane } => Request::PaneFocus {
             pane: resolve_pane(pane)?,
         },
@@ -995,7 +1140,7 @@ fn build_request(cmd: Cmd) -> anyhow::Result<Request> {
             pane: resolve_pane(pane)?,
             surface,
         },
-        Cmd::Browser { op } => browser_op_to_request(op),
+        Cmd::Browser { op } => browser_op_to_request(op)?,
         Cmd::Ssh { target } => Request::SshConnect { target },
         Cmd::NotifyStream { .. } => unreachable!("handled before request build"),
         Cmd::ClaudeTeams { count, root, args } => Request::ClaudeTeams {
@@ -1577,6 +1722,29 @@ fn print_response(r: &Response, json_mode: bool) -> anyhow::Result<()> {
             print!("{text}");
             return Ok(());
         }
+        if let Response::Notifications {
+            entries,
+            unread_count,
+        } = r
+        {
+            println!("{} notification(s), {unread_count} unread", entries.len());
+            for entry in entries {
+                let state = if entry.read { "read" } else { "unread" };
+                let pane = entry
+                    .pane
+                    .map(|pane| pane.to_string())
+                    .unwrap_or_else(|| "-".to_string());
+                println!(
+                    "{} [{}] {:?} pane={} {} - {}",
+                    entry.id, state, entry.level, pane, entry.title, entry.body
+                );
+            }
+            return Ok(());
+        }
+        if let Response::NotificationState { changed } = r {
+            println!("{}", if *changed { "ok" } else { "not-found" });
+            return Ok(());
+        }
     }
     let s = if json_mode {
         // Single-line JSON — easier to parse from agent scripts
@@ -1910,6 +2078,48 @@ mod tests {
     }
 
     #[test]
+    fn browser_wait_and_screenshot_map_to_ipc_requests() {
+        let pane = PaneId::new();
+        let pane_arg = format!("pane:{pane}");
+        let cli = Cli::try_parse_from([
+            "flowmuxctl",
+            "browser",
+            "wait",
+            &pane_arg,
+            "--selector",
+            ".ready",
+            "--timeout-ms",
+            "750",
+            "--poll-ms",
+            "25",
+        ])
+        .expect("browser wait should parse");
+        assert!(matches!(
+            build_request(cli.cmd).unwrap(),
+            Request::BrowserWait {
+                pane: got,
+                condition: BrowserWaitCondition::Selector(selector),
+                timeout_ms: 750,
+                poll_ms: 25,
+            } if got == pane && selector == ".ready"
+        ));
+
+        let cli = Cli::try_parse_from([
+            "flowmuxctl",
+            "browser",
+            "screenshot",
+            &pane_arg,
+            "/tmp/flowmux-page.png",
+        ])
+        .expect("browser screenshot should parse");
+        assert!(matches!(
+            build_request(cli.cmd).unwrap(),
+            Request::BrowserScreenshot { pane: got, path }
+                if got == pane && path == PathBuf::from("/tmp/flowmux-page.png")
+        ));
+    }
+
+    #[test]
     fn named_key_to_bytes_maps_keys_and_passthrough() {
         assert_eq!(named_key_to_bytes("Enter").unwrap(), "\r");
         assert_eq!(named_key_to_bytes("Tab").unwrap(), "\t");
@@ -1968,6 +2178,37 @@ mod tests {
         assert!(matches!(
             built.unwrap(),
             Request::PaneReadScreen { pane: got } if got == pane
+        ));
+    }
+
+    #[test]
+    fn tmux_style_aliases_map_to_existing_ipc_requests() {
+        let pane = PaneId::new();
+        let pane_arg = format!("pane:{pane}");
+
+        let cli = Cli::try_parse_from(["flowmuxctl", "capture-pane", &pane_arg]).unwrap();
+        assert!(matches!(
+            build_request(cli.cmd).unwrap(),
+            Request::PaneReadScreen { pane: got } if got == pane
+        ));
+
+        let cli = Cli::try_parse_from(["flowmuxctl", "list-panes"]).unwrap();
+        assert!(matches!(
+            build_request(cli.cmd).unwrap(),
+            Request::WorkspaceTree
+        ));
+
+        let cli = Cli::try_parse_from(["flowmuxctl", "select-pane", &pane_arg]).unwrap();
+        assert!(matches!(
+            build_request(cli.cmd).unwrap(),
+            Request::PaneFocus { pane: got } if got == pane
+        ));
+
+        let cli = Cli::try_parse_from(["flowmuxctl", "resize-pane", &pane_arg, "--ratio", "0.6"])
+            .unwrap();
+        assert!(matches!(
+            build_request(cli.cmd).unwrap(),
+            Request::PaneResize { pane: got, ratio } if got == pane && (ratio - 0.6).abs() < f32::EPSILON
         ));
     }
 
@@ -2882,5 +3123,43 @@ mod tests {
             panic!("expected hooks codex stop variant");
         };
         assert_eq!(got_pane, Some(pane));
+    }
+
+    #[test]
+    fn notification_management_commands_map_to_ipc_requests() {
+        let id = NotificationId::new();
+
+        let list = build_request(Cmd::Notifications {
+            op: NotificationOp::List { unread: true },
+        })
+        .unwrap();
+        assert!(matches!(
+            list,
+            Request::NotificationsList { unread_only: true }
+        ));
+
+        let open = build_request(Cmd::Notifications {
+            op: NotificationOp::Open { id },
+        })
+        .unwrap();
+        assert!(matches!(open, Request::NotificationOpen { id: got } if got == id));
+
+        let jump = build_request(Cmd::Notifications {
+            op: NotificationOp::JumpToUnread,
+        })
+        .unwrap();
+        assert!(matches!(jump, Request::NotificationJumpToUnread));
+
+        let mark = build_request(Cmd::Notifications {
+            op: NotificationOp::MarkRead { id },
+        })
+        .unwrap();
+        assert!(matches!(mark, Request::NotificationMarkRead { id: got } if got == id));
+
+        let clear = build_request(Cmd::Notifications {
+            op: NotificationOp::Clear,
+        })
+        .unwrap();
+        assert!(matches!(clear, Request::NotificationsClear));
     }
 }

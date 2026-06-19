@@ -8,7 +8,7 @@
 //! those verbs.
 
 use crate::state_store::StateStore;
-use flowmux_core::{Notification, NotificationId};
+use flowmux_core::{Notification, NotificationId, PaneId};
 use flowmux_ipc::protocol::{Request, Response, RpcError};
 use flowmux_ipc::server::Handler;
 use flowmux_ssh::SshTarget;
@@ -172,10 +172,19 @@ impl Handler for DaemonHandler {
                     Response::Ok
                 }
 
+                Request::PaneResize { pane, ratio } => {
+                    resize_pane_in_store(&self.store, pane, ratio).await
+                }
                 Request::SshConnect { target } => match SshTarget::parse(&target) {
-                    Ok(_) => Response::Error(RpcError::Unimplemented(
-                        "ssh authentication not yet wired".into(),
-                    )),
+                    Ok(target) => {
+                        let root = std::env::current_dir()
+                            .unwrap_or_else(|_| std::path::PathBuf::from("/"));
+                        let id = self
+                            .store
+                            .create_workspace(Some(target.workspace_name()), root)
+                            .await;
+                        Response::WorkspaceCreated { id }
+                    }
                     Err(e) => Response::Error(RpcError::InvalidArgument(e.to_string())),
                 },
 
@@ -185,9 +194,29 @@ impl Handler for DaemonHandler {
     }
 }
 
+async fn resize_pane_in_store(store: &StateStore, pane: PaneId, ratio: f32) -> Response {
+    if !ratio.is_finite() || !(0.0..1.0).contains(&ratio) {
+        return Response::Error(RpcError::InvalidArgument(
+            "ratio must be a finite value between 0 and 1".into(),
+        ));
+    }
+
+    if store.set_pane_split_ratio(pane, ratio).await {
+        return Response::Ok;
+    }
+
+    let Some(split_id) = store.parent_split_for_pane(pane).await else {
+        return Response::Error(RpcError::NotFound(format!("pane not found: {pane}")));
+    };
+
+    let _ = store.set_pane_split_ratio(split_id, ratio).await;
+    Response::Ok
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flowmux_core::{Pane, SplitDirection};
     use flowmux_state::State;
 
     #[tokio::test]
@@ -275,7 +304,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accepts_well_formed_ssh_target_before_unimplemented_transport() {
+    async fn pane_resize_updates_parent_split_ratio() {
+        let handler = DaemonHandler::new(StateStore::new_lazy(State::default()));
+        let ws_id = handler
+            .store()
+            .create_workspace(
+                Some("resize".into()),
+                std::path::PathBuf::from("/tmp/resize"),
+            )
+            .await;
+        let first_pane = handler.store().get_workspace(ws_id).await.unwrap().surfaces[0]
+            .root_pane
+            .first_leaf_id()
+            .unwrap();
+        let (_split_ws_id, second_pane) = handler
+            .store()
+            .split_pane(first_pane, SplitDirection::Vertical)
+            .await
+            .unwrap();
+        let split_id = handler
+            .store()
+            .parent_split_for_pane(second_pane)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            handler
+                .handle(Request::PaneResize {
+                    pane: second_pane,
+                    ratio: 0.7,
+                })
+                .await,
+            Response::Ok
+        ));
+
+        let workspace = handler.store().get_workspace(ws_id).await.unwrap();
+        let Pane::Split { id, ratio, .. } = &workspace.surfaces[0].root_pane else {
+            panic!("expected split root");
+        };
+        assert_eq!(*id, split_id);
+        assert!((*ratio - 0.7).abs() < f32::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn ssh_connect_creates_workspace_after_parse() {
         let handler = DaemonHandler::new(StateStore::new_lazy(State::default()));
 
         let response = handler
@@ -284,15 +356,17 @@ mod tests {
             })
             .await;
 
-        assert!(matches!(
-            response,
-            Response::Error(RpcError::Unimplemented(message))
-                if message.contains("ssh authentication not yet wired")
-        ));
+        let Response::WorkspaceCreated { id } = response else {
+            panic!("expected ssh workspace creation");
+        };
+        assert_eq!(
+            handler.store().get_workspace(id).await.unwrap().name,
+            "ssh alice@example.com"
+        );
     }
 
     #[tokio::test]
-    async fn rejects_malformed_ssh_target_before_unimplemented_transport() {
+    async fn rejects_malformed_ssh_target_before_workspace_creation() {
         let handler = DaemonHandler::new(StateStore::new_lazy(State::default()));
 
         let response = handler

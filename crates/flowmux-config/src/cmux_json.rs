@@ -70,8 +70,72 @@ pub fn load_from_dir(dir: &Path) -> Result<Option<CmuxJson>, LoadError> {
         return Ok(None);
     }
     let text = std::fs::read_to_string(&path)?;
-    let cfg: CmuxJson = serde_json::from_str(&text)?;
+    let cfg = parse_str(&text)?;
     Ok(Some(cfg))
+}
+
+pub fn parse_str(text: &str) -> Result<CmuxJson, LoadError> {
+    Ok(serde_json::from_str(&strip_jsonc_comments(text))?)
+}
+
+fn strip_jsonc_comments(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    let mut in_string = false;
+    let mut escaped = false;
+
+    while let Some(ch) = chars.next() {
+        if in_string {
+            out.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        if ch == '"' {
+            in_string = true;
+            out.push(ch);
+            continue;
+        }
+
+        if ch == '/' {
+            match chars.peek().copied() {
+                Some('/') => {
+                    chars.next();
+                    for next in chars.by_ref() {
+                        if next == '\n' {
+                            out.push('\n');
+                            break;
+                        }
+                    }
+                }
+                Some('*') => {
+                    chars.next();
+                    let mut prev = '\0';
+                    for next in chars.by_ref() {
+                        if next == '\n' {
+                            out.push('\n');
+                        }
+                        if prev == '*' && next == '/' {
+                            break;
+                        }
+                        prev = next;
+                    }
+                }
+                _ => out.push(ch),
+            }
+            continue;
+        }
+
+        out.push(ch);
+    }
+
+    out
 }
 
 #[cfg(test)]
@@ -86,9 +150,35 @@ mod tests {
                 { "id": "test", "label": "Run tests", "run": ["pnpm", "test"] }
             ]
         }"#;
-        let cfg: CmuxJson = serde_json::from_str(raw).unwrap();
+        let cfg = parse_str(raw).unwrap();
         assert_eq!(cfg.name.as_deref(), Some("demo"));
         assert_eq!(cfg.commands.len(), 1);
         assert_eq!(cfg.commands[0].target, CommandTarget::FocusedPane);
+    }
+
+    #[test]
+    fn parses_jsonc_comments_without_touching_strings() {
+        let raw = r#"
+        {
+          // project commands
+          "commands": [
+            {
+              "id": "echo",
+              "label": "Echo // literal",
+              "run": ["printf", "/* not a comment */"],
+              "target": "new_surface"
+            }
+          ],
+          /* shared environment */
+          "env": { "A": "B" }
+        }
+        "#;
+
+        let cfg = parse_str(raw).unwrap();
+        assert_eq!(cfg.commands.len(), 1);
+        assert_eq!(cfg.commands[0].label, "Echo // literal");
+        assert_eq!(cfg.commands[0].run[1], "/* not a comment */");
+        assert_eq!(cfg.commands[0].target, CommandTarget::NewSurface);
+        assert_eq!(cfg.env.get("A").map(String::as_str), Some("B"));
     }
 }

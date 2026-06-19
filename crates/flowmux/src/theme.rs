@@ -331,8 +331,8 @@ paned > separator {{
     background-color: transparent;
     box-shadow: none;
 }}
-/* Visible "active workspace" indicator. Left- and right-edge accent
-   stripes in the focus color so the user can see which workspace is
+/* Visible "active workspace" indicator. A left-edge accent
+   stripe in the focus color lets the user see which workspace is
    currently active. Always full opacity (focus_full), independent of
    the focus-border opacity slider, with no background tint, without
    losing the flowmux-attention override below
@@ -349,7 +349,7 @@ paned > separator {{
 .navigation-sidebar > row.activatable:selected:hover,
 .navigation-sidebar > row.activatable:selected:active,
 .navigation-sidebar > row.activatable:selected.has-open-popup {{
-    box-shadow: inset 2px 0 0 {focus_full}, inset -2px 0 0 {focus_full};
+    box-shadow: inset 5px 0 0 {focus_full};
     /* Nudge the selected row's content 5px right (base left padding is
        10px) so the active workspace reads as indented. */
     padding-left: 15px;
@@ -404,6 +404,20 @@ paned > separator {{
 }}
 .flowmux-pane-tab.flowmux-pane-tab-drop-after {{
     box-shadow: inset -2px 0 0 rgba(96, 165, 250, 0.95);
+}}
+.flowmux-compact-right-sidebar {{
+    background-color: {sidebar};
+    color: {fg};
+    border-left: 1px solid {border};
+}}
+.flowmux-compact-sidebar-title {{
+    color: {subdued_fg};
+    font-size: 0.78em;
+    font-weight: 700;
+}}
+.flowmux-compact-sidebar-value {{
+    color: {fg};
+    font-size: 0.86em;
 }}
 .flowmux-file-browser {{
     background-color: {sidebar};

@@ -10,6 +10,7 @@ description = "Unix-socket IPC protocol between the flowmux GUI/daemon and the f
 [dependencies]
 flowmux-core = { workspace = true }
 flowmux-config = { workspace = true }
+chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }

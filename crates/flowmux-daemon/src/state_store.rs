@@ -426,7 +426,10 @@ impl StateStore {
         let mut s = self.inner.lock().await;
         for ws in s.workspaces.iter_mut() {
             for surface in ws.surfaces.iter_mut() {
-                if surface.root_pane.set_surface_agent(surface_id, agent.clone()) {
+                if surface
+                    .root_pane
+                    .set_surface_agent(surface_id, agent.clone())
+                {
                     return Some(ws.id);
                 }
             }
@@ -686,6 +689,39 @@ impl StateStore {
             self.mark_dirty();
         }
         updated
+    }
+
+    pub async fn set_pane_split_ratio(&self, split_id: PaneId, ratio: f32) -> bool {
+        let mut s = self.inner.lock().await;
+        let mut updated = false;
+        for ws in s.workspaces.iter_mut() {
+            for surface in ws.surfaces.iter_mut() {
+                if surface.root_pane.set_split_ratio(split_id, ratio) {
+                    updated = true;
+                    break;
+                }
+            }
+            if updated {
+                break;
+            }
+        }
+        drop(s);
+        if updated {
+            self.mark_dirty();
+        }
+        updated
+    }
+
+    pub async fn parent_split_for_pane(&self, pane: PaneId) -> Option<PaneId> {
+        let s = self.inner.lock().await;
+        for ws in &s.workspaces {
+            for surface in &ws.surfaces {
+                if let Some(split_id) = surface.root_pane.parent_split_id(pane) {
+                    return Some(split_id);
+                }
+            }
+        }
+        None
     }
 
     /// Remove an entire workspace. Used by the sidebar's X close
@@ -3093,9 +3129,7 @@ mod tests {
         // workspace_view::terminal_title_notify renames the active
         // surface to the agent name. Re-create that pre-condition here.
         assert_eq!(
-            store
-                .rename_surface(pane, surface, "OpenCode".into())
-                .await,
+            store.rename_surface(pane, surface, "OpenCode".into()).await,
             Some(ws_id)
         );
 
@@ -3114,9 +3148,7 @@ mod tests {
             .await;
         let pane = first_pane(&store.get_workspace(ws_id).await.unwrap());
         let surface = first_pane_active_surface(&store.get_workspace(ws_id).await.unwrap());
-        store
-            .rename_surface(pane, surface, "OPENCODE".into())
-            .await;
+        store.rename_surface(pane, surface, "OPENCODE".into()).await;
 
         assert!(store
             .find_pane_by_active_title_prefix("opencode")
@@ -3171,19 +3203,11 @@ mod tests {
             .await
             .expect("split must succeed");
 
-        let original_surface = store
-            .get_workspace(ws_id)
-            .await
-            .unwrap()
-            .surfaces[0]
+        let original_surface = store.get_workspace(ws_id).await.unwrap().surfaces[0]
             .root_pane
             .active_surface_id(original)
             .unwrap();
-        let sibling_surface = store
-            .get_workspace(ws_id)
-            .await
-            .unwrap()
-            .surfaces[0]
+        let sibling_surface = store.get_workspace(ws_id).await.unwrap().surfaces[0]
             .root_pane
             .active_surface_id(sibling)
             .unwrap();

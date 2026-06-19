@@ -52,6 +52,38 @@ impl SshTarget {
         }
         Ok(SshTarget { user, host, port })
     }
+
+    pub fn workspace_name(&self) -> String {
+        format!("ssh {}", self.address())
+    }
+
+    pub fn command_line(&self) -> String {
+        let mut parts = vec!["ssh".to_string()];
+        if self.port != 22 {
+            parts.push("-p".into());
+            parts.push(self.port.to_string());
+        }
+        parts.push(shell_quote(&self.address()));
+        parts.join(" ")
+    }
+
+    fn address(&self) -> String {
+        if self.user.is_empty() {
+            self.host.clone()
+        } else {
+            format!("{}@{}", self.user, self.host)
+        }
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    if value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | '@' | ':'))
+    {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -122,6 +154,13 @@ mod tests {
         assert_eq!(t.user, "alice");
         assert_eq!(t.host, "dev.example.com");
         assert_eq!(t.port, 2222);
+    }
+
+    #[test]
+    fn builds_openssh_command_line() {
+        let t = SshTarget::parse("alice@dev.example.com:2222").unwrap();
+        assert_eq!(t.workspace_name(), "ssh alice@dev.example.com");
+        assert_eq!(t.command_line(), "ssh -p 2222 alice@dev.example.com");
     }
     #[test]
     fn parse_host_only() {

@@ -281,6 +281,16 @@ impl PaneRegistry {
         out
     }
 
+    /// Apply a split ratio to a registered `gtk::Paned` immediately or once
+    /// the widget has a meaningful size.
+    pub fn apply_split_ratio(&self, split_id: PaneId, ratio: f32) -> bool {
+        let Some(paned) = self.split_paneds.get(&split_id) else {
+            return false;
+        };
+        apply_ratio_when_sized(paned, ratio.clamp(0.05, 0.95));
+        true
+    }
+
     /// Register one split paned widget. If the same split_id already exists,
     /// update only the widget and keep the workspace mapping.
     pub fn register_split(&mut self, split_id: PaneId, workspace: WorkspaceId, paned: gtk::Paned) {

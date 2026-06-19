@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use flowmux_core::{
-    AgentActivity, NotificationLevel, Pane, PaneContent, PaneId, PlacementStrategy, SplitDirection,
-    SurfaceId, SurfaceKind, Workspace, WorkspaceId,
+    AgentActivity, NotificationId, NotificationLevel, Pane, PaneContent, PaneId, PlacementStrategy,
+    SplitDirection, SurfaceId, SurfaceKind, Workspace, WorkspaceId,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -38,18 +38,14 @@ pub const BROWSER_VERBS: &[&str] = &[
     "is-checked",
     "count",
     "eval",
+    "wait",
+    "screenshot",
 ];
 
 /// Browser features that are intentionally unsupported and return a
 /// `not_supported` style result. They require the Chrome DevTools
 /// Protocol, which WebKitGTK 6.0 does not expose (see `AGENTS.md`).
-pub const UNSUPPORTED_FEATURES: &[&str] = &[
-    "screenshot",
-    "wait",
-    "viewport",
-    "network-mock",
-    "screencast",
-];
+pub const UNSUPPORTED_FEATURES: &[&str] = &["viewport", "network-mock", "screencast"];
 
 /// Static description of what this flowmux build can and cannot do,
 /// returned by `flowmux capabilities`. Lets an agent probe the browser
@@ -228,6 +224,12 @@ pub enum Request {
     PaneFocus {
         pane: PaneId,
     },
+    /// `flowmux resize-pane <pane> --ratio <0.05..0.95>` — resize pane's
+    /// parent split by setting the first-child ratio.
+    PaneResize {
+        pane: PaneId,
+        ratio: f32,
+    },
 
     /// `flowmux close-pane <pane>` — close a pane. Refuses (without a
     /// dialog) when it is the workspace's last pane, so an agent's call
@@ -264,6 +266,27 @@ pub enum Request {
         body: String,
         level: NotificationLevel,
     },
+
+    /// `flowmux notifications list`
+    NotificationsList {
+        unread_only: bool,
+    },
+
+    /// `flowmux notifications open <id>` — mark read and focus the source pane.
+    NotificationOpen {
+        id: NotificationId,
+    },
+
+    /// `flowmux notifications jump-to-unread` — open the oldest unread entry.
+    NotificationJumpToUnread,
+
+    /// `flowmux notifications mark-read <id>`
+    NotificationMarkRead {
+        id: NotificationId,
+    },
+
+    /// `flowmux notifications clear`
+    NotificationsClear,
 
     /// `flowmux ssh user@host` — open a remote workspace.
     SshConnect {
@@ -341,6 +364,18 @@ pub enum Request {
         pane: PaneId,
         target: String,
         name: String,
+    },
+    /// `flowmux browser wait <pane> ...` — poll page state until a condition is true.
+    BrowserWait {
+        pane: PaneId,
+        condition: BrowserWaitCondition,
+        timeout_ms: u64,
+        poll_ms: u64,
+    },
+    /// `flowmux browser screenshot <pane> <path>` — write a visible-viewport PNG.
+    BrowserScreenshot {
+        pane: PaneId,
+        path: PathBuf,
     },
 
     // ---- Phase 5 P0 action gap: cmux-equivalent verbs that round
@@ -474,6 +509,15 @@ pub enum Request {
     },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BrowserWaitCondition {
+    Selector(String),
+    Text(String),
+    Url(String),
+    ReadyState(String),
+    Js(String),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Response {
@@ -536,7 +580,29 @@ pub enum Response {
     Notified {
         desktop_id: Option<String>,
     },
+    /// Reply to `NotificationsList`.
+    Notifications {
+        entries: Vec<NotificationSummary>,
+        unread_count: usize,
+    },
+    /// Reply to notification state-management requests.
+    NotificationState {
+        changed: bool,
+    },
     Error(RpcError),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationSummary {
+    pub id: NotificationId,
+    pub title: String,
+    pub body: String,
+    pub level: NotificationLevel,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub read: bool,
+    pub pane: Option<PaneId>,
+    pub surface: Option<SurfaceId>,
+    pub workspace: Option<WorkspaceId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -655,14 +721,23 @@ mod tests {
     fn capabilities_lists_verbs_and_unsupported_and_round_trips() {
         let caps = capabilities();
         // A few representative verbs the agent docs promise.
-        for v in ["open", "snapshot", "click", "is-visible", "count", "eval"] {
+        for v in [
+            "open",
+            "snapshot",
+            "click",
+            "is-visible",
+            "count",
+            "eval",
+            "wait",
+            "screenshot",
+        ] {
             assert!(
                 caps.browser_verbs.iter().any(|s| s == v),
                 "missing browser verb {v}"
             );
         }
         // The CDP-only features must be reported as unsupported.
-        for u in ["screenshot", "wait", "viewport", "screencast"] {
+        for u in ["viewport", "screencast"] {
             assert!(
                 caps.unsupported.iter().any(|s| s == u),
                 "missing unsupported feature {u}"

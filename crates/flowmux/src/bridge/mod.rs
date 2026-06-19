@@ -12,6 +12,7 @@ use flowmux_core::{
     AgentActivity, NotificationId, NotificationLevel, PaneId, PlacementStrategy, SplitDirection,
     SurfaceId, WorkspaceId,
 };
+use flowmux_ipc::protocol::{BrowserWaitCondition, NotificationSummary};
 use std::path::PathBuf;
 use tokio::sync::oneshot;
 
@@ -73,6 +74,14 @@ pub enum BrowserOp {
     Attr {
         target: String,
         name: String,
+    },
+    Wait {
+        condition: BrowserWaitCondition,
+        timeout_ms: u64,
+        poll_ms: u64,
+    },
+    Screenshot {
+        path: PathBuf,
     },
 
     // ---- Phase 5 P0 action gap ----
@@ -143,6 +152,8 @@ pub enum GtkCommand {
     /// The dialog owns OK / cancel handling and returns nothing through
     /// the bridge.
     ShowOptionsDialog,
+    /// Show the command palette from the GTK side.
+    ShowCommandPalette,
     /// Render a freshly-created workspace in the sidebar + open its first pane.
     WorkspaceCreated {
         id: WorkspaceId,
@@ -175,6 +186,11 @@ pub enum GtkCommand {
     /// `Err` when the id is not a live pane. Non-destructive.
     FocusPane {
         pane: PaneId,
+        ack: oneshot::Sender<Result<(), String>>,
+    },
+    ResizePane {
+        pane: PaneId,
+        ratio: f32,
         ack: oneshot::Sender<Result<(), String>>,
     },
     /// Split the focused pane and re-render its workspace. Used by
@@ -364,6 +380,26 @@ pub enum GtkCommand {
     /// activate its workspace (if known), and grab focus on the source
     /// pane (if known). Mirrors cmux's `openNotification → focusTab`.
     OpenNotification { id: NotificationId },
+    /// CLI notification management: read the in-process transcript.
+    ListNotifications {
+        unread_only: bool,
+        ack: oneshot::Sender<(Vec<NotificationSummary>, usize)>,
+    },
+    /// CLI notification management: open one entry and report whether it
+    /// existed.
+    OpenNotificationWithAck {
+        id: NotificationId,
+        ack: oneshot::Sender<bool>,
+    },
+    /// CLI notification management: open the oldest unread entry.
+    OpenOldestUnreadNotification { ack: oneshot::Sender<bool> },
+    /// CLI notification management: mark one entry as read.
+    MarkNotificationRead {
+        id: NotificationId,
+        ack: oneshot::Sender<bool>,
+    },
+    /// CLI notification management: clear the transcript.
+    ClearNotifications { ack: oneshot::Sender<bool> },
     /// User clicked the trash button on a bell-popover row. Drop the
     /// entry from the in-process transcript, withdraw its FDO toast
     /// (when one exists) and re-publish the dock badge unread count.

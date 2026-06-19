@@ -7,7 +7,9 @@ use crate::bridge::{
     Bridge, BrowserActionResult, BrowserOp, BrowserOpenOutcome, FocusDir, GtkCommand, WsNav,
 };
 use crate::keybindings::FocusedPane;
-use crate::notifications::{NotificationStore, RemoveOutcome, SetDesktopIdResult};
+use crate::notifications::{
+    NotificationEntry, NotificationStore, RemoveOutcome, SetDesktopIdResult,
+};
 use crate::theme::ResolvedTheme;
 use crate::ui::file_browser::{FileBrowserPaneState, FileBrowserPanel};
 use crate::ui::sidebar::Sidebar;
@@ -17,19 +19,246 @@ use crate::ui::workspace_view::{
     IncrementalSplitOutcome, PaneRegistry, TornOffSurface,
 };
 use adw::prelude::*;
+use flowmux_config::cmux_json::{CmuxJson, CommandTarget, CustomCommand};
 use flowmux_core::{
-    Pane, PaneContent, PaneId, PaneSurface, PlacementStrategy, SplitDirection, Surface, SurfaceId,
-    SurfaceKind, Workspace, WorkspaceId,
+    AgentActivity, Pane, PaneContent, PaneId, PaneSurface, PlacementStrategy, SplitDirection,
+    Surface, SurfaceId, SurfaceKind, Workspace, WorkspaceId,
 };
 use flowmux_daemon::StateStore;
+use flowmux_ipc::protocol::{BrowserWaitCondition, NotificationSummary};
 use gtk::glib;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 use webkit6::prelude::*;
+
+fn notification_summary(entry: NotificationEntry) -> NotificationSummary {
+    NotificationSummary {
+        id: entry.id,
+        title: entry.title,
+        body: entry.body,
+        level: entry.level,
+        created_at: entry.created_at,
+        read: entry.read,
+        pane: entry.pane,
+        surface: entry.surface,
+        workspace: entry.workspace,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CommandPaletteCommand {
+    OpenBrowser,
+    RenameTab,
+    ReloadConfig,
+    OpenUnread,
+}
+
+fn command_palette_commands() -> &'static [CommandPaletteCommand] {
+    &[
+        CommandPaletteCommand::OpenBrowser,
+        CommandPaletteCommand::RenameTab,
+        CommandPaletteCommand::ReloadConfig,
+        CommandPaletteCommand::OpenUnread,
+    ]
+}
+
+fn command_palette_label(command: CommandPaletteCommand) -> &'static str {
+    match command {
+        CommandPaletteCommand::OpenBrowser => "Open browser",
+        CommandPaletteCommand::RenameTab => "Rename tab",
+        CommandPaletteCommand::ReloadConfig => "Reload config",
+        CommandPaletteCommand::OpenUnread => "Open unread notification",
+    }
+}
+
+fn shell_quote(arg: &str) -> String {
+    if !arg.is_empty()
+        && arg
+            .bytes()
+            .all(|b| matches!(b, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'-' | b'.' | b'/' | b':' | b'='))
+    {
+        return arg.to_string();
+    }
+    format!("'{}'", arg.replace('\'', "'\\''"))
+}
+
+fn custom_command_cwd(base_dir: &std::path::Path, command: &CustomCommand) -> std::path::PathBuf {
+    match command.cwd.as_deref() {
+        Some(cwd) => {
+            let path = std::path::PathBuf::from(cwd);
+            if path.is_absolute() {
+                path
+            } else {
+                base_dir.join(path)
+            }
+        }
+        None => base_dir.to_path_buf(),
+    }
+}
+
+fn custom_command_shell_line(
+    base_dir: &std::path::Path,
+    env: &std::collections::BTreeMap<String, String>,
+    command: &CustomCommand,
+) -> Option<String> {
+    if command.run.is_empty() {
+        return None;
+    }
+
+    let mut parts = vec![
+        "cd".to_string(),
+        shell_quote(&custom_command_cwd(base_dir, command).to_string_lossy()),
+        "&&".to_string(),
+    ];
+    if !env.is_empty() {
+        parts.push("env".to_string());
+        for (key, value) in env {
+            parts.push(shell_quote(&format!("{key}={value}")));
+        }
+    }
+    parts.extend(command.run.iter().map(|arg| shell_quote(arg)));
+    Some(parts.join(" "))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CompactRightSidebarSummary {
+    notifications: Vec<String>,
+    sessions: Vec<String>,
+    logs: Vec<String>,
+}
+
+#[derive(Clone)]
+struct CompactRightSidebar {
+    root: gtk::Box,
+    notifications: gtk::Label,
+    sessions: gtk::Label,
+    logs: gtk::Label,
+}
+
+impl CompactRightSidebar {
+    fn new() -> Self {
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        root.add_css_class("flowmux-compact-right-sidebar");
+        root.set_margin_top(8);
+        root.set_margin_bottom(8);
+        root.set_margin_start(8);
+        root.set_margin_end(8);
+
+        let notifications = compact_sidebar_section(&root, "Notifications");
+        let sessions = compact_sidebar_section(&root, "Active sessions");
+        let logs = compact_sidebar_section(&root, "Recent logs");
+
+        let sidebar = Self {
+            root,
+            notifications,
+            sessions,
+            logs,
+        };
+        sidebar.refresh(CompactRightSidebarSummary {
+            notifications: Vec::new(),
+            sessions: Vec::new(),
+            logs: Vec::new(),
+        });
+        sidebar
+    }
+
+    fn widget(&self) -> &gtk::Box {
+        &self.root
+    }
+
+    fn refresh(&self, summary: CompactRightSidebarSummary) {
+        set_compact_sidebar_label(
+            &self.notifications,
+            &summary.notifications,
+            "No notifications",
+        );
+        set_compact_sidebar_label(&self.sessions, &summary.sessions, "No active sessions");
+        set_compact_sidebar_label(&self.logs, &summary.logs, "No recent logs");
+    }
+}
+
+fn compact_sidebar_section(parent: &gtk::Box, title: &str) -> gtk::Label {
+    let title_label = gtk::Label::new(Some(title));
+    title_label.add_css_class("flowmux-compact-sidebar-title");
+    title_label.set_halign(gtk::Align::Start);
+    parent.append(&title_label);
+
+    let label = gtk::Label::new(None);
+    label.add_css_class("flowmux-compact-sidebar-value");
+    label.set_halign(gtk::Align::Start);
+    label.set_wrap(true);
+    label.set_xalign(0.0);
+    parent.append(&label);
+    label
+}
+
+fn set_compact_sidebar_label(label: &gtk::Label, lines: &[String], empty: &str) {
+    if lines.is_empty() {
+        label.set_text(empty);
+    } else {
+        label.set_text(&lines.join("\n"));
+    }
+}
+
+fn compact_right_sidebar_summary(
+    workspaces: &[Workspace],
+    notifications: &NotificationStore,
+) -> CompactRightSidebarSummary {
+    let entries = notifications.entries();
+    let notification_lines = entries
+        .iter()
+        .rev()
+        .take(3)
+        .map(|entry| {
+            let marker = if entry.read { "" } else { "* " };
+            format!("{marker}{}", entry.title)
+        })
+        .collect();
+    let logs = entries
+        .iter()
+        .rev()
+        .take(3)
+        .map(|entry| format!("{:?}: {}", entry.level, entry.body))
+        .collect();
+
+    let mut sessions = Vec::new();
+    for workspace in workspaces {
+        for surface in &workspace.surfaces {
+            let mut agents = Vec::new();
+            surface.root_pane.collect_agent_presences(&mut agents);
+            for (_surface, agent) in agents {
+                if matches!(agent.activity, AgentActivity::Idle) {
+                    continue;
+                }
+                sessions.push(format!(
+                    "{}: {} {}",
+                    workspace.name,
+                    agent.name,
+                    agent_activity_label(agent.activity)
+                ));
+            }
+        }
+    }
+
+    CompactRightSidebarSummary {
+        notifications: notification_lines,
+        sessions,
+        logs,
+    }
+}
+
+fn agent_activity_label(activity: AgentActivity) -> &'static str {
+    match activity {
+        AgentActivity::Running => "running",
+        AgentActivity::NeedsInput => "needs input",
+        AgentActivity::Idle => "idle",
+    }
+}
 
 #[derive(Clone)]
 pub struct WindowController {
@@ -44,6 +273,7 @@ pub struct WindowController {
     sidebar_split: gtk::Paned,
     file_browser_split: gtk::Paned,
     file_browser: FileBrowserPanel,
+    compact_right_sidebar: CompactRightSidebar,
     stack: gtk::Stack,
     surfaces: Rc<RefCell<HashMap<WorkspaceId, gtk::Widget>>>,
     pane_registry: Rc<RefCell<PaneRegistry>>,
@@ -368,10 +598,16 @@ impl WindowController {
             });
         });
 
+        let compact_right_sidebar = CompactRightSidebar::new();
+        let right_sidebar = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        right_sidebar.append(compact_right_sidebar.widget());
+        file_browser.widget().set_vexpand(true);
+        right_sidebar.append(file_browser.widget());
+
         let file_browser_split = gtk::Paned::builder()
             .orientation(gtk::Orientation::Horizontal)
             .start_child(&split)
-            .end_child(file_browser.widget())
+            .end_child(&right_sidebar)
             .resize_start_child(true)
             .resize_end_child(false)
             .shrink_start_child(false)
@@ -422,6 +658,7 @@ impl WindowController {
             sidebar_split: split,
             file_browser_split,
             file_browser,
+            compact_right_sidebar,
             stack,
             surfaces,
             pane_registry,
@@ -456,6 +693,15 @@ impl WindowController {
         handle: Arc<tokio::sync::Mutex<Option<flowmux_notify::DesktopNotifier>>>,
     ) {
         self.notifier = handle;
+    }
+
+    async fn refresh_compact_right_sidebar(&self) {
+        let snapshot = self.store.snapshot().await;
+        self.compact_right_sidebar
+            .refresh(compact_right_sidebar_summary(
+                &snapshot.workspaces,
+                &self.notifications,
+            ));
     }
 
     pub fn show_status_when_empty(&self) {
@@ -1671,6 +1917,28 @@ impl WindowController {
         });
     }
 
+    async fn resize_pane_ratio(&self, pane: PaneId, ratio: f32) -> Result<(), String> {
+        if !ratio.is_finite() || !(0.0..1.0).contains(&ratio) {
+            return Err("ratio must be a finite value between 0 and 1".into());
+        }
+
+        let split_id = if self.store.set_pane_split_ratio(pane, ratio).await {
+            pane
+        } else {
+            let Some(split_id) = self.store.parent_split_for_pane(pane).await else {
+                return Err(format!("pane not found: {pane}"));
+            };
+            let _ = self.store.set_pane_split_ratio(split_id, ratio).await;
+            split_id
+        };
+
+        let _ = self
+            .pane_registry
+            .borrow()
+            .apply_split_ratio(split_id, ratio);
+        Ok(())
+    }
+
     /// Find the first leaf in this workspace's first surface and
     /// grab keyboard focus on it. Deferred to the next idle so the
     /// widget tree is realized first.
@@ -1761,17 +2029,17 @@ impl WindowController {
                         // restart for shortcut edits to take effect.
                         // set_accels_for_action overwrites the same keys so a
                         // second pass on the live ApplicationWindow's app is safe.
-                    if let Some(app) = window
+                        if let Some(app) = window
                             .application()
                             .and_then(|a| a.downcast::<adw::Application>().ok())
-                    {
-                        crate::keybindings::install_accels(&app, &opts);
-                    } else {
-                        tracing::warn!(
+                        {
+                            crate::keybindings::install_accels(&app, &opts);
+                        } else {
+                            tracing::warn!(
                             "options applied without keybinding re-install — window had no Application; restart to pick up shortcut changes"
                         );
-                    }
-                    tracing::info!(
+                        }
+                        tracing::info!(
                             zoom_percent = opts.zoom_percent,
                             engine = ?opts.default_browser_engine,
                             focus_border_color = %opts.focus_border_color,
@@ -1782,6 +2050,10 @@ impl WindowController {
                     },
                 );
             }
+            GtkCommand::ShowCommandPalette => {
+                self.show_command_palette();
+            }
+
             GtkCommand::WorkspaceCreated {
                 id,
                 name: _,
@@ -2335,6 +2607,7 @@ impl WindowController {
                     return;
                 };
                 self.sidebar.bump_notification_badge();
+                self.refresh_compact_right_sidebar().await;
                 let mut marked_attention = false;
                 if matches!(level, flowmux_core::NotificationLevel::AttentionNeeded) {
                     if let Some(ws_id) = workspace {
@@ -2427,6 +2700,63 @@ impl WindowController {
                 // if it was minimized or behind another window.
                 self.window.present();
             }
+            GtkCommand::ListNotifications { unread_only, ack } => {
+                let entries = self
+                    .notifications
+                    .entries()
+                    .into_iter()
+                    .filter(|entry| !unread_only || !entry.read)
+                    .map(notification_summary)
+                    .collect();
+                let _ = ack.send((entries, self.notifications.unread_count()));
+            }
+
+            GtkCommand::OpenNotificationWithAck { id, ack } => {
+                let changed = self.open_notification_id(id).await;
+                let _ = ack.send(changed);
+            }
+
+            GtkCommand::OpenOldestUnreadNotification { ack } => {
+                let id = self
+                    .notifications
+                    .entries()
+                    .into_iter()
+                    .find(|entry| !entry.read)
+                    .map(|entry| entry.id);
+                let changed = match id {
+                    Some(id) => self.open_notification_id(id).await,
+                    None => false,
+                };
+                let _ = ack.send(changed);
+            }
+
+            GtkCommand::MarkNotificationRead { id, ack } => {
+                let desktop_id = self
+                    .notifications
+                    .find(id)
+                    .and_then(|entry| entry.desktop_id);
+                let changed = self.notifications.mark_read(id);
+                if changed {
+                    if let Some(desktop_id) = desktop_id {
+                        self.close_desktop_notifications(vec![desktop_id]);
+                    }
+                    self.refresh_launcher_badge();
+                    self.refresh_compact_right_sidebar().await;
+                }
+                let _ = ack.send(changed);
+            }
+
+            GtkCommand::ClearNotifications { ack } => {
+                let had_entries = !self.notifications.entries().is_empty();
+                let desktop_ids = self.notifications.clear_all();
+                if !desktop_ids.is_empty() {
+                    self.close_desktop_notifications(desktop_ids);
+                }
+                self.refresh_launcher_badge();
+                self.refresh_compact_right_sidebar().await;
+                let _ = ack.send(had_entries);
+            }
+
             GtkCommand::DeleteNotification { id } => {
                 // Trash button on the bell-popover row. Drop the entry,
                 // close any live FDO toast (so the system notification
@@ -2441,6 +2771,9 @@ impl WindowController {
                         // Read-only delete: unread count unchanged, no
                         // FDO toast was outstanding for this entry.
                         self.sidebar.refresh_notification_popover();
+                        self.refresh_compact_right_sidebar().await;
+                        self.refresh_compact_right_sidebar().await;
+                        self.refresh_compact_right_sidebar().await;
                     }
                     RemoveOutcome::RemovedUnread { desktop_id } => {
                         if let Some(did) = desktop_id {
@@ -2466,6 +2799,7 @@ impl WindowController {
                 // Breathe the workspace's color bar while an agent is
                 // Running; clear it otherwise.
                 self.sidebar.set_agent_activity(workspace, activity);
+                self.refresh_compact_right_sidebar().await;
             }
             GtkCommand::FocusWorkspaceAt { idx } => {
                 let snap = self.store.snapshot().await;
@@ -2508,6 +2842,10 @@ impl WindowController {
                 } else {
                     let _ = ack.send(Err(format!("pane not found: {pane}")));
                 }
+            }
+            GtkCommand::ResizePane { pane, ratio, ack } => {
+                let res = self.resize_pane_ratio(pane, ratio).await;
+                let _ = ack.send(res);
             }
             GtkCommand::NotificationOnPane { pane, title, body } => {
                 tracing::info!(%pane, %title, %body, "pane notification");
@@ -2819,6 +3157,12 @@ impl WindowController {
                     },
 
                     // ---- Phase 5 P0 action gap ------------------------
+                    BrowserOp::Wait {
+                        condition,
+                        timeout_ms,
+                        poll_ms,
+                    } => run_browser_wait(browser.clone(), condition, timeout_ms, poll_ms, ack),
+                    BrowserOp::Screenshot { path } => run_browser_screenshot(&browser, path, ack),
                     BrowserOp::DblClick { target } => match resolve_ref(&browser, &target) {
                         Ok(sel) => run_browser_js(
                             &browser,
@@ -3124,6 +3468,272 @@ impl WindowController {
     /// what actually shrinks Ubuntu Dock's per-app notification count —
     /// the legacy FDO `CloseNotification` path used to leave both the
     /// message-tray entry and the badge stuck.
+    fn show_command_palette(&self) {
+        let dialog = gtk::Window::builder()
+            .transient_for(&self.window)
+            .modal(true)
+            .title("Command Palette")
+            .default_width(360)
+            .build();
+
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        content.set_spacing(6);
+        content.set_margin_top(12);
+        content.set_margin_bottom(12);
+        content.set_margin_start(12);
+        content.set_margin_end(12);
+        dialog.set_child(Some(&content));
+
+        for command in command_palette_commands() {
+            let button = gtk::Button::with_label(command_palette_label(*command));
+            button.set_hexpand(true);
+            button.set_halign(gtk::Align::Fill);
+            let controller = self.clone();
+            let dialog_for_click = dialog.clone();
+            let command = *command;
+            button.connect_clicked(move |_| {
+                dialog_for_click.close();
+                let controller = controller.clone();
+                glib::MainContext::default().spawn_local(async move {
+                    controller.run_command_palette_command(command).await;
+                });
+            });
+            content.append(&button);
+        }
+
+        if let Some((base_dir, config)) = self.command_palette_project_config() {
+            for command in config.commands.clone() {
+                let button = gtk::Button::with_label(&command.label);
+                button.set_hexpand(true);
+                button.set_halign(gtk::Align::Fill);
+                let controller = self.clone();
+                let dialog_for_click = dialog.clone();
+                let env = config.env.clone();
+                let base_dir = base_dir.clone();
+                button.connect_clicked(move |_| {
+                    dialog_for_click.close();
+                    let controller = controller.clone();
+                    let command = command.clone();
+                    let env = env.clone();
+                    let base_dir = base_dir.clone();
+                    glib::MainContext::default().spawn_local(async move {
+                        controller.run_project_command(base_dir, env, command).await;
+                    });
+                });
+                content.append(&button);
+            }
+        }
+
+        dialog.present();
+    }
+
+    fn command_palette_project_config(&self) -> Option<(std::path::PathBuf, CmuxJson)> {
+        let base_dir = self
+            .focused_pane
+            .get()
+            .and_then(|pane| self.pane_registry.borrow().current_dir_for_pane(pane))
+            .or_else(|| std::env::current_dir().ok())?;
+
+        match flowmux_config::cmux_json::load_from_dir(&base_dir) {
+            Ok(Some(config)) => Some((base_dir, config)),
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!(error = %e, dir = %base_dir.display(), "failed to load cmux.json");
+                None
+            }
+        }
+    }
+
+    async fn run_command_palette_command(&self, command: CommandPaletteCommand) {
+        match command {
+            CommandPaletteCommand::OpenBrowser => {
+                if let Some(pane) = self.focused_pane.get() {
+                    self.dispatch(GtkCommand::NewBrowserSurface { pane }).await;
+                }
+            }
+            CommandPaletteCommand::RenameTab => {
+                if let Some(pane) = self.focused_pane.get() {
+                    if let Some(surface) = self.pane_registry.borrow().active_surface(pane) {
+                        self.dispatch(GtkCommand::ShowRenameSurfaceDialog { pane, surface })
+                            .await;
+                    }
+                }
+            }
+            CommandPaletteCommand::ReloadConfig => {
+                self.reload_runtime_config();
+            }
+            CommandPaletteCommand::OpenUnread => {
+                let id = self
+                    .notifications
+                    .entries()
+                    .into_iter()
+                    .find(|entry| !entry.read)
+                    .map(|entry| entry.id);
+                if let Some(id) = id {
+                    self.open_notification_id(id).await;
+                }
+            }
+        }
+    }
+
+    async fn run_project_command(
+        &self,
+        base_dir: std::path::PathBuf,
+        env: std::collections::BTreeMap<String, String>,
+        command: CustomCommand,
+    ) {
+        let Some(line) = custom_command_shell_line(&base_dir, &env, &command) else {
+            tracing::warn!(id = %command.id, "project command has empty run argv");
+            return;
+        };
+
+        if command.confirm && !self.confirm_project_command(&command).await {
+            return;
+        }
+
+        let cwd = custom_command_cwd(&base_dir, &command);
+        let Some(pane) = self
+            .prepare_project_command_target(command.target, cwd)
+            .await
+        else {
+            tracing::warn!(id = %command.id, "project command had no target pane");
+            return;
+        };
+
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.dispatch(GtkCommand::PaneSendKeys {
+            pane,
+            keys: format!("{line}\r"),
+            ack: ack_tx,
+        })
+        .await;
+        if let Ok(Err(e)) = ack_rx.await {
+            tracing::warn!(error = %e, id = %command.id, "project command send failed");
+        }
+    }
+
+    async fn prepare_project_command_target(
+        &self,
+        target: CommandTarget,
+        cwd: std::path::PathBuf,
+    ) -> Option<PaneId> {
+        let pane = self.focused_pane.get()?;
+        match target {
+            CommandTarget::FocusedPane => Some(pane),
+            CommandTarget::NewSurface => {
+                let (ws_id, surface_id) = self
+                    .store
+                    .add_terminal_surface_to_pane(pane, Some(cwd))
+                    .await?;
+                self.attach_or_rerender_surface(ws_id, pane, surface_id)
+                    .await;
+                Some(pane)
+            }
+            CommandTarget::SplitDown | CommandTarget::SplitRight => {
+                let direction = match target {
+                    CommandTarget::SplitDown => SplitDirection::Horizontal,
+                    CommandTarget::SplitRight => SplitDirection::Vertical,
+                    _ => unreachable!(),
+                };
+                let (ws_id, new_pane) = self.store.split_pane(pane, direction).await?;
+                self.apply_split_incremental_or_rerender(ws_id, pane, new_pane, direction)
+                    .await;
+                Some(new_pane)
+            }
+        }
+    }
+
+    async fn confirm_project_command(&self, command: &CustomCommand) -> bool {
+        let dialog = adw::AlertDialog::new(
+            Some("Run command?"),
+            Some(&format!("{}: {}", command.label, command.run.join(" "))),
+        );
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("run", "Run");
+        dialog.set_default_response(Some("run"));
+        dialog.set_close_response("cancel");
+
+        let (tx, rx) = oneshot::channel();
+        let tx = Rc::new(RefCell::new(Some(tx)));
+        dialog.connect_response(None, move |dialog, response| {
+            if let Some(tx) = tx.borrow_mut().take() {
+                let _ = tx.send(response == "run");
+            }
+            dialog.close();
+        });
+        dialog.present(Some(&self.window));
+        rx.await.unwrap_or(false)
+    }
+
+    fn reload_runtime_config(&self) {
+        let opts = flowmux_config::options::load();
+        *self.options.borrow_mut() = opts.clone();
+
+        let font = self
+            .theme
+            .font_with_overrides(opts.font_family.as_deref(), opts.font_size);
+        let registry = self.pane_registry.borrow();
+        for terminal in registry.terminals.values() {
+            terminal.set_font(&font);
+            terminal.set_font_scale(opts.zoom_factor());
+        }
+        for browser in registry.browsers.values() {
+            browser.web_view.set_zoom_level(opts.zoom_factor());
+        }
+        drop(registry);
+
+        self.css_provider.load_from_string(&self.theme.css(
+            opts.focus_border_color_or_default(),
+            opts.focus_border_alpha(),
+        ));
+
+        if let Some(app) = self
+            .window
+            .application()
+            .and_then(|a| a.downcast::<adw::Application>().ok())
+        {
+            crate::keybindings::install_accels(&app, &opts);
+        } else {
+            tracing::warn!(
+                "config reloaded without keybinding re-install — window had no Application"
+            );
+        }
+    }
+
+    async fn open_notification_id(&self, id: flowmux_core::NotificationId) -> bool {
+        let Some(entry) = self.notifications.find(id) else {
+            tracing::debug!(%id, "open notification: id not found");
+            return false;
+        };
+
+        let desktop_id = entry.desktop_id.clone();
+        let changed = self.notifications.mark_read(id);
+        if changed {
+            if let Some(desktop_id) = desktop_id {
+                self.close_desktop_notifications(vec![desktop_id]);
+            }
+            self.refresh_launcher_badge();
+        }
+
+        if let Some(ws_id) = entry.workspace {
+            self.activate_workspace(ws_id).await;
+        }
+
+        if let Some(pane) = entry.pane {
+            if let Some(source_surface) = entry.surface {
+                let active = self.pane_registry.borrow().active_surface(pane);
+                if active != Some(source_surface) {
+                    self.activate_surface_now(pane, source_surface).await;
+                }
+            }
+
+            self.focus_pane(pane);
+        }
+
+        self.window.present();
+        true
+    }
+
     fn close_desktop_notifications(&self, desktop_ids: Vec<String>) {
         if desktop_ids.is_empty() {
             return;
@@ -4052,6 +4662,124 @@ fn run_browser_js(
 }
 
 /// Spawn the GTK-side dispatch loop. Lives on the main context.
+fn run_browser_wait(
+    browser: crate::ui::browser_pane::BrowserPane,
+    condition: BrowserWaitCondition,
+    timeout_ms: u64,
+    poll_ms: u64,
+    ack: tokio::sync::oneshot::Sender<Result<BrowserActionResult, String>>,
+) {
+    let js = Rc::<str>::from(browser_wait_js(&condition));
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let interval = Duration::from_millis(poll_ms.max(1));
+    let ack = Rc::new(RefCell::new(Some(ack)));
+    poll_browser_wait(browser, js, deadline, interval, ack);
+}
+
+fn poll_browser_wait(
+    browser: crate::ui::browser_pane::BrowserPane,
+    js: Rc<str>,
+    deadline: Instant,
+    interval: Duration,
+    ack: Rc<RefCell<Option<tokio::sync::oneshot::Sender<Result<BrowserActionResult, String>>>>>,
+) {
+    if Instant::now() >= deadline {
+        if let Some(ack) = ack.borrow_mut().take() {
+            let _ = ack.send(Ok(BrowserActionResult::Bool(false)));
+        }
+        return;
+    }
+
+    let next_browser = browser.clone();
+    let next_js = js.clone();
+    let next_ack = ack.clone();
+    browser.evaluate_js(&js, move |result| match result {
+        Ok(value) if browser_js_truthy(&value) => {
+            if let Some(ack) = ack.borrow_mut().take() {
+                let _ = ack.send(Ok(BrowserActionResult::Bool(true)));
+            }
+        }
+        Ok(_) => {
+            if Instant::now() >= deadline {
+                if let Some(ack) = ack.borrow_mut().take() {
+                    let _ = ack.send(Ok(BrowserActionResult::Bool(false)));
+                }
+                return;
+            }
+            glib::timeout_add_local_once(interval, move || {
+                poll_browser_wait(next_browser, next_js, deadline, interval, next_ack);
+            });
+        }
+        Err(e) => {
+            if let Some(ack) = ack.borrow_mut().take() {
+                let _ = ack.send(Err(e));
+            }
+        }
+    });
+}
+
+fn browser_wait_js(condition: &BrowserWaitCondition) -> String {
+    let literal = |value: &str| serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into());
+    match condition {
+        BrowserWaitCondition::Selector(selector) => {
+            format!("Boolean(document.querySelector({}))", literal(selector))
+        }
+        BrowserWaitCondition::Text(text) => format!(
+            "Boolean(document.body && document.body.innerText.includes({}))",
+            literal(text)
+        ),
+        BrowserWaitCondition::Url(url) => {
+            format!("Boolean(location.href.includes({}))", literal(url))
+        }
+        BrowserWaitCondition::ReadyState(state) => {
+            format!("document.readyState === {}", literal(state))
+        }
+        BrowserWaitCondition::Js(source) => format!(
+            r#"
+(() => {{
+  const source = {};
+  try {{
+    const value = Function("return (" + source + ")")();
+    return Boolean(typeof value === "function" ? value() : value);
+  }} catch (_) {{
+    return Boolean(Function(source)());
+  }}
+}})()
+"#,
+            literal(source)
+        ),
+    }
+}
+
+fn browser_js_truthy(value: &str) -> bool {
+    !matches!(value.trim(), "" | "false" | "0" | "null" | "undefined")
+}
+
+fn run_browser_screenshot(
+    browser: &crate::ui::browser_pane::BrowserPane,
+    path: PathBuf,
+    ack: tokio::sync::oneshot::Sender<Result<BrowserActionResult, String>>,
+) {
+    let cell = std::cell::Cell::new(Some(ack));
+    browser.web_view.snapshot(
+        webkit6::SnapshotRegion::Visible,
+        webkit6::SnapshotOptions::NONE,
+        gtk::gio::Cancellable::NONE,
+        move |result| {
+            if let Some(ack) = cell.take() {
+                let mapped = match result {
+                    Ok(texture) => texture
+                        .save_to_png(&path)
+                        .map(|_| BrowserActionResult::String(path.display().to_string()))
+                        .map_err(|e| e.to_string()),
+                    Err(e) => Err(e.to_string()),
+                };
+                let _ = ack.send(mapped);
+            }
+        },
+    );
+}
+
 pub fn spawn_dispatch_loop(rx: async_channel::Receiver<GtkCommand>, controller: WindowController) {
     glib::MainContext::default().spawn_local(async move {
         while let Ok(cmd) = rx.recv().await {
@@ -6780,6 +7508,163 @@ mod tests {
             })
             .await;
         ack_rx.await.unwrap()
+    }
+
+    #[test]
+    fn command_palette_exposes_roadmap_actions() {
+        let labels: Vec<_> = command_palette_commands()
+            .iter()
+            .map(|command| command_palette_label(*command))
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                "Open browser",
+                "Rename tab",
+                "Reload config",
+                "Open unread notification"
+            ]
+        );
+    }
+
+    #[test]
+    fn browser_wait_js_covers_supported_conditions() {
+        assert!(
+            browser_wait_js(&BrowserWaitCondition::Selector(".ready".into()))
+                .contains("document.querySelector")
+        );
+        assert!(browser_wait_js(&BrowserWaitCondition::Text("done".into()))
+            .contains("innerText.includes"));
+        assert!(
+            browser_wait_js(&BrowserWaitCondition::Url("/dashboard".into()))
+                .contains("location.href")
+        );
+        assert!(
+            browser_wait_js(&BrowserWaitCondition::ReadyState("complete".into()))
+                .contains("document.readyState")
+        );
+        assert!(
+            browser_wait_js(&BrowserWaitCondition::Js("document.body !== null".into()))
+                .contains("Function")
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_right_sidebar_summary_shows_notifications_sessions_and_logs() {
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(
+                Some("ui".into()),
+                std::env::temp_dir().join("flowmux-compact-sidebar"),
+            )
+            .await;
+        let workspace = store.get_workspace(ws_id).await.unwrap();
+        let pane = workspace.surfaces[0].root_pane.first_leaf_id().unwrap();
+        let surface = workspace.surfaces[0]
+            .root_pane
+            .active_surface_id(pane)
+            .unwrap();
+        store
+            .set_agent_activity(
+                surface,
+                Some(flowmux_core::AgentPresence {
+                    name: "codex".into(),
+                    activity: AgentActivity::Running,
+                    pid: Some(7),
+                }),
+            )
+            .await;
+
+        let notifications = NotificationStore::new();
+        notifications.push(
+            "Build".into(),
+            "done".into(),
+            flowmux_core::NotificationLevel::Info,
+            Some(pane),
+            Some(surface),
+            Some(ws_id),
+        );
+
+        let snapshot = store.snapshot().await;
+        let summary = compact_right_sidebar_summary(&snapshot.workspaces, &notifications);
+        assert_eq!(summary.notifications, vec!["* Build"]);
+        assert_eq!(summary.sessions, vec!["ui: codex running"]);
+        assert_eq!(summary.logs, vec!["Info: done"]);
+    }
+
+    #[test]
+    fn project_command_shell_line_applies_cwd_env_and_quoting() {
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("NODE_ENV".to_string(), "test env".to_string());
+        let command = CustomCommand {
+            id: "test".into(),
+            label: "Run tests".into(),
+            run: vec!["pnpm".into(), "test unit".into()],
+            cwd: Some("app dir".into()),
+            target: CommandTarget::NewSurface,
+            confirm: true,
+        };
+
+        let line = custom_command_shell_line(std::path::Path::new("/tmp/project"), &env, &command)
+            .unwrap();
+        assert_eq!(
+            line,
+            "cd '/tmp/project/app dir' && env 'NODE_ENV=test env' pnpm 'test unit'"
+        );
+    }
+
+    #[gtk::test]
+    async fn notification_management_dispatch_lists_marks_and_clears() {
+        let (controller, ws_id, pane) =
+            build_single_workspace_controller("com.flowmux.App.UiTest.NotificationCli").await;
+        let first = push_notification(&controller, Some(pane), Some(ws_id), "first")
+            .await
+            .unwrap();
+        let second = push_notification(&controller, Some(pane), Some(ws_id), "second")
+            .await
+            .unwrap();
+
+        let (list_tx, list_rx) = oneshot::channel();
+        controller
+            .dispatch(GtkCommand::ListNotifications {
+                unread_only: false,
+                ack: list_tx,
+            })
+            .await;
+        let (entries, unread_count) = list_rx.await.unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(unread_count, 2);
+        assert_eq!(entries[0].id, first);
+        assert_eq!(entries[1].id, second);
+
+        let (mark_tx, mark_rx) = oneshot::channel();
+        controller
+            .dispatch(GtkCommand::MarkNotificationRead {
+                id: first,
+                ack: mark_tx,
+            })
+            .await;
+        assert!(mark_rx.await.unwrap());
+
+        let (unread_tx, unread_rx) = oneshot::channel();
+        controller
+            .dispatch(GtkCommand::ListNotifications {
+                unread_only: true,
+                ack: unread_tx,
+            })
+            .await;
+        let (unread_entries, unread_count) = unread_rx.await.unwrap();
+        assert_eq!(unread_count, 1);
+        assert_eq!(unread_entries.len(), 1);
+        assert_eq!(unread_entries[0].id, second);
+
+        let (clear_tx, clear_rx) = oneshot::channel();
+        controller
+            .dispatch(GtkCommand::ClearNotifications { ack: clear_tx })
+            .await;
+        assert!(clear_rx.await.unwrap());
+        assert!(controller.notifications.entries().is_empty());
+        assert_eq!(controller.notifications.unread_count(), 0);
     }
 
     /// Two notifications arriving on a workspace, then the user clicks

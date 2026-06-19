@@ -973,6 +973,7 @@ dependencies = [
  "flowmux-ipc",
  "flowmux-notify",
  "flowmux-procmon",
+ "flowmux-ssh",
  "flowmux-state",
  "flowmux-terminal",
  "flowmux-vcs",
@@ -1090,6 +1091,7 @@ name = "flowmux-ipc"
 version = "0.4.1"
 dependencies = [
  "anyhow",
+ "chrono",
  "flowmux-config",
  "flowmux-core",
  "serde",

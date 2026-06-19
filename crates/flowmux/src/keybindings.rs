@@ -20,7 +20,7 @@
 //! one and skips invalid entries with a warning.
 
 use crate::bridge::{Bridge, FocusDir, GtkCommand, WsNav};
-use crate::ui::terminal_pane::{ALT_ENTER_BYTES, TerminalPane};
+use crate::ui::terminal_pane::{TerminalPane, ALT_ENTER_BYTES};
 use crate::ui::window::ClipboardToast;
 use adw::prelude::*;
 use flowmux_config::keybindings::{ActionId, KeybindingOverrides};
@@ -187,6 +187,18 @@ pub fn install_actions(
             .build()
     };
     let new_window = make_new_window_action();
+    let command_palette = {
+        let bridge = bridge.clone();
+        gtk::gio::ActionEntry::builder("command-palette")
+            .activate(move |_, _, _| {
+                tracing::debug!(action = "command-palette", "key action fired");
+                let bridge = bridge.clone();
+                glib::MainContext::default().spawn_local(async move {
+                    let _ = bridge.tx.send(GtkCommand::ShowCommandPalette).await;
+                });
+            })
+            .build()
+    };
     let new_surface = make_pane_action(
         "new-surface",
         focused.clone(),
@@ -297,6 +309,7 @@ pub fn install_actions(
         prev_surface,
         new_workspace,
         new_window,
+        command_palette,
         next_workspace,
         prev_workspace,
         w1,
@@ -956,10 +969,7 @@ mod tests {
 
     #[test]
     fn copy_pane_path_default_is_ctrl_shift_k() {
-        assert_eq!(
-            default_for(ActionId::CopyPanePath),
-            vec!["<Ctrl><Shift>k"]
-        );
+        assert_eq!(default_for(ActionId::CopyPanePath), vec!["<Ctrl><Shift>k"]);
     }
 
     #[test]

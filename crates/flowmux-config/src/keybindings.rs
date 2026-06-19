@@ -65,6 +65,7 @@ pub enum ActionId {
     NewBrowserSurface,
     NewWorkspace,
     NewWindow,
+    CommandPalette,
     /// Copy the focused pane's current working directory to the system
     /// clipboard and surface a toast confirming what was copied.
     CopyPanePath,
@@ -99,6 +100,7 @@ impl ActionId {
             Self::NewBrowserSurface => "new-browser-surface",
             Self::NewWorkspace => "new-workspace",
             Self::NewWindow => "new-window",
+            Self::CommandPalette => "command-palette",
             Self::CopyPanePath => "copy-pane-path",
         }
     }
@@ -132,6 +134,7 @@ impl ActionId {
             Self::NewBrowserSurface => "New browser tab",
             Self::NewWorkspace => "New workspace",
             Self::NewWindow => "New window",
+            Self::CommandPalette => "Command palette",
             Self::CopyPanePath => "Copy focused pane path",
         }
     }
@@ -168,6 +171,7 @@ impl ActionId {
             Self::NewBrowserSurface,
             Self::NewWorkspace,
             Self::NewWindow,
+            Self::CommandPalette,
             Self::CopyPanePath,
         ]
     }
@@ -226,6 +230,7 @@ const DEFAULTS: &[(ActionId, &[&str])] = &[
     (ActionId::NewBrowserSurface, &["<Ctrl><Shift>b"]),
     (ActionId::NewWorkspace, &["<Ctrl>n"]),
     (ActionId::NewWindow, &["<Ctrl><Shift>n"]),
+    (ActionId::CommandPalette, &["<Ctrl><Shift>p"]),
     (ActionId::CopyPanePath, &["<Ctrl><Shift>k"]),
 ];
 
@@ -380,7 +385,10 @@ mod tests {
         let resolved = overrides.resolve();
         assert_eq!(resolved.len(), ActionId::all().len());
         for (action, accels) in &resolved {
-            let want: Vec<String> = default_accels(*action).iter().map(|s| s.to_string()).collect();
+            let want: Vec<String> = default_accels(*action)
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
             assert_eq!(accels, &want, "{:?}", action);
         }
     }
@@ -483,10 +491,7 @@ mod tests {
         overrides.set(ActionId::Paste, vec!["<Ctrl>v".into()]);
 
         let resolved = overrides.resolve();
-        let copy = resolved
-            .iter()
-            .find(|(a, _)| *a == ActionId::Copy)
-            .unwrap();
+        let copy = resolved.iter().find(|(a, _)| *a == ActionId::Copy).unwrap();
         let paste = resolved
             .iter()
             .find(|(a, _)| *a == ActionId::Paste)

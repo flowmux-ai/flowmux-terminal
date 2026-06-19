@@ -29,7 +29,41 @@ P0 ("contract and agent usability") is implemented:
   Ubuntu 22.04 VTE `v0_70` floor and enabled in the patched-VTE install and
   Flatpak builds.
 
-P1/P2 below are not started.
+P1 ("daily usability") is implemented:
+
+- P1-1 — Notification CLI management: `flowmux notifications list/open/
+  jump-to-unread/mark-read/clear` manage in-process notification state.
+- P1-2 — Session restore: implemented. On launch the state owner runs
+  `restore_from_store()` to rebuild workspace layout, focused surfaces, split
+  ratios, browser URLs, and Claude/Codex/OpenCode session IDs.
+- P1-3 — Chromium-family cookie import: implemented. `flowmux-cookies` does
+  libsecret-backed unwrapping for Chrome, Chromium, Brave, Edge, and Arc
+  (plus Firefox); exposed via `flowmux import-cookies` / `list-browsers`.
+- P1-4 — Command palette: implemented with open browser, rename tab,
+  reload config, unread notification, and project-local custom commands.
+- P1-5 — Rename/reorder/close UX: implemented. Sidebar rows support rename
+  dialog, drag-and-drop reorder, hover-X close, and a right-click menu;
+  surface tabs support rename.
+- P1-6 — Project config compatibility: implemented for project-local
+  `cmux.json` JSONC parsing, custom command targets, confirm prompts, and
+  reload-config behavior.
+
+P2 ("compatibility conveniences") is implemented:
+
+- P2-1 — `flowmux ssh`: implemented as an OpenSSH-backed workspace flow. The
+  GUI path creates a workspace and sends `ssh ...` into its terminal; the
+  headless handler creates the corresponding SSH workspace state.
+- P2-2 — Browser `wait`: implemented for selector, text, URL substring,
+  `document.readyState`, and JavaScript predicate polling. Network-idle waits
+  are intentionally not promised.
+- P2-3 — Browser screenshot: implemented as visible-viewport WebKitGTK
+  snapshot to PNG.
+- P2-4 — Minimal terminal multiplexer aliases: implemented aliases for
+  `capture-pane`, `list-panes`, `select-pane`, and `resize-pane` in addition
+  to existing `send-keys`.
+- P2-5 — Compact right sidebar: implemented in the right-side pane with
+  compact notifications, active agent sessions, and recent notification log
+  summaries.
 
 ## Goal
 
