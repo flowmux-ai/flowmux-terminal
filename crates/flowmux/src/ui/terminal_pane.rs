@@ -257,20 +257,18 @@ impl TerminalPane {
         container.set_hexpand(true);
         container.set_vexpand(true);
         container.set_child(Some(&term));
-        let scrollbar = gtk::Scrollbar::new(
-            gtk::Orientation::Vertical,
-            Some(&scroll_adjustment),
-        );
+        let scrollbar = gtk::Scrollbar::new(gtk::Orientation::Vertical, Some(&scroll_adjustment));
         scrollbar.set_halign(gtk::Align::End);
         scrollbar.set_valign(gtk::Align::Fill);
-        // Force the scrollbar to render unconditionally so the 22.04
-        // Flatpak path does not auto-hide it. A standalone bar with
-        // explicit width survives the GTK 4.16+ overlay-scrolling
-        // heuristics that the runtime applies by default.
-        scrollbar.set_visible(true);
+        // Keep a real standalone scrollbar for the 22.04 path, but only show it
+        // when VTE reports scrollback. Full-screen TUIs such as claude handle
+        // wheel scrolling inside the alternate screen; VTE's adjustment then
+        // stays at one page, which would otherwise draw a full-height thumb.
+        scrollbar.set_visible(false);
         scrollbar.set_can_focus(false);
         scrollbar.set_width_request(12);
         container.add_overlay(&scrollbar);
+        install_terminal_scrollbar_adjustment_sync(&term, &scrollbar);
 
         // Make inline IME preedit (e.g. a composing Hangul syllable) visible
         // even when the foreground app has hidden the terminal cursor.
@@ -305,7 +303,7 @@ impl TerminalPane {
             "FLOWMUX_ENABLE_VTE_CAPTURE_KEYS",
         ));
         if smart_page_enabled {
-            install_smart_page_keys(&term, &scroll_adjustment);
+            install_smart_page_keys(&term);
         }
 
         // OSC 99 (Konsole-format) is not exposed as a signal on Ubuntu's
@@ -1101,6 +1099,74 @@ fn scroll_terminal_to_bottom(term: &vte::Terminal) {
     }
 }
 
+fn adjustment_has_scrollable_range(lower: f64, upper: f64, page_size: f64) -> bool {
+    upper > lower + page_size.max(1.0)
+}
+
+fn terminal_adjustment_has_scrollback(adj: &gtk::Adjustment) -> bool {
+    adjustment_has_scrollable_range(adj.lower(), adj.upper(), adj.page_size())
+}
+
+fn sync_terminal_scrollbar_visibility(scrollbar: &gtk::Scrollbar) {
+    let adj = scrollbar.adjustment();
+    scrollbar.set_visible(terminal_adjustment_has_scrollback(&adj));
+}
+
+fn sync_terminal_scrollbar_adjustment(
+    term: &vte::Terminal,
+    scrollbar: &gtk::Scrollbar,
+    watched_adjustment: &Rc<RefCell<Option<gtk::Adjustment>>>,
+) {
+    if let Some(adj) = term.vadjustment() {
+        if scrollbar.adjustment().as_ptr() != adj.as_ptr() {
+            scrollbar.set_adjustment(Some(&adj));
+        }
+
+        let already_watching = {
+            let watched = watched_adjustment.borrow();
+            watched
+                .as_ref()
+                .map_or(false, |watched| watched.as_ptr() == adj.as_ptr())
+        };
+        if !already_watching {
+            let scrollbar_for_changed = scrollbar.clone();
+            adj.connect_changed(move |_| {
+                sync_terminal_scrollbar_visibility(&scrollbar_for_changed);
+            });
+            *watched_adjustment.borrow_mut() = Some(adj);
+        }
+    }
+
+    sync_terminal_scrollbar_visibility(scrollbar);
+}
+
+fn install_terminal_scrollbar_adjustment_sync(term: &vte::Terminal, scrollbar: &gtk::Scrollbar) {
+    let watched_adjustment = Rc::new(RefCell::new(None::<gtk::Adjustment>));
+    sync_terminal_scrollbar_adjustment(term, scrollbar, &watched_adjustment);
+
+    let scrollbar_for_notify = scrollbar.clone();
+    let watched_for_notify = watched_adjustment.clone();
+    term.connect_vadjustment_notify(move |term| {
+        sync_terminal_scrollbar_adjustment(term, &scrollbar_for_notify, &watched_for_notify);
+    });
+
+    let scrollbar_for_realize = scrollbar.clone();
+    let watched_for_realize = watched_adjustment.clone();
+    term.connect_realize(move |term| {
+        sync_terminal_scrollbar_adjustment(term, &scrollbar_for_realize, &watched_for_realize);
+    });
+
+    let term_for_idle = term.clone();
+    let scrollbar_for_idle = scrollbar.clone();
+    glib::idle_add_local_once(move || {
+        sync_terminal_scrollbar_adjustment(
+            &term_for_idle,
+            &scrollbar_for_idle,
+            &watched_adjustment,
+        );
+    });
+}
+
 fn install_shift_arrow_cursor_move(term: &vte::Terminal) {
     let controller = gtk::ShortcutController::new();
     controller.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -1148,7 +1214,7 @@ fn install_shift_arrow_cursor_move(term: &vte::Terminal) {
 /// any capture-phase key controller attached directly to VTE can prevent
 /// inline Hangul preedit from being drawn. Set
 /// `FLOWMUX_ENABLE_VTE_CAPTURE_KEYS=1` to restore the legacy paging hook.
-fn install_smart_page_keys(term: &vte::Terminal, scroll_adjustment: &gtk::Adjustment) {
+fn install_smart_page_keys(term: &vte::Terminal) {
     let controller = gtk::ShortcutController::new();
     controller.set_propagation_phase(gtk::PropagationPhase::Capture);
     controller.set_scope(gtk::ShortcutScope::Local);
@@ -1168,13 +1234,22 @@ fn install_smart_page_keys(term: &vte::Terminal, scroll_adjustment: &gtk::Adjust
 
     for (key, mods, direction, always_scroll) in bindings {
         let term_widget = term.clone();
-        let adj = scroll_adjustment.clone();
         let direction = *direction;
         let always_scroll = *always_scroll;
         let action = gtk::CallbackAction::new(move |_, _| {
+            let Some(adj) = term_widget.vadjustment() else {
+                let bytes: &[u8] = if direction < 0 {
+                    b"\x1b[5~"
+                } else {
+                    b"\x1b[6~"
+                };
+                term_widget.feed_child(bytes);
+                return glib::Propagation::Stop;
+            };
             let upper = adj.upper();
             let page = adj.page_size().max(1.0);
-            let has_scrollback = upper > page;
+            let has_scrollback =
+                adjustment_has_scrollable_range(adj.lower(), upper, adj.page_size());
             if !always_scroll && !has_scrollback {
                 // Alt-screen / empty scrollback: forward the legacy
                 // PgUp/Dn escape so foreground apps (tig, vim, less,
@@ -1712,6 +1787,20 @@ mod tests {
     fn vte_capture_key_controllers_are_legacy_opt_in() {
         assert!(!terminal_capture_key_controllers_enabled(false));
         assert!(terminal_capture_key_controllers_enabled(true));
+    }
+
+    #[test]
+    fn scrollbar_range_is_hidden_when_adjustment_is_one_page() {
+        assert!(!adjustment_has_scrollable_range(0.0, 1.0, 1.0));
+        assert!(!adjustment_has_scrollable_range(0.0, 24.0, 24.0));
+        assert!(!adjustment_has_scrollable_range(10.0, 34.0, 24.0));
+    }
+
+    #[test]
+    fn scrollbar_range_is_visible_when_scrollback_exceeds_page() {
+        assert!(adjustment_has_scrollable_range(0.0, 25.0, 24.0));
+        assert!(adjustment_has_scrollable_range(10.0, 35.0, 24.0));
+        assert!(adjustment_has_scrollable_range(0.0, 2.0, 0.0));
     }
 
     #[test]
