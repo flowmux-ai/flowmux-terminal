@@ -775,6 +775,8 @@ mod tests {
     };
     use flowmux_daemon::StateStore;
     use flowmux_state::State;
+    use rusqlite::Connection;
+    use std::path::Path;
 
     /// A GuiHandler over a store holding one workspace (one pane, one
     /// tab). The bridge receiver is returned so the caller keeps it
@@ -1030,6 +1032,108 @@ mod tests {
             rx.try_recv().is_err(),
             "invalid cookie source must not dispatch InjectCookies"
         );
+    }
+
+    fn firefox_cookie_fixture(path: &Path) {
+        let conn = Connection::open(path).expect("open firefox cookie fixture");
+        conn.execute_batch(
+            "CREATE TABLE moz_cookies (
+                host TEXT,
+                name TEXT,
+                value TEXT,
+                path TEXT,
+                expiry INTEGER,
+                isSecure INTEGER,
+                isHttpOnly INTEGER,
+                sameSite INTEGER
+            );",
+        )
+        .expect("create moz_cookies");
+        conn.execute(
+            "INSERT INTO moz_cookies VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            (
+                ".example.com",
+                "sid",
+                "abc",
+                "/",
+                1_700_000_000_i64,
+                1_i64,
+                0_i64,
+                1_i64,
+            ),
+        )
+        .expect("insert matching cookie");
+        conn.execute(
+            "INSERT INTO moz_cookies VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            (
+                ".other.test",
+                "other",
+                "zzz",
+                "/",
+                1_700_000_000_i64,
+                0_i64,
+                1_i64,
+                2_i64,
+            ),
+        )
+        .expect("insert filtered cookie");
+    }
+
+    fn home_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    struct HomeEnvRestore(Option<std::ffi::OsString>);
+
+    impl Drop for HomeEnvRestore {
+        fn drop(&mut self) {
+            unsafe {
+                match self.0.take() {
+                    Some(value) => std::env::set_var("HOME", value),
+                    None => std::env::remove_var("HOME"),
+                }
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn import_cookies_dispatches_inject_for_firefox_fixture() {
+        let _guard = home_env_lock();
+        let _restore = HomeEnvRestore(std::env::var_os("HOME"));
+        let home = tempfile::tempdir().expect("temp home");
+        let profile = home.path().join(".mozilla/firefox/profile.default");
+        std::fs::create_dir_all(&profile).expect("profile dir");
+        firefox_cookie_fixture(&profile.join("cookies.sqlite"));
+        unsafe {
+            std::env::set_var("HOME", home.path());
+        }
+
+        let (handler, rx, _pane, _tab) = single_pane_handler().await;
+        let response = handler.handle(Request::ImportCookies {
+            source: "firefox".into(),
+            domain: Some("example.com".into()),
+        });
+        tokio::pin!(response);
+
+        let command = tokio::select! {
+            response = &mut response => panic!("import-cookies returned before bridge dispatch: {response:?}"),
+            command = rx.recv() => command.expect("import-cookies should dispatch InjectCookies"),
+        };
+        let GtkCommand::InjectCookies { cookies, ack } = command else {
+            panic!("expected InjectCookies command");
+        };
+        assert_eq!(cookies.len(), 1);
+        assert_eq!(cookies[0].host, ".example.com");
+        assert_eq!(cookies[0].name, "sid");
+        assert_eq!(cookies[0].value, "abc");
+
+        ack.send(Ok(cookies.len())).unwrap();
+        assert!(matches!(
+            response.await,
+            Response::CookiesImported { count: 1 }
+        ));
     }
 
     #[tokio::test]

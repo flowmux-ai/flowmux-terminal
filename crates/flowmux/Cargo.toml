@@ -81,3 +81,7 @@ vte = { package = "vte4", version = "0.8", features = ["v0_70"] }
 webkit6 = "0.4"
 nix = { workspace = true }
 libc = { workspace = true }
+
+[dev-dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
+tempfile = "3"
