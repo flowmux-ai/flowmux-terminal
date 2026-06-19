@@ -27,7 +27,10 @@ fn agent_session_store() -> Option<flowmux_state::AgentSessionStore> {
 }
 
 fn browser_error_response(error: String) -> Response {
-    if error.starts_with("browser pane not found:") || error.starts_with("pane not found:") {
+    if error.starts_with("browser pane not found:")
+        || error.starts_with("pane not found:")
+        || error == "no target pane focused"
+    {
         Response::Error(RpcError::NotFound(error))
     } else {
         Response::Error(RpcError::Internal(error))
@@ -312,10 +315,7 @@ impl Handler for GuiHandler {
                             pane: outcome.pane,
                             placement_strategy: outcome.placement_strategy,
                         },
-                        Ok(Err(e)) if e.starts_with("pane not found") => {
-                            Response::Error(RpcError::NotFound(e))
-                        }
-                        Ok(Err(e)) => Response::Error(RpcError::Internal(e)),
+                        Ok(Err(e)) => browser_error_response(e),
                         Err(_) => Response::Error(RpcError::Internal("bridge closed".into())),
                     }
                 }
@@ -1255,6 +1255,35 @@ mod tests {
         };
         assert_eq!(target_pane, Some(missing));
         ack.send(Err(format!("pane not found: {missing}"))).unwrap();
+
+        assert!(matches!(
+            response.await,
+            Response::Error(RpcError::NotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn browser_open_reports_not_found_when_default_target_cannot_resolve() {
+        let (handler, rx, _pane, _tab) = single_pane_handler().await;
+        let response = handler.handle(Request::BrowserOpen {
+            url: "https://example.com".into(),
+            target_pane: None,
+            direction: SplitDirection::Vertical,
+        });
+        tokio::pin!(response);
+
+        let command = tokio::select! {
+            response = &mut response => panic!("browser open completed before bridge ack: {response:?}"),
+            command = rx.recv() => command.expect("browser open should dispatch to GTK"),
+        };
+        let GtkCommand::BrowserOpenSplit {
+            target_pane, ack, ..
+        } = command
+        else {
+            panic!("expected BrowserOpenSplit command");
+        };
+        assert_eq!(target_pane, None);
+        ack.send(Err("no target pane focused".into())).unwrap();
 
         assert!(matches!(
             response.await,
