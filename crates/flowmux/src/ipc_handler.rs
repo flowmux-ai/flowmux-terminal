@@ -776,6 +776,137 @@ mod tests {
         (handler, rx, pane, tab)
     }
 
+    #[tokio::test]
+    async fn workspace_create_dispatches_workspace_created_and_waits_for_ack() {
+        let (handler, rx, _pane, _tab) = single_pane_handler().await;
+        let root = std::path::PathBuf::from("/tmp/flowmux-ipc-create-workspace");
+        let response = handler.handle(Request::WorkspaceCreate {
+            name: Some("created".into()),
+            root: root.clone(),
+        });
+        tokio::pin!(response);
+
+        let command = tokio::select! {
+            response = &mut response => panic!("workspace create completed before bridge ack: {response:?}"),
+            command = rx.recv() => command.expect("workspace create should dispatch to GTK"),
+        };
+        let GtkCommand::WorkspaceCreated {
+            id,
+            name,
+            root: command_root,
+            ack,
+        } = command
+        else {
+            panic!("expected WorkspaceCreated command");
+        };
+        assert_eq!(name, "created");
+        assert_eq!(command_root, root);
+        ack.send(()).unwrap();
+
+        assert!(matches!(
+            response.await,
+            Response::WorkspaceCreated { id: response_id } if response_id == id
+        ));
+    }
+
+    #[tokio::test]
+    async fn workspace_focus_dispatches_activate_workspace_for_known_workspace() {
+        let (handler, rx, _pane, _tab) = single_pane_handler().await;
+        let workspace = handler
+            .inner
+            .store()
+            .snapshot()
+            .await
+            .workspaces
+            .first()
+            .unwrap()
+            .id;
+
+        assert!(matches!(
+            handler.handle(Request::WorkspaceFocus { workspace }).await,
+            Response::Ok
+        ));
+        let command = rx.recv().await.expect("workspace focus should dispatch");
+        assert!(matches!(
+            command,
+            GtkCommand::ActivateWorkspace { id } if id == workspace
+        ));
+    }
+
+    #[tokio::test]
+    async fn pane_focus_dispatches_focus_pane_and_waits_for_ack() {
+        let (handler, rx, pane, _tab) = single_pane_handler().await;
+        let response = handler.handle(Request::PaneFocus { pane });
+        tokio::pin!(response);
+
+        let command = tokio::select! {
+            response = &mut response => panic!("pane focus completed before bridge ack: {response:?}"),
+            command = rx.recv() => command.expect("pane focus should dispatch to GTK"),
+        };
+        let GtkCommand::FocusPane {
+            pane: command_pane,
+            ack,
+        } = command
+        else {
+            panic!("expected FocusPane command");
+        };
+        assert_eq!(command_pane, pane);
+        ack.send(Ok(())).unwrap();
+
+        assert!(matches!(response.await, Response::Ok));
+    }
+
+    #[tokio::test]
+    async fn pane_split_dispatches_incremental_apply_command() {
+        let (handler, rx, pane, _tab) = single_pane_handler().await;
+        let response = handler.handle(Request::PaneSplit {
+            pane,
+            direction: SplitDirection::Vertical,
+        });
+        tokio::pin!(response);
+
+        let command = tokio::select! {
+            response = &mut response => panic!("pane split completed before bridge ack: {response:?}"),
+            command = rx.recv() => command.expect("pane split should dispatch to GTK"),
+        };
+        let GtkCommand::PaneSplitApplied {
+            pane: command_pane,
+            new_pane,
+            direction,
+            ack,
+            ..
+        } = command
+        else {
+            panic!("expected PaneSplitApplied command");
+        };
+        assert_eq!(command_pane, pane);
+        assert_eq!(direction, SplitDirection::Vertical);
+        ack.send(()).unwrap();
+
+        assert!(matches!(
+            response.await,
+            Response::PaneSplitDone { new_pane: response_pane } if response_pane == new_pane
+        ));
+    }
+
+    #[tokio::test]
+    async fn pane_split_reports_not_found_without_dispatch_for_unknown_pane() {
+        let (handler, rx, _pane, _tab) = single_pane_handler().await;
+        assert!(matches!(
+            handler
+                .handle(Request::PaneSplit {
+                    pane: PaneId::new(),
+                    direction: SplitDirection::Vertical,
+                })
+                .await,
+            Response::Error(RpcError::NotFound(_))
+        ));
+        assert!(
+            rx.try_recv().is_err(),
+            "invalid split must not dispatch a GTK command"
+        );
+    }
+
     /// close-pane on the workspace's only pane must be refused up front —
     /// this is the guard that stops an agent's IPC call from tripping the
     /// confirm dialog (and destroying the workspace).
