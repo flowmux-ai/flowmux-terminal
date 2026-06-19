@@ -21,8 +21,8 @@ use crate::ui::workspace_view::{
 use adw::prelude::*;
 use flowmux_config::cmux_json::{CmuxJson, CommandTarget, CustomCommand};
 use flowmux_core::{
-    AgentActivity, Pane, PaneContent, PaneId, PaneSurface, PlacementStrategy, SplitDirection,
-    Surface, SurfaceId, SurfaceKind, Workspace, WorkspaceId,
+    Pane, PaneContent, PaneId, PaneSurface, PlacementStrategy, SplitDirection, Surface, SurfaceId,
+    SurfaceKind, Workspace, WorkspaceId,
 };
 use flowmux_daemon::StateStore;
 use flowmux_ipc::protocol::{BrowserWaitCondition, NotificationSummary};
@@ -125,141 +125,6 @@ fn custom_command_shell_line(
     Some(parts.join(" "))
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct CompactRightSidebarSummary {
-    notifications: Vec<String>,
-    sessions: Vec<String>,
-    logs: Vec<String>,
-}
-
-#[derive(Clone)]
-struct CompactRightSidebar {
-    root: gtk::Box,
-    notifications: gtk::Label,
-    sessions: gtk::Label,
-    logs: gtk::Label,
-}
-
-impl CompactRightSidebar {
-    fn new() -> Self {
-        let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        root.add_css_class("flowmux-compact-right-sidebar");
-        root.set_margin_top(8);
-        root.set_margin_bottom(8);
-        root.set_margin_start(8);
-        root.set_margin_end(8);
-
-        let notifications = compact_sidebar_section(&root, "Notifications");
-        let sessions = compact_sidebar_section(&root, "Active sessions");
-        let logs = compact_sidebar_section(&root, "Recent logs");
-
-        let sidebar = Self {
-            root,
-            notifications,
-            sessions,
-            logs,
-        };
-        sidebar.refresh(CompactRightSidebarSummary {
-            notifications: Vec::new(),
-            sessions: Vec::new(),
-            logs: Vec::new(),
-        });
-        sidebar
-    }
-
-    fn widget(&self) -> &gtk::Box {
-        &self.root
-    }
-
-    fn refresh(&self, summary: CompactRightSidebarSummary) {
-        set_compact_sidebar_label(
-            &self.notifications,
-            &summary.notifications,
-            "No notifications",
-        );
-        set_compact_sidebar_label(&self.sessions, &summary.sessions, "No active sessions");
-        set_compact_sidebar_label(&self.logs, &summary.logs, "No recent logs");
-    }
-}
-
-fn compact_sidebar_section(parent: &gtk::Box, title: &str) -> gtk::Label {
-    let title_label = gtk::Label::new(Some(title));
-    title_label.add_css_class("flowmux-compact-sidebar-title");
-    title_label.set_halign(gtk::Align::Start);
-    parent.append(&title_label);
-
-    let label = gtk::Label::new(None);
-    label.add_css_class("flowmux-compact-sidebar-value");
-    label.set_halign(gtk::Align::Start);
-    label.set_wrap(true);
-    label.set_xalign(0.0);
-    parent.append(&label);
-    label
-}
-
-fn set_compact_sidebar_label(label: &gtk::Label, lines: &[String], empty: &str) {
-    if lines.is_empty() {
-        label.set_text(empty);
-    } else {
-        label.set_text(&lines.join("\n"));
-    }
-}
-
-fn compact_right_sidebar_summary(
-    workspaces: &[Workspace],
-    notifications: &NotificationStore,
-) -> CompactRightSidebarSummary {
-    let entries = notifications.entries();
-    let notification_lines = entries
-        .iter()
-        .rev()
-        .take(3)
-        .map(|entry| {
-            let marker = if entry.read { "" } else { "* " };
-            format!("{marker}{}", entry.title)
-        })
-        .collect();
-    let logs = entries
-        .iter()
-        .rev()
-        .take(3)
-        .map(|entry| format!("{:?}: {}", entry.level, entry.body))
-        .collect();
-
-    let mut sessions = Vec::new();
-    for workspace in workspaces {
-        for surface in &workspace.surfaces {
-            let mut agents = Vec::new();
-            surface.root_pane.collect_agent_presences(&mut agents);
-            for (_surface, agent) in agents {
-                if matches!(agent.activity, AgentActivity::Idle) {
-                    continue;
-                }
-                sessions.push(format!(
-                    "{}: {} {}",
-                    workspace.name,
-                    agent.name,
-                    agent_activity_label(agent.activity)
-                ));
-            }
-        }
-    }
-
-    CompactRightSidebarSummary {
-        notifications: notification_lines,
-        sessions,
-        logs,
-    }
-}
-
-fn agent_activity_label(activity: AgentActivity) -> &'static str {
-    match activity {
-        AgentActivity::Running => "running",
-        AgentActivity::NeedsInput => "needs input",
-        AgentActivity::Idle => "idle",
-    }
-}
-
 #[derive(Clone)]
 pub struct WindowController {
     pub window: adw::ApplicationWindow,
@@ -273,7 +138,6 @@ pub struct WindowController {
     sidebar_split: gtk::Paned,
     file_browser_split: gtk::Paned,
     file_browser: FileBrowserPanel,
-    compact_right_sidebar: CompactRightSidebar,
     stack: gtk::Stack,
     surfaces: Rc<RefCell<HashMap<WorkspaceId, gtk::Widget>>>,
     pane_registry: Rc<RefCell<PaneRegistry>>,
@@ -598,16 +462,12 @@ impl WindowController {
             });
         });
 
-        let compact_right_sidebar = CompactRightSidebar::new();
-        let right_sidebar = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        right_sidebar.append(compact_right_sidebar.widget());
         file_browser.widget().set_vexpand(true);
-        right_sidebar.append(file_browser.widget());
 
         let file_browser_split = gtk::Paned::builder()
             .orientation(gtk::Orientation::Horizontal)
             .start_child(&split)
-            .end_child(&right_sidebar)
+            .end_child(file_browser.widget())
             .resize_start_child(true)
             .resize_end_child(false)
             .shrink_start_child(false)
@@ -658,7 +518,6 @@ impl WindowController {
             sidebar_split: split,
             file_browser_split,
             file_browser,
-            compact_right_sidebar,
             stack,
             surfaces,
             pane_registry,
@@ -693,15 +552,6 @@ impl WindowController {
         handle: Arc<tokio::sync::Mutex<Option<flowmux_notify::DesktopNotifier>>>,
     ) {
         self.notifier = handle;
-    }
-
-    async fn refresh_compact_right_sidebar(&self) {
-        let snapshot = self.store.snapshot().await;
-        self.compact_right_sidebar
-            .refresh(compact_right_sidebar_summary(
-                &snapshot.workspaces,
-                &self.notifications,
-            ));
     }
 
     pub fn show_status_when_empty(&self) {
@@ -2607,7 +2457,6 @@ impl WindowController {
                     return;
                 };
                 self.sidebar.bump_notification_badge();
-                self.refresh_compact_right_sidebar().await;
                 let mut marked_attention = false;
                 if matches!(level, flowmux_core::NotificationLevel::AttentionNeeded) {
                     if let Some(ws_id) = workspace {
@@ -2741,7 +2590,6 @@ impl WindowController {
                         self.close_desktop_notifications(vec![desktop_id]);
                     }
                     self.refresh_launcher_badge();
-                    self.refresh_compact_right_sidebar().await;
                 }
                 let _ = ack.send(changed);
             }
@@ -2753,7 +2601,6 @@ impl WindowController {
                     self.close_desktop_notifications(desktop_ids);
                 }
                 self.refresh_launcher_badge();
-                self.refresh_compact_right_sidebar().await;
                 let _ = ack.send(had_entries);
             }
 
@@ -2771,9 +2618,6 @@ impl WindowController {
                         // Read-only delete: unread count unchanged, no
                         // FDO toast was outstanding for this entry.
                         self.sidebar.refresh_notification_popover();
-                        self.refresh_compact_right_sidebar().await;
-                        self.refresh_compact_right_sidebar().await;
-                        self.refresh_compact_right_sidebar().await;
                     }
                     RemoveOutcome::RemovedUnread { desktop_id } => {
                         if let Some(did) = desktop_id {
@@ -2799,7 +2643,6 @@ impl WindowController {
                 // Breathe the workspace's color bar while an agent is
                 // Running; clear it otherwise.
                 self.sidebar.set_agent_activity(workspace, activity);
-                self.refresh_compact_right_sidebar().await;
             }
             GtkCommand::FocusWorkspaceAt { idx } => {
                 let snap = self.store.snapshot().await;
@@ -7547,49 +7390,6 @@ mod tests {
             browser_wait_js(&BrowserWaitCondition::Js("document.body !== null".into()))
                 .contains("Function")
         );
-    }
-
-    #[tokio::test]
-    async fn compact_right_sidebar_summary_shows_notifications_sessions_and_logs() {
-        let store = StateStore::new_lazy(State::default());
-        let ws_id = store
-            .create_workspace(
-                Some("ui".into()),
-                std::env::temp_dir().join("flowmux-compact-sidebar"),
-            )
-            .await;
-        let workspace = store.get_workspace(ws_id).await.unwrap();
-        let pane = workspace.surfaces[0].root_pane.first_leaf_id().unwrap();
-        let surface = workspace.surfaces[0]
-            .root_pane
-            .active_surface_id(pane)
-            .unwrap();
-        store
-            .set_agent_activity(
-                surface,
-                Some(flowmux_core::AgentPresence {
-                    name: "codex".into(),
-                    activity: AgentActivity::Running,
-                    pid: Some(7),
-                }),
-            )
-            .await;
-
-        let notifications = NotificationStore::new();
-        notifications.push(
-            "Build".into(),
-            "done".into(),
-            flowmux_core::NotificationLevel::Info,
-            Some(pane),
-            Some(surface),
-            Some(ws_id),
-        );
-
-        let snapshot = store.snapshot().await;
-        let summary = compact_right_sidebar_summary(&snapshot.workspaces, &notifications);
-        assert_eq!(summary.notifications, vec!["* Build"]);
-        assert_eq!(summary.sessions, vec!["ui: codex running"]);
-        assert_eq!(summary.logs, vec!["Info: done"]);
     }
 
     #[test]

@@ -405,20 +405,6 @@ paned > separator {{
 .flowmux-pane-tab.flowmux-pane-tab-drop-after {{
     box-shadow: inset -2px 0 0 rgba(96, 165, 250, 0.95);
 }}
-.flowmux-compact-right-sidebar {{
-    background-color: {sidebar};
-    color: {fg};
-    border-left: 1px solid {border};
-}}
-.flowmux-compact-sidebar-title {{
-    color: {subdued_fg};
-    font-size: 0.78em;
-    font-weight: 700;
-}}
-.flowmux-compact-sidebar-value {{
-    color: {fg};
-    font-size: 0.86em;
-}}
 .flowmux-file-browser {{
     background-color: {sidebar};
     color: {fg};
