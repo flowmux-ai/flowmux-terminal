@@ -150,12 +150,6 @@ pub enum GtkCommand {
         root: PathBuf,
         ack: oneshot::Sender<()>,
     },
-    /// Re-render a workspace from the latest store snapshot.
-    /// Used after structural mutations like split.
-    WorkspaceRerender {
-        id: WorkspaceId,
-        ack: oneshot::Sender<()>,
-    },
     /// Apply a split that was already committed to the store.
     PaneSplitApplied {
         id: WorkspaceId,

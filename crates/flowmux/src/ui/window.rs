@@ -1797,12 +1797,6 @@ impl WindowController {
                 }
                 let _ = ack.send(());
             }
-            GtkCommand::WorkspaceRerender { id, ack } => {
-                if let Some(ws) = self.store.get_workspace(id).await {
-                    self.rerender_workspace(&ws);
-                }
-                let _ = ack.send(());
-            }
             GtkCommand::PaneSplitApplied {
                 id,
                 pane,

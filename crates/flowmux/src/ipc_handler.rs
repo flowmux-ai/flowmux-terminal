@@ -396,10 +396,25 @@ impl Handler for GuiHandler {
                 Request::ClaudeTeams { count, args, root } => {
                     let count = count.max(1).min(8);
                     let store = self.inner.store();
+                    let root_for_ui = root.clone();
                     // Create a fresh workspace.
                     let ws_id = store
                         .create_workspace(Some("claude-teams".into()), root)
                         .await;
+
+                    let (tx, rx) = oneshot::channel();
+                    let _ = self
+                        .bridge
+                        .tx
+                        .send(GtkCommand::WorkspaceCreated {
+                            id: ws_id,
+                            name: "claude-teams".into(),
+                            root: root_for_ui,
+                            ack: tx,
+                        })
+                        .await;
+                    let _ = rx.await;
+
                     // Split the root pane (count - 1) times to get `count` panes.
                     let ws = match store.get_workspace(ws_id).await {
                         Some(w) => w,
@@ -428,18 +443,25 @@ impl Handler for GuiHandler {
                             SplitDirection::Horizontal
                         };
                         if let Some((_, new_pane)) = store.split_pane(current, dir).await {
+                            let source_pane = current;
                             all_panes.push(new_pane);
                             current = new_pane;
+
+                            let (tx, rx) = oneshot::channel();
+                            let _ = self
+                                .bridge
+                                .tx
+                                .send(GtkCommand::PaneSplitApplied {
+                                    id: ws_id,
+                                    pane: source_pane,
+                                    new_pane,
+                                    direction: dir,
+                                    ack: tx,
+                                })
+                                .await;
+                            let _ = rx.await;
                         }
                     }
-                    // Re-render once.
-                    let (tx, rx) = oneshot::channel();
-                    let _ = self
-                        .bridge
-                        .tx
-                        .send(GtkCommand::WorkspaceRerender { id: ws_id, ack: tx })
-                        .await;
-                    let _ = rx.await;
                     // Feed the `claude` invocation into each pane.
                     let cmd_line = std::iter::once("claude".to_string())
                         .chain(args.iter().cloned())
@@ -941,6 +963,86 @@ mod tests {
             response.await,
             Response::PaneSplitDone { new_pane: response_pane } if response_pane == new_pane
         ));
+    }
+
+    #[tokio::test]
+    async fn claude_teams_uses_incremental_splits_after_initial_workspace_render() {
+        let (handler, rx, _pane, _tab) = single_pane_handler().await;
+        let root = std::path::PathBuf::from("/tmp/flowmux-claude-teams");
+        let response = handler.handle(Request::ClaudeTeams {
+            count: 3,
+            args: vec!["--continue".into(), "task with spaces".into()],
+            root: root.clone(),
+        });
+        tokio::pin!(response);
+
+        let command = tokio::select! {
+            response = &mut response => panic!("claude-teams completed before initial render ack: {response:?}"),
+            command = rx.recv() => command.expect("claude-teams should dispatch initial render"),
+        };
+        let GtkCommand::WorkspaceCreated {
+            id: ws_id,
+            name,
+            root: command_root,
+            ack,
+        } = command
+        else {
+            panic!("expected WorkspaceCreated command");
+        };
+        assert_eq!(name, "claude-teams");
+        assert_eq!(command_root, root);
+        ack.send(()).unwrap();
+
+        let mut panes = Vec::new();
+        let mut expected_source = None;
+        for expected_direction in [SplitDirection::Vertical, SplitDirection::Horizontal] {
+            let command = tokio::select! {
+                response = &mut response => panic!("claude-teams completed before split ack: {response:?}"),
+                command = rx.recv() => command.expect("claude-teams should dispatch split apply"),
+            };
+            let GtkCommand::PaneSplitApplied {
+                id,
+                pane,
+                new_pane,
+                direction,
+                ack,
+            } = command
+            else {
+                panic!("expected PaneSplitApplied command");
+            };
+            assert_eq!(id, ws_id);
+            assert_eq!(direction, expected_direction);
+            if let Some(expected_source) = expected_source {
+                assert_eq!(pane, expected_source);
+            } else {
+                panes.push(pane);
+            }
+            panes.push(new_pane);
+            expected_source = Some(new_pane);
+            ack.send(()).unwrap();
+        }
+
+        for expected_pane in panes {
+            let command = tokio::select! {
+                response = &mut response => panic!("claude-teams completed before send-keys ack: {response:?}"),
+                command = rx.recv() => command.expect("claude-teams should send agent command"),
+            };
+            let GtkCommand::PaneSendKeys { pane, keys, ack } = command else {
+                panic!("expected PaneSendKeys command");
+            };
+            assert_eq!(pane, expected_pane);
+            assert_eq!(keys, "claude --continue 'task with spaces'\n");
+            ack.send(Ok(())).unwrap();
+        }
+
+        assert!(matches!(
+            response.await,
+            Response::WorkspaceCreated { id } if id == ws_id
+        ));
+        assert!(
+            rx.try_recv().is_err(),
+            "claude-teams must not dispatch WorkspaceRerender after incremental splits"
+        );
     }
 
     #[tokio::test]
