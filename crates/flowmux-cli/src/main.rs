@@ -1633,6 +1633,76 @@ mod tests {
     }
 
     #[test]
+    fn notify_parses_to_gui_routed_request_with_surface_env() {
+        let _g = flowmux_pane_env_lock();
+        let pane = PaneId::new();
+        let surface = SurfaceId::new();
+        unsafe {
+            std::env::set_var("FLOWMUX_SURFACE_ID", surface.to_string());
+        }
+
+        let req = build_request(Cmd::Notify {
+            pane: Some(pane),
+            title: "Build".into(),
+            level: "error".into(),
+            body: "failed".into(),
+        });
+
+        unsafe {
+            std::env::remove_var("FLOWMUX_SURFACE_ID");
+        }
+
+        assert!(matches!(
+            req.unwrap(),
+            Request::Notify {
+                pane: got_pane,
+                surface: got_surface,
+                title,
+                body,
+                level,
+            } if got_pane == Some(pane)
+                && got_surface == Some(surface)
+                && title == "Build"
+                && body == "failed"
+                && level == NotificationLevel::Error
+        ));
+    }
+
+    #[test]
+    fn notify_complete_uses_attention_ready_payload_and_env_pane() {
+        let _g = flowmux_pane_env_lock();
+        let pane = PaneId::new();
+        unsafe {
+            std::env::set_var("FLOWMUX_PANE_ID", pane.to_string());
+            std::env::remove_var("FLOWMUX_SURFACE_ID");
+        }
+
+        let req = build_request(Cmd::NotifyComplete {
+            agent: "Codex".into(),
+            message: Some("done".into()),
+            pane: None,
+        });
+
+        unsafe {
+            std::env::remove_var("FLOWMUX_PANE_ID");
+        }
+
+        assert!(matches!(
+            req.unwrap(),
+            Request::Notify {
+                pane: got_pane,
+                surface: None,
+                title,
+                body,
+                level,
+            } if got_pane == Some(pane)
+                && title == "Codex ready"
+                && body == "done"
+                && level == NotificationLevel::AttentionNeeded
+        ));
+    }
+
+    #[test]
     fn split_defaults_to_right_when_no_direction_flag_is_set() {
         let pane = PaneId::new();
         let req = build_request(Cmd::Split {
