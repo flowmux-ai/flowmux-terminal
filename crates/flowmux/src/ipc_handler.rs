@@ -770,7 +770,7 @@ fn shell_escape(arg: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flowmux_core::{PaneId, SurfaceId, WorkspaceId};
+    use flowmux_core::{NotificationLevel, PaneId, SurfaceId, WorkspaceId};
     use flowmux_daemon::StateStore;
     use flowmux_state::State;
 
@@ -938,6 +938,50 @@ mod tests {
             response.await,
             Response::ScreenContents { text } if text == "screen"
         ));
+    }
+
+    #[tokio::test]
+    async fn notify_dispatches_add_notification_before_desktop_delivery() {
+        let (handler, rx, pane, surface) = single_pane_handler().await;
+        let expected_workspace = handler.inner.store().workspace_for_pane(pane).await;
+        let response = handler.handle(Request::Notify {
+            pane: Some(pane),
+            surface: Some(surface),
+            title: "Build".into(),
+            body: "ready".into(),
+            level: NotificationLevel::Info,
+        });
+        tokio::pin!(response);
+
+        let command = tokio::select! {
+            response = &mut response => panic!("notify completed before GUI add-notification ack: {response:?}"),
+            command = rx.recv() => command.expect("notify should dispatch AddNotification"),
+        };
+        let GtkCommand::AddNotification {
+            pane: command_pane,
+            surface: command_surface,
+            workspace,
+            title,
+            body,
+            level,
+            ack,
+        } = command
+        else {
+            panic!("expected AddNotification command");
+        };
+        assert_eq!(command_pane, Some(pane));
+        assert_eq!(command_surface, Some(surface));
+        assert_eq!(workspace, expected_workspace);
+        assert_eq!(title, "Build");
+        assert_eq!(body, "ready");
+        assert_eq!(level, NotificationLevel::Info);
+
+        ack.send(None).unwrap();
+        assert!(matches!(response.await, Response::Ok));
+        assert!(
+            rx.try_recv().is_err(),
+            "suppressed in-app notification must not request desktop follow-up"
+        );
     }
 
     #[tokio::test]
