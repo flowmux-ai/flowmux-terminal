@@ -2116,6 +2116,74 @@ mod tests {
     }
 
     #[test]
+    fn local_only_commands_parse_to_local_variants() {
+        let theme = Cli::try_parse_from(["flowmuxctl", "theme", "path"]).unwrap();
+        assert!(matches!(theme.cmd, Cmd::Theme { op: ThemeOp::Path }));
+
+        let theme_src = PathBuf::from("/tmp/flowmux-theme.toml");
+        let import =
+            Cli::try_parse_from(["flowmuxctl", "theme", "import", "/tmp/flowmux-theme.toml"])
+                .unwrap();
+        assert!(matches!(
+            import.cmd,
+            Cmd::Theme {
+                op: ThemeOp::Import { src }
+            } if src == theme_src
+        ));
+
+        assert!(matches!(
+            Cli::try_parse_from(["flowmuxctl", "list-browsers"])
+                .unwrap()
+                .cmd,
+            Cmd::ListBrowsers
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["flowmuxctl", "doctor"]).unwrap().cmd,
+            Cmd::Doctor
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["flowmuxctl", "fix"]).unwrap().cmd,
+            Cmd::Fix
+        ));
+
+        let agent = Cli::try_parse_from([
+            "flowmuxctl",
+            "agent",
+            "install",
+            "--agent",
+            "codex",
+            "--force",
+        ])
+        .unwrap();
+        assert!(matches!(
+            agent.cmd,
+            Cmd::Agent {
+                op: AgentOp::Install { agent, force }
+            } if agent == vec!["codex"] && force
+        ));
+
+        let hooks = Cli::try_parse_from([
+            "flowmuxctl",
+            "hooks",
+            "setup",
+            "--agent",
+            "claude",
+            "--flowmux-bin",
+            "/usr/bin/flowmux",
+        ])
+        .unwrap();
+        assert!(matches!(
+            hooks.cmd,
+            Cmd::Hooks {
+                op: HooksOp::Setup {
+                    agent,
+                    flowmux_bin: Some(bin),
+                }
+            } if agent == vec!["claude"] && bin == "/usr/bin/flowmux"
+        ));
+    }
+
+    #[test]
     fn identity_from_env_resolves_flowmux_context() {
         let _g = flowmux_pane_env_lock();
         let pane = PaneId::new();
