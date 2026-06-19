@@ -1679,12 +1679,34 @@ def on_term(*_):
 signal.signal(signal.SIGTERM, on_term)
 signal.signal(signal.SIGHUP, on_term)
 
+# Wake the select loop the instant a window resize arrives instead of
+# waiting for the next poll tick. flatpak-spawn does not forward
+# SIGWINCH across the sandbox boundary reliably, so we cannot count on
+# it firing -- but when it does, route it through a self-pipe
+# (set_wakeup_fd) so select returns at once and we re-read TIOCGWINSZ.
+# The shortened poll timeout below is the always-present fallback for
+# the case where the signal never crosses the boundary: it caps the
+# host shell's stale-size window at ~0.1s instead of ~0.5s, which is
+# what produced visibly mis-wrapped output right after a resize on the
+# 22.04 Flatpak path (VTE reflows immediately while the host shell kept
+# emitting at the old column count until the next poll).
+wake_r, wake_w = os.pipe()
+os.set_blocking(wake_r, False)
+os.set_blocking(wake_w, False)
+signal.set_wakeup_fd(wake_w)
+signal.signal(signal.SIGWINCH, lambda *_: None)
+
 try:
     while True:
-        # 0.5s tick doubles as a winsize poll: flatpak-spawn doesn't
-        # forward SIGWINCH reliably so we re-read TIOCGWINSZ on every
-        # idle wake-up and push it through to the host PTY.
-        rfds, _, _ = select.select([0, fd], [], [], 0.5)
+        try:
+            rfds, _, _ = select.select([0, fd, wake_r], [], [], 0.1)
+        except InterruptedError:
+            rfds = []
+        if wake_r in rfds:
+            try:
+                os.read(wake_r, 4096)
+            except OSError:
+                pass
         sync_winsize()
         emit_cwd_if_changed()
         if 0 in rfds:
