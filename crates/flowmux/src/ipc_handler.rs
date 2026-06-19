@@ -1500,6 +1500,144 @@ mod tests {
         ));
     }
 
+    async fn assert_browser_action_dispatches(
+        handler: &GuiHandler,
+        rx: &async_channel::Receiver<GtkCommand>,
+        pane: PaneId,
+        request: Request,
+        assert_op: impl FnOnce(BrowserOp),
+    ) {
+        let response = handler.handle(request);
+        tokio::pin!(response);
+
+        let command = tokio::select! {
+            response = &mut response => panic!("browser action completed before bridge ack: {response:?}"),
+            command = rx.recv() => command.expect("browser action should dispatch to GTK"),
+        };
+        let GtkCommand::BrowserAction {
+            pane: command_pane,
+            op,
+            ack,
+        } = command
+        else {
+            panic!("expected BrowserAction command");
+        };
+
+        assert_eq!(command_pane, pane);
+        assert_op(op);
+        ack.send(Ok(BrowserActionResult::Ok)).unwrap();
+        assert!(matches!(response.await, Response::BrowserOk));
+    }
+
+    #[tokio::test]
+    async fn browser_actions_dispatch_form_read_and_phase5_ops() {
+        let (handler, rx, pane, _tab) = single_pane_handler().await;
+
+        assert_browser_action_dispatches(
+            &handler,
+            &rx,
+            pane,
+            Request::BrowserFill {
+                pane,
+                target: "name".into(),
+                value: "flowmux".into(),
+            },
+            |op| match op {
+                BrowserOp::Fill { target, value } => {
+                    assert_eq!(target, "name");
+                    assert_eq!(value, "flowmux");
+                }
+                other => panic!("expected BrowserOp::Fill, got {other:?}"),
+            },
+        )
+        .await;
+
+        assert_browser_action_dispatches(
+            &handler,
+            &rx,
+            pane,
+            Request::BrowserScroll {
+                pane,
+                target: "root".into(),
+                x: -10,
+                y: 250,
+            },
+            |op| match op {
+                BrowserOp::Scroll { target, x, y } => {
+                    assert_eq!(target, "root");
+                    assert_eq!(x, -10);
+                    assert_eq!(y, 250);
+                }
+                other => panic!("expected BrowserOp::Scroll, got {other:?}"),
+            },
+        )
+        .await;
+
+        assert_browser_action_dispatches(
+            &handler,
+            &rx,
+            pane,
+            Request::BrowserAttr {
+                pane,
+                target: "link".into(),
+                name: "href".into(),
+            },
+            |op| match op {
+                BrowserOp::Attr { target, name } => {
+                    assert_eq!(target, "link");
+                    assert_eq!(name, "href");
+                }
+                other => panic!("expected BrowserOp::Attr, got {other:?}"),
+            },
+        )
+        .await;
+
+        assert_browser_action_dispatches(
+            &handler,
+            &rx,
+            pane,
+            Request::BrowserFocus {
+                pane,
+                target: "field".into(),
+            },
+            |op| match op {
+                BrowserOp::Focus { target } => assert_eq!(target, "field"),
+                other => panic!("expected BrowserOp::Focus, got {other:?}"),
+            },
+        )
+        .await;
+
+        assert_browser_action_dispatches(
+            &handler,
+            &rx,
+            pane,
+            Request::BrowserUncheck {
+                pane,
+                target: "box".into(),
+            },
+            |op| match op {
+                BrowserOp::Uncheck { target } => assert_eq!(target, "box"),
+                other => panic!("expected BrowserOp::Uncheck, got {other:?}"),
+            },
+        )
+        .await;
+
+        assert_browser_action_dispatches(
+            &handler,
+            &rx,
+            pane,
+            Request::BrowserCount {
+                pane,
+                selector: ".row".into(),
+            },
+            |op| match op {
+                BrowserOp::Count { selector } => assert_eq!(selector, ".row"),
+                other => panic!("expected BrowserOp::Count, got {other:?}"),
+            },
+        )
+        .await;
+    }
+
     #[tokio::test]
     async fn browser_navigate_dispatches_action_and_maps_ok_result() {
         let (handler, rx, pane, _tab) = single_pane_handler().await;
