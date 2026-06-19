@@ -304,6 +304,9 @@ impl Handler for GuiHandler {
                             pane: outcome.pane,
                             placement_strategy: outcome.placement_strategy,
                         },
+                        Ok(Err(e)) if e.starts_with("pane not found") => {
+                            Response::Error(RpcError::NotFound(e))
+                        }
                         Ok(Err(e)) => Response::Error(RpcError::Internal(e)),
                         Err(_) => Response::Error(RpcError::Internal("bridge closed".into())),
                     }
@@ -872,5 +875,35 @@ mod tests {
             rx.try_recv().is_err(),
             "invalid focus-tab must not dispatch ActivateSurface"
         );
+    }
+
+    #[tokio::test]
+    async fn browser_open_reports_not_found_for_missing_target_pane() {
+        let (handler, rx, _pane, _tab) = single_pane_handler().await;
+        let missing = PaneId::new();
+        let response = handler.handle(Request::BrowserOpen {
+            url: "https://example.com".into(),
+            target_pane: Some(missing),
+            direction: SplitDirection::Vertical,
+        });
+        tokio::pin!(response);
+
+        let command = tokio::select! {
+            response = &mut response => panic!("browser open completed before bridge ack: {response:?}"),
+            command = rx.recv() => command.expect("browser open should dispatch to GTK"),
+        };
+        let GtkCommand::BrowserOpenSplit {
+            target_pane, ack, ..
+        } = command
+        else {
+            panic!("expected BrowserOpenSplit command");
+        };
+        assert_eq!(target_pane, Some(missing));
+        ack.send(Err(format!("pane not found: {missing}"))).unwrap();
+
+        assert!(matches!(
+            response.await,
+            Response::Error(RpcError::NotFound(_))
+        ));
     }
 }
