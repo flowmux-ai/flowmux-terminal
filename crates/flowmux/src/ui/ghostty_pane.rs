@@ -109,7 +109,7 @@ impl GhosttyPane {
         extra_env: Vec<(String, String)>,
         callbacks: PaneCallbacks,
     ) -> Self {
-        let font = pango::FontDescription::from_string(DEFAULT_FONT);
+        let font = cjk_friendly_font(&pango::FontDescription::from_string(DEFAULT_FONT));
         let (cell_w, cell_h, ascent) = measure_cell(&font);
 
         // Initial geometry; the first allocation resizes to fit.
@@ -535,7 +535,7 @@ impl GhosttyPane {
         // set_font_scale (which borrows again) to avoid a RefCell double-borrow.
         let scale = {
             let mut s = self.state.borrow_mut();
-            s.font = desc.clone();
+            s.font = cjk_friendly_font(desc);
             s.font_scale
         };
         self.set_font_scale(scale);
@@ -636,6 +636,29 @@ impl GhosttyPane {
 
 fn rgb(c: Rgb) -> (f64, f64, f64) {
     (c.r as f64 / 255.0, c.g as f64 / 255.0, c.b as f64 / 255.0)
+}
+
+/// Pick a CJK-capable monospace font when the configured font is the generic
+/// `monospace` default. Pango's automatic CJK fallback for a generic monospace
+/// request is a *proportional* CJK face (~1.5 cells), which leaves Hangul/CJK
+/// loosely spaced; a real CJK monospace face fills two cells naturally. A user
+/// who set an explicit font family is respected as-is.
+fn cjk_friendly_font(desc: &pango::FontDescription) -> pango::FontDescription {
+    let family = desc
+        .family()
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    let is_generic = family.is_empty()
+        || family.eq_ignore_ascii_case("monospace")
+        || family.eq_ignore_ascii_case("mono");
+    let mut out = desc.clone();
+    if is_generic {
+        // If this font is not installed, Pango falls back to the generic
+        // monospace, i.e. the previous behavior — so this only ever improves
+        // CJK rendering, never breaks Latin.
+        out.set_family("Noto Sans Mono CJK KR");
+    }
+    out
 }
 
 /// Map a surface pixel position to a viewport cell, clamped to the grid.

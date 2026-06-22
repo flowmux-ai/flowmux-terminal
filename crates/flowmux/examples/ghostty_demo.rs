@@ -54,7 +54,9 @@ fn measure_cell() -> (f64, f64, f64) {
     let surf = cairo::ImageSurface::create(cairo::Format::ARgb32, 8, 8).unwrap();
     let cr = cairo::Context::new(&surf).unwrap();
     let layout = pangocairo::functions::create_layout(&cr);
-    let desc = pango::FontDescription::from_string(FONT);
+    let desc = pango::FontDescription::from_string(
+        &std::env::var("GHOSTTY_DEMO_FONT").unwrap_or_else(|_| FONT.to_string()),
+    );
     layout.set_font_description(Some(&desc));
 
     // Cell width = precise monospace advance (matches ghostty_pane::measure_cell).
@@ -150,7 +152,9 @@ fn draw(term: &mut Term, cr: &cairo::Context, w: i32, h: i32) {
     // One reusable Pango layout for glyph rendering (gives real font fallback
     // for CJK/emoji, unlike cairo's toy text API).
     let layout = pangocairo::functions::create_layout(cr);
-    let desc = pango::FontDescription::from_string(FONT);
+    let desc = pango::FontDescription::from_string(
+        &std::env::var("GHOSTTY_DEMO_FONT").unwrap_or_else(|_| FONT.to_string()),
+    );
     layout.set_font_description(Some(&desc));
 
     let (cols, rows) = term.vt.dims().unwrap_or((term.cols, term.rows));
