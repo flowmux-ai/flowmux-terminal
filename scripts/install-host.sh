@@ -27,7 +27,12 @@ export RUSTFLAGS="-C link-arg=-Wl,-rpath,$PREFIX/lib ${RUSTFLAGS:-}"
 # extraction API behind `vte-text` — enable it here to ship
 # `flowmux read-screen`. The default (system-VTE) build leaves it off to
 # keep the v0_70 compatibility floor.
-cargo build --release -p flowmux -p flowmux-cli --features flowmux/vte-text
+#
+# `flowmux/libghostty` builds in the libghostty-vt terminal backend and makes it
+# the default (set FLOWMUX_TERMINAL_BACKEND=vte to fall back to the VTE widget).
+# This compiles a static libghostty-vt via scripts/build-ghostty-vt.sh, so Zig
+# 0.15.x must be on PATH. VTE is still linked for the fallback path.
+cargo build --release -p flowmux -p flowmux-cli --features flowmux/vte-text,flowmux/libghostty
 
 for dir in "$HOME/.local/bin" "$HOME/.cargo/bin"; do
     if [ -d "$dir" ]; then

@@ -48,6 +48,11 @@ path = "src/main.rs"
 # turn this on. Without it, `read-screen` returns an explicit
 # not-supported error instead of failing ambiguously.
 vte-text = ["vte/v0_76"]
+# Opt-in: build against the libghostty-vt terminal backend (task C). OFF by
+# default so the shipping GUI stays on VTE. Enabling it pulls the static
+# libghostty-vt link into flowmux-terminal and unlocks the ghostty_demo
+# example (the in-progress renderer). See crates/flowmux-terminal.
+libghostty = ["flowmux-terminal/libghostty", "dep:pangocairo"]
 
 [dependencies]
 flowmux-core = { workspace = true }
@@ -82,7 +87,22 @@ vte = { package = "vte4", version = "0.8", features = ["v0_70"] }
 webkit6 = "0.4"
 nix = { workspace = true }
 libc = { workspace = true }
+# Pango glyph rendering for the libghostty terminal backend (real font fallback
+# for CJK/emoji). Only pulled in by the `libghostty` feature.
+pangocairo = { version = "0.20", optional = true }
 
 [dev-dependencies]
 rusqlite = { version = "0.32", features = ["bundled"] }
 tempfile = "3"
+# Encode the ghostty_demo headless capture (cairo's own write_to_png is behind
+# a feature gtk4 does not enable, so we encode the ImageSurface buffer).
+# (Pango glyph rendering comes from the `pangocairo` optional dep enabled by the
+# `libghostty` feature, which the example requires.)
+png = "0.17"
+
+# In-progress libghostty-vt renderer demo (task C / M2). Standalone GTK4 window
+# that runs a shell through the libghostty path so the renderer can be
+# screenshot-verified independently of the pane system.
+[[example]]
+name = "ghostty_demo"
+required-features = ["libghostty"]

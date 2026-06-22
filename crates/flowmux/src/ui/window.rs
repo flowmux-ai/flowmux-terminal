@@ -6669,7 +6669,7 @@ mod tests {
             let r = controller.pane_registry.borrow();
             r.active_terminal(original)
                 .expect("rendered workspace should expose a terminal for the only pane")
-                .widget
+                .vte_widget()
                 .clone()
         };
         let original_frame_pre_split = controller
@@ -6695,7 +6695,7 @@ mod tests {
             .borrow()
             .active_terminal(original)
             .expect("original pane must still have an active terminal after split")
-            .widget
+            .vte_widget()
             .clone();
         let original_frame_after_split = controller
             .pane_registry
@@ -6732,7 +6732,7 @@ mod tests {
                 "regression: closing the split sibling dropped the surviving pane's terminal entry — \
                  a fresh terminal means the running shell / agent was killed",
             )
-            .widget
+            .vte_widget()
             .clone();
         let original_frame_after_close = controller
             .pane_registry
@@ -6778,7 +6778,7 @@ mod tests {
             registry
                 .active_terminal(pane)
                 .expect("source pane should have an active terminal")
-                .widget
+                .vte_widget()
                 .clone()
         };
 
@@ -6806,7 +6806,7 @@ mod tests {
             .active_terminal(pane)
             .expect("source pane terminal should survive the split");
         assert!(
-            current_terminal.widget == original_terminal,
+            current_terminal.vte_widget().clone() == original_terminal,
             "CLI-applied split must reuse the existing terminal widget"
         );
         assert!(
@@ -6825,7 +6825,7 @@ mod tests {
             registry
                 .active_terminal(pane)
                 .expect("source pane should have an active terminal")
-                .widget
+                .vte_widget()
                 .clone()
         };
 
@@ -6848,7 +6848,7 @@ mod tests {
             .active_terminal(pane)
             .expect("source pane terminal should survive browser split");
         assert!(
-            current_terminal.widget == original_terminal,
+            current_terminal.vte_widget().clone() == original_terminal,
             "CLI browser open split must reuse the source terminal widget"
         );
         assert!(
@@ -6896,7 +6896,7 @@ mod tests {
             .borrow()
             .active_terminal(pane_a)
             .expect("pane A terminal must be registered")
-            .widget
+            .vte_widget()
             .clone();
         let a_frame_initial = controller
             .pane_registry
@@ -6918,7 +6918,7 @@ mod tests {
             .borrow()
             .active_terminal(pane_b)
             .expect("pane B terminal must be registered after first split")
-            .widget
+            .vte_widget()
             .clone();
 
         // Second split: split B horizontally → B (top) over C (bottom).
@@ -6936,14 +6936,14 @@ mod tests {
             .borrow()
             .active_terminal(pane_a)
             .expect("pane A terminal must survive both splits")
-            .widget
+            .vte_widget()
             .clone();
         let b_terminal_after_splits = controller
             .pane_registry
             .borrow()
             .active_terminal(pane_b)
             .expect("pane B terminal must survive its own split")
-            .widget
+            .vte_widget()
             .clone();
         assert!(
             a_terminal_initial == a_terminal_after_splits,
@@ -6972,14 +6972,14 @@ mod tests {
                 "regression: pane A vanished from registry — the close fell back to a full \
                  rerender and any agent running in A is now dead",
             )
-            .widget
+            .vte_widget()
             .clone();
         let b_terminal_after_close = controller
             .pane_registry
             .borrow()
             .active_terminal(pane_b)
             .expect("regression: pane B vanished from registry after closing inner sibling C")
-            .widget
+            .vte_widget()
             .clone();
         let a_frame_after_close = controller
             .pane_registry

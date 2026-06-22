@@ -7,6 +7,17 @@ license.workspace = true
 publish = false
 description = "Libghostty-oriented terminal backend contract for flowmux."
 
+[features]
+# Opt-in libghostty-vt terminal core. OFF by default: the VTE-backed GUI is the
+# shipping terminal while this backend is developed. Enabling it compiles the C
+# shim and links a static libghostty-vt (built by scripts/build-ghostty-vt.sh),
+# which requires Zig 0.15.x. See build.rs and src/vt.rs.
+libghostty = ["dep:libc"]
+
 [dependencies]
 flowmux-core = { workspace = true }
 thiserror = { workspace = true }
+libc = { workspace = true, optional = true }
+
+[build-dependencies]
+cc = "1"

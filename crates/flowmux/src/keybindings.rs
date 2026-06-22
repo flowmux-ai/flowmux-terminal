@@ -20,7 +20,8 @@
 //! one and skips invalid entries with a warning.
 
 use crate::bridge::{Bridge, FocusDir, GtkCommand, WsNav};
-use crate::ui::terminal_pane::{TerminalPane, ALT_ENTER_BYTES};
+use crate::ui::pane_terminal::PaneTerminal;
+use crate::ui::terminal_pane::ALT_ENTER_BYTES;
 use crate::ui::window::ClipboardToast;
 use adw::prelude::*;
 use flowmux_config::keybindings::{ActionId, KeybindingOverrides};
@@ -659,12 +660,14 @@ fn make_insert_newline_action(
         .build()
 }
 
-fn window_focus_is_terminal(window: &adw::ApplicationWindow, term: &TerminalPane) -> bool {
+fn window_focus_is_terminal(window: &adw::ApplicationWindow, term: &PaneTerminal) -> bool {
     let Some(focus) = gtk::prelude::GtkWindowExt::focus(window) else {
         return false;
     };
-    let terminal_widget = term.widget.clone().upcast::<gtk::Widget>();
-    focus == terminal_widget || focus.is_ancestor(&terminal_widget)
+    // Works for either backend: the focused widget is this terminal when it is
+    // the pane's root or a descendant of it.
+    let root = term.root_widget();
+    focus == root || focus.is_ancestor(&root)
 }
 
 fn make_paste_action(

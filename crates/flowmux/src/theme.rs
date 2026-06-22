@@ -178,6 +178,33 @@ impl ResolvedTheme {
         vte.set_scroll_on_output(false);
     }
 
+    /// libghostty-backend equivalent of [`Self::apply_to_terminal`]: push the
+    /// theme font + default fg/bg, the 16 ANSI palette colors, the cursor
+    /// color, and selection colors so the libghostty pane renders identically
+    /// to the VTE path. Indices 16..256 keep libghostty's standard xterm fill,
+    /// matching VTE's behavior for a 16-color theme.
+    #[cfg(feature = "libghostty")]
+    pub fn apply_to_ghostty(&self, pane: &crate::ui::ghostty_pane::GhosttyPane) {
+        use flowmux_terminal::vt::Rgb;
+        fn to_rgb(c: &gdk::RGBA) -> Rgb {
+            Rgb {
+                r: (c.red() * 255.0).round().clamp(0.0, 255.0) as u8,
+                g: (c.green() * 255.0).round().clamp(0.0, 255.0) as u8,
+                b: (c.blue() * 255.0).round().clamp(0.0, 255.0) as u8,
+            }
+        }
+        pane.set_font(&self.font);
+        let palette: Vec<Rgb> = self.palette.iter().map(to_rgb).collect();
+        pane.apply_colors(
+            to_rgb(&self.fg),
+            to_rgb(&self.bg),
+            to_rgb(&self.cursor),
+            &palette,
+            self.selection_bg.as_ref().map(to_rgb),
+            self.selection_fg.as_ref().map(to_rgb),
+        );
+    }
+
     pub fn is_dark(&self) -> bool {
         relative_luminance(&self.bg) < 0.5
     }
