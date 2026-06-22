@@ -743,13 +743,19 @@ fn measure_cell(font: &pango::FontDescription) -> (f64, f64, f64) {
     let cr = cairo::Context::new(&surf).unwrap();
     let layout = pangocairo::functions::create_layout(&cr);
     layout.set_font_description(Some(font));
+
+    // Cell width = the monospace advance, measured precisely by laying out a
+    // run of identical glyphs and dividing. `approximate_char_width` rounded up
+    // is ~1px too wide for many fonts, which reads as loose letter-spacing
+    // (자간); the measured advance keeps glyphs snug like VTE.
+    layout.set_text("0000000000");
+    let cell_w = (layout.pixel_size().0 as f64 / 10.0).round().max(1.0);
+
     let ctx = layout.context();
     let metrics = ctx.metrics(Some(font), None);
     let scale = pango::SCALE as f64;
     let ascent = metrics.ascent() as f64 / scale;
     let descent = metrics.descent() as f64 / scale;
-    let char_w = metrics.approximate_char_width() as f64 / scale;
-    let cell_w = char_w.ceil().max(1.0);
     let cell_h = (ascent + descent).ceil().max(1.0);
     (cell_w, cell_h, ascent)
 }
@@ -838,14 +844,31 @@ fn draw(state: &mut State, cr: &cairo::Context, w: i32, h: i32) {
             let (fr, fgc, fb) = rgb(fg);
             if !cell.text.is_empty() {
                 layout.set_text(&cell.text);
-                // Align every glyph to a common baseline at `y + ascent`,
-                // regardless of the (possibly fallback, e.g. CJK) font Pango
-                // shaped it with — otherwise Hangul/CJK runs ride higher or
-                // lower than ASCII. Offset by this layout's own baseline.
+                // Baseline-align to `y + ascent` so fallback (CJK) glyphs line
+                // up with ASCII regardless of their font's own metrics.
                 let baseline = layout.baseline() as f64 / pango::SCALE as f64;
+                let glyph_w = layout.pixel_size().0 as f64;
                 cr.set_source_rgb(fr, fgc, fb);
-                cr.move_to(x, y + ascent - baseline);
-                pangocairo::functions::show_layout(cr, &layout);
+                if cell.wide && glyph_w > 1.0 && glyph_w < cell_px_w - 0.5 {
+                    // A wide glyph whose fallback font draws it narrower than
+                    // two cells (e.g. Hangul at ~1.5 cells) leaves a gap that
+                    // reads as loose letter-spacing. Scale it horizontally to
+                    // fill the box so CJK looks snug like a CJK monospace font.
+                    // A proper 2-cell CJK font has glyph_w ≈ box, so sx ≈ 1.
+                    let sx = (cell_px_w / glyph_w).min(1.6);
+                    cr.save().ok();
+                    cr.translate(x, y + ascent - baseline);
+                    cr.scale(sx, 1.0);
+                    cr.move_to(0.0, 0.0);
+                    pangocairo::functions::show_layout(cr, &layout);
+                    cr.restore().ok();
+                } else {
+                    // Narrow glyphs (ASCII) sit at the cell origin; center any
+                    // small slack so nothing rides against the right edge.
+                    let x_off = ((cell_px_w - glyph_w) / 2.0).max(0.0);
+                    cr.move_to(x + x_off, y + ascent - baseline);
+                    pangocairo::functions::show_layout(cr, &layout);
+                }
             }
             if cell.style.underline {
                 cr.set_source_rgb(fr, fgc, fb);

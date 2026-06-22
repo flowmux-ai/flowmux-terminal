@@ -57,16 +57,17 @@ fn measure_cell() -> (f64, f64, f64) {
     let desc = pango::FontDescription::from_string(FONT);
     layout.set_font_description(Some(&desc));
 
-    // Cell width: advance of a representative monospace glyph.
-    layout.set_text("M");
-    let (w_px, h_px) = layout.pixel_size();
+    // Cell width = precise monospace advance (matches ghostty_pane::measure_cell).
+    layout.set_text("0000000000");
+    let cell_w = (layout.pixel_size().0 as f64 / 10.0).round().max(1.0);
 
-    // Ascent for baseline placement, from the font metrics.
     let ctx = layout.context();
     let metrics = ctx.metrics(Some(&desc), None);
-    let ascent = metrics.ascent() as f64 / pango::SCALE as f64;
-
-    (w_px.max(1) as f64, h_px.max(1) as f64, ascent)
+    let scale = pango::SCALE as f64;
+    let ascent = metrics.ascent() as f64 / scale;
+    let descent = metrics.descent() as f64 / scale;
+    let cell_h = (ascent + descent).ceil().max(1.0);
+    (cell_w, cell_h, ascent)
 }
 
 fn build_argv(cmd: Option<&str>) -> Vec<String> {
@@ -201,9 +202,21 @@ fn draw(term: &mut Term, cr: &cairo::Context, w: i32, h: i32) {
             if !cell.text.is_empty() {
                 layout.set_text(&cell.text);
                 let baseline = layout.baseline() as f64 / pango::SCALE as f64;
+                let glyph_w = layout.pixel_size().0 as f64;
                 cr.set_source_rgb(fr, fgc, fb);
-                cr.move_to(x, y + ascent - baseline);
-                pangocairo::functions::show_layout(cr, &layout);
+                if cell.wide && glyph_w > 1.0 && glyph_w < cell_px_w - 0.5 {
+                    let sx = (cell_px_w / glyph_w).min(1.6);
+                    cr.save().ok();
+                    cr.translate(x, y + ascent - baseline);
+                    cr.scale(sx, 1.0);
+                    cr.move_to(0.0, 0.0);
+                    pangocairo::functions::show_layout(cr, &layout);
+                    cr.restore().ok();
+                } else {
+                    let x_off = ((cell_px_w - glyph_w) / 2.0).max(0.0);
+                    cr.move_to(x + x_off, y + ascent - baseline);
+                    pangocairo::functions::show_layout(cr, &layout);
+                }
             }
             if cell.style.underline {
                 cr.set_source_rgb(fr, fgc, fb);
