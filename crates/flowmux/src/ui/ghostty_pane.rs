@@ -305,6 +305,9 @@ impl GhosttyPane {
             let state = self.state.clone();
             let area = self.area.clone();
             let im_for_key = im.clone();
+            let adj = self.adj.clone();
+            let scrollbar = self.scrollbar.clone();
+            let syncing = self.syncing.clone();
             key.connect_key_pressed(move |_kc, keyval, _code, gtk_mods| {
                 // Commit any in-progress IME text before this (non-consumed)
                 // key acts, so e.g. Shift+Enter newlines AFTER the composing
@@ -315,13 +318,42 @@ impl GhosttyPane {
                     im_for_key.reset();
                 }
                 let mods = mods_from_state(gtk_mods);
+
+                // Smart paging: PgUp/PgDn page through local scrollback when
+                // there is some (Shift always pages), matching the VTE path;
+                // otherwise the key falls through to the app (e.g. less/vim in
+                // the alternate screen, which has no scrollback).
+                if let Some(dir) = page_dir(keyval) {
+                    if (mods & (flowmux_terminal::vt::MOD_CTRL | flowmux_terminal::vt::MOD_ALT))
+                        == 0
+                    {
+                        let shift = mods & flowmux_terminal::vt::MOD_SHIFT != 0;
+                        let mut s = state.borrow_mut();
+                        let geom = s.vt.scrollbar();
+                        let has_scrollback = geom.map(|(t, _, l)| t > l).unwrap_or(false);
+                        if shift || has_scrollback {
+                            let page = geom.map(|(_, _, l)| l.max(1)).unwrap_or(1) as isize;
+                            s.vt.scroll(dir * page);
+                            drop(s);
+                            area.queue_draw();
+                            sync_scrollbar_adj(&state, &adj, &scrollbar, &syncing);
+                            return glib::Propagation::Stop;
+                        }
+                    }
+                }
+
                 let (named, cp) = map_keyval(keyval);
                 let mut s = state.borrow_mut();
                 match s.vt.encode_key(named, cp, mods, false) {
                     Some(bytes) => {
                         let _ = s.pty.write(&bytes);
+                        // Snap the viewport to the live row on input, so typing
+                        // while scrolled up brings the view back (matches VTE's
+                        // scroll-on-keystroke; output never snaps).
+                        s.vt.scroll_to_bottom();
                         drop(s);
                         area.queue_draw();
+                        sync_scrollbar_adj(&state, &adj, &scrollbar, &syncing);
                         glib::Propagation::Stop
                     }
                     None => glib::Propagation::Proceed,
@@ -331,12 +363,17 @@ impl GhosttyPane {
         {
             let state = self.state.clone();
             let area = self.area.clone();
+            let adj = self.adj.clone();
+            let scrollbar = self.scrollbar.clone();
+            let syncing = self.syncing.clone();
             im.connect_commit(move |_im, text| {
                 let mut s = state.borrow_mut();
                 s.preedit.clear();
                 let _ = s.pty.write(text.as_bytes());
+                s.vt.scroll_to_bottom();
                 drop(s);
                 area.queue_draw();
+                sync_scrollbar_adj(&state, &adj, &scrollbar, &syncing);
             });
         }
         {
@@ -623,14 +660,19 @@ impl GhosttyPane {
     pub fn paste_clipboard(&self) {
         let state = self.state.clone();
         let area = self.area.clone();
+        let adj = self.adj.clone();
+        let scrollbar = self.scrollbar.clone();
+        let syncing = self.syncing.clone();
         if let Some(display) = gdk::Display::default() {
             let clipboard = display.clipboard();
             clipboard.read_text_async(gtk::gio::Cancellable::NONE, move |res| {
                 if let Ok(Some(text)) = res {
                     let mut s = state.borrow_mut();
                     let _ = s.pty.write(text.as_bytes());
+                    s.vt.scroll_to_bottom();
                     drop(s);
                     area.queue_draw();
+                    sync_scrollbar_adj(&state, &adj, &scrollbar, &syncing);
                 }
             });
         }
@@ -644,10 +686,13 @@ impl GhosttyPane {
     }
 
     pub fn feed_after_preedit_commit(&self, bytes: &'static [u8]) {
-        let mut s = self.state.borrow_mut();
-        let _ = s.pty.write(bytes);
-        drop(s);
+        {
+            let mut s = self.state.borrow_mut();
+            let _ = s.pty.write(bytes);
+            s.vt.scroll_to_bottom();
+        }
         self.area.queue_draw();
+        sync_scrollbar_adj(&self.state, &self.adj, &self.scrollbar, &self.syncing);
     }
 
     /// Visible screen text (all viewport rows joined), for `read-screen`.
@@ -1013,6 +1058,15 @@ fn draw(state: &mut State, cr: &cairo::Context, w: i32, h: i32) {
             cr.rectangle(cx, cy, cw, ch);
             let _ = cr.fill();
         }
+    }
+}
+
+/// Page-key direction for smart paging: -1 = up (PgUp), +1 = down (PgDn).
+fn page_dir(keyval: gdk::Key) -> Option<isize> {
+    match keyval {
+        gdk::Key::Page_Up | gdk::Key::KP_Page_Up => Some(-1),
+        gdk::Key::Page_Down | gdk::Key::KP_Page_Down => Some(1),
+        _ => None,
     }
 }
 

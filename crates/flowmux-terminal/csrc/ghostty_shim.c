@@ -395,6 +395,16 @@ void fxvt_scroll(FxvtCtx *ctx, long delta) {
     ghostty_terminal_scroll_viewport(ctx->terminal, behavior);
 }
 
+void fxvt_scroll_bottom(FxvtCtx *ctx) {
+    if (ctx == NULL) {
+        return;
+    }
+    GhosttyTerminalScrollViewport behavior;
+    behavior.tag = GHOSTTY_SCROLL_VIEWPORT_BOTTOM;
+    behavior.value.delta = 0;
+    ghostty_terminal_scroll_viewport(ctx->terminal, behavior);
+}
+
 int fxvt_scrollbar(FxvtCtx *ctx, unsigned long long *out_total,
                    unsigned long long *out_offset, unsigned long long *out_len) {
     if (ctx == NULL || out_total == NULL || out_offset == NULL || out_len == NULL) {

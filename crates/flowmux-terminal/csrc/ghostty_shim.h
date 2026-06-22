@@ -107,6 +107,10 @@ void fxvt_clear_selection(FxvtCtx *ctx);
 /* Scroll the viewport by `delta` rows through scrollback (up = negative). */
 void fxvt_scroll(FxvtCtx *ctx, long delta);
 
+/* Snap the viewport to the bottom (live cursor row). Used on input so typing
+ * while scrolled up brings the view back; no-op when already at the bottom. */
+void fxvt_scroll_bottom(FxvtCtx *ctx);
+
 /* Read scrollbar geometry: *out_total scrollable rows, *out_offset of the
  * viewport into that area, *out_len visible rows. Returns 0 on success.
  * (Somewhat costly — call only after output/scroll, not every frame.) */

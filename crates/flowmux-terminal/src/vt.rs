@@ -77,6 +77,7 @@ extern "C" {
     ) -> c_int;
     fn fxvt_clear_selection(ctx: *mut FxvtCtx);
     fn fxvt_scroll(ctx: *mut FxvtCtx, delta: c_long);
+    fn fxvt_scroll_bottom(ctx: *mut FxvtCtx);
     fn fxvt_scrollbar(
         ctx: *mut FxvtCtx,
         total: *mut u64,
@@ -422,6 +423,12 @@ impl Vt {
     /// Scroll the viewport by `delta` rows through scrollback (up is negative).
     pub fn scroll(&mut self, delta: isize) {
         unsafe { fxvt_scroll(self.ctx, delta as c_long) };
+    }
+
+    /// Snap the viewport to the bottom (live cursor row). Call on input so that
+    /// typing while scrolled up brings the view back; a no-op when already live.
+    pub fn scroll_to_bottom(&mut self) {
+        unsafe { fxvt_scroll_bottom(self.ctx) };
     }
 
     /// Encode a key press into terminal bytes via libghostty's key encoder,
@@ -778,6 +785,12 @@ mod tests {
         assert!(vt.update());
         let (_t2, offset2, _l2) = vt.scrollbar().expect("scrollbar");
         assert!(offset2 < offset, "scrolling up lowers the offset");
+
+        // Snapping to bottom (as input does) returns the viewport to live.
+        vt.scroll_to_bottom();
+        assert!(vt.update());
+        let (t3, offset3, len3) = vt.scrollbar().expect("scrollbar");
+        assert_eq!(offset3, t3 - len3, "scroll_to_bottom pins back to live");
     }
 
     #[test]
