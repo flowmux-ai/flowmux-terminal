@@ -146,6 +146,12 @@ pub trait TerminalBackend {
 pub mod ghostty_backend;
 pub mod key_modes;
 
+/// libghostty-vt core (feed bytes, snapshot, read grid). Opt-in: enabled by the
+/// `libghostty` cargo feature, which links a static libghostty-vt via the C
+/// shim. Off by default so the VTE-backed GUI stays the shipping terminal.
+#[cfg(feature = "libghostty")]
+pub mod vt;
+
 pub use key_modes::TerminalInputModes;
 
 #[cfg(test)]

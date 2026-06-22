@@ -1160,6 +1160,7 @@ dependencies = [
 name = "flowmux-terminal"
 version = "0.4.2"
 dependencies = [
+ "cc",
  "flowmux-core",
  "thiserror 1.0.69",
 ]
