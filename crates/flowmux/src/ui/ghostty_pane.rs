@@ -848,27 +848,14 @@ fn draw(state: &mut State, cr: &cairo::Context, w: i32, h: i32) {
                 // up with ASCII regardless of their font's own metrics.
                 let baseline = layout.baseline() as f64 / pango::SCALE as f64;
                 let glyph_w = layout.pixel_size().0 as f64;
+                // Center the glyph in its cell box without distorting its shape.
+                // ASCII matches the cell (offset ~0); a wide CJK glyph that the
+                // fallback font draws narrower than two cells gets balanced
+                // slack on both sides instead of all on the right.
+                let x_off = ((cell_px_w - glyph_w) / 2.0).max(0.0);
                 cr.set_source_rgb(fr, fgc, fb);
-                if cell.wide && glyph_w > 1.0 && glyph_w < cell_px_w - 0.5 {
-                    // A wide glyph whose fallback font draws it narrower than
-                    // two cells (e.g. Hangul at ~1.5 cells) leaves a gap that
-                    // reads as loose letter-spacing. Scale it horizontally to
-                    // fill the box so CJK looks snug like a CJK monospace font.
-                    // A proper 2-cell CJK font has glyph_w ≈ box, so sx ≈ 1.
-                    let sx = (cell_px_w / glyph_w).min(1.6);
-                    cr.save().ok();
-                    cr.translate(x, y + ascent - baseline);
-                    cr.scale(sx, 1.0);
-                    cr.move_to(0.0, 0.0);
-                    pangocairo::functions::show_layout(cr, &layout);
-                    cr.restore().ok();
-                } else {
-                    // Narrow glyphs (ASCII) sit at the cell origin; center any
-                    // small slack so nothing rides against the right edge.
-                    let x_off = ((cell_px_w - glyph_w) / 2.0).max(0.0);
-                    cr.move_to(x + x_off, y + ascent - baseline);
-                    pangocairo::functions::show_layout(cr, &layout);
-                }
+                cr.move_to(x + x_off, y + ascent - baseline);
+                pangocairo::functions::show_layout(cr, &layout);
             }
             if cell.style.underline {
                 cr.set_source_rgb(fr, fgc, fb);

@@ -204,19 +204,9 @@ fn draw(term: &mut Term, cr: &cairo::Context, w: i32, h: i32) {
                 let baseline = layout.baseline() as f64 / pango::SCALE as f64;
                 let glyph_w = layout.pixel_size().0 as f64;
                 cr.set_source_rgb(fr, fgc, fb);
-                if cell.wide && glyph_w > 1.0 && glyph_w < cell_px_w - 0.5 {
-                    let sx = (cell_px_w / glyph_w).min(1.6);
-                    cr.save().ok();
-                    cr.translate(x, y + ascent - baseline);
-                    cr.scale(sx, 1.0);
-                    cr.move_to(0.0, 0.0);
-                    pangocairo::functions::show_layout(cr, &layout);
-                    cr.restore().ok();
-                } else {
-                    let x_off = ((cell_px_w - glyph_w) / 2.0).max(0.0);
-                    cr.move_to(x + x_off, y + ascent - baseline);
-                    pangocairo::functions::show_layout(cr, &layout);
-                }
+                let x_off = ((cell_px_w - glyph_w) / 2.0).max(0.0);
+                cr.move_to(x + x_off, y + ascent - baseline);
+                pangocairo::functions::show_layout(cr, &layout);
             }
             if cell.style.underline {
                 cr.set_source_rgb(fr, fgc, fb);
