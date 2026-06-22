@@ -152,6 +152,12 @@ pub mod key_modes;
 #[cfg(feature = "libghostty")]
 pub mod vt;
 
+/// PTY layer for the libghostty-vt backend (spawn child, read/write master,
+/// resize). Opt-in via the `libghostty` feature; the VTE path uses VTE's own
+/// PTY instead.
+#[cfg(feature = "libghostty")]
+pub mod pty;
+
 pub use key_modes::TerminalInputModes;
 
 #[cfg(test)]

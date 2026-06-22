@@ -52,6 +52,8 @@ fn main() {
     println!("cargo:rustc-link-lib=static=ghostty-vt");
     println!("cargo:rustc-link-lib=dylib=pthread");
     println!("cargo:rustc-link-lib=dylib=m");
+    // forkpty(3) lives in libutil on glibc.
+    println!("cargo:rustc-link-lib=dylib=util");
 
     // Rebuild triggers.
     println!(

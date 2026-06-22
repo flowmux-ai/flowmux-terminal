@@ -1162,6 +1162,7 @@ version = "0.4.2"
 dependencies = [
  "cc",
  "flowmux-core",
+ "libc",
  "thiserror 1.0.69",
 ]
 
