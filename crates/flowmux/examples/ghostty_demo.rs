@@ -291,6 +291,21 @@ fn capture(cmd: Option<&str>, path: &str) {
         }
     }
 
+    // Optional selection for verifying the selection path:
+    // FLOWMUX_DEMO_SELECT="sx,sy,ex,ey".
+    if let Ok(spec) = std::env::var("FLOWMUX_DEMO_SELECT") {
+        let n: Vec<u16> = spec.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+        if n.len() == 4 {
+            vt.set_selection((n[0], n[1]), (n[2], n[3]), false);
+            if let Some(text) = {
+                vt.update();
+                vt.selection_text()
+            } {
+                eprintln!("selection_text = {text:?}");
+            }
+        }
+    }
+
     let mut term = Term {
         vt,
         pty,

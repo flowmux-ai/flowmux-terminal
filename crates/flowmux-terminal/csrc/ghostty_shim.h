@@ -94,6 +94,16 @@ int fxvt_set_default_colors(FxvtCtx *ctx, const uint8_t fg[3],
  * rest — matching how VTE fills 16->256. Returns 0 on success. */
 int fxvt_set_palette(FxvtCtx *ctx, const uint8_t *rgb, int count);
 
+/* Set the active selection to the viewport range [(sx,sy)..(ex,ey)] inclusive
+ * (cell coordinates; y is a viewport row). `rectangle` != 0 selects a block.
+ * The per-cell `selected` flag in the next snapshot reflects it. Returns 0 on
+ * success. */
+int fxvt_set_selection(FxvtCtx *ctx, uint16_t sx, uint32_t sy, uint16_t ex,
+                       uint32_t ey, int rectangle);
+
+/* Clear any active selection. */
+void fxvt_clear_selection(FxvtCtx *ctx);
+
 /* Read one cell at (row, col) in the viewport into *out.
  * Returns 1 if the cell exists and was written, 0 otherwise. */
 int fxvt_cell(FxvtCtx *ctx, uint16_t row, uint16_t col, FxvtCell *out);

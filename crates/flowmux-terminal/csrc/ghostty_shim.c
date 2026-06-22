@@ -207,6 +207,45 @@ int fxvt_set_palette(FxvtCtx *ctx, const uint8_t *rgb, int count) {
                : -1;
 }
 
+int fxvt_set_selection(FxvtCtx *ctx, uint16_t sx, uint32_t sy, uint16_t ex,
+                       uint32_t ey, int rectangle) {
+    if (ctx == NULL) {
+        return -1;
+    }
+    GhosttyPoint ps;
+    ps.tag = GHOSTTY_POINT_TAG_VIEWPORT;
+    ps.value.coordinate.x = sx;
+    ps.value.coordinate.y = sy;
+    GhosttyPoint pe;
+    pe.tag = GHOSTTY_POINT_TAG_VIEWPORT;
+    pe.value.coordinate.x = ex;
+    pe.value.coordinate.y = ey;
+
+    GhosttyGridRef rs, re;
+    if (ghostty_terminal_grid_ref(ctx->terminal, ps, &rs) != GHOSTTY_SUCCESS) {
+        return -1;
+    }
+    if (ghostty_terminal_grid_ref(ctx->terminal, pe, &re) != GHOSTTY_SUCCESS) {
+        return -1;
+    }
+
+    GhosttySelection sel = GHOSTTY_INIT_SIZED(GhosttySelection);
+    sel.start = rs;
+    sel.end = re;
+    sel.rectangle = rectangle ? true : false;
+    return ghostty_terminal_set(ctx->terminal, GHOSTTY_TERMINAL_OPT_SELECTION, &sel)
+                   == GHOSTTY_SUCCESS
+               ? 0
+               : -1;
+}
+
+void fxvt_clear_selection(FxvtCtx *ctx) {
+    if (ctx != NULL) {
+        /* A NULL value clears the selection. */
+        ghostty_terminal_set(ctx->terminal, GHOSTTY_TERMINAL_OPT_SELECTION, NULL);
+    }
+}
+
 /* Bind ctx->row_iter to the snapshot and advance it to `row`, then bind
  * ctx->cells to that row. Returns 1 on success, 0 if the row is out of range. */
 static int fxvt_seek_row(FxvtCtx *ctx, uint16_t row) {

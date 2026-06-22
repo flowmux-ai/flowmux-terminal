@@ -50,6 +50,10 @@ struct State {
     cursor_color: Option<Rgb>,
     selection_bg: Option<Rgb>,
     selection_fg: Option<Rgb>,
+    /// True while a drag selection is active (drives has_selection/copy).
+    has_sel: bool,
+    /// Inline IME preedit string (composing Hangul/CJK) shown at the cursor.
+    preedit: String,
 }
 
 impl State {
@@ -135,6 +139,8 @@ impl GhosttyPane {
             cursor_color: None,
             selection_bg: None,
             selection_fg: None,
+            has_sel: false,
+            preedit: String::new(),
         }));
 
         let area = gtk::DrawingArea::new();
@@ -160,6 +166,7 @@ impl GhosttyPane {
         pane.install_resize();
         pane.install_pty_pump(callbacks.clone());
         pane.install_input();
+        pane.install_selection();
         pane.install_focus(callbacks);
 
         pane
@@ -241,7 +248,8 @@ impl GhosttyPane {
             });
         }
 
-        // IME: route committed text (e.g. composed Hangul syllables) to the PTY.
+        // IME: route committed text (e.g. composed Hangul syllables) to the PTY
+        // and show the in-progress preedit inline at the cursor.
         let im = gtk::IMMulticontext::new();
         key.set_im_context(Some(&im));
         {
@@ -249,14 +257,41 @@ impl GhosttyPane {
             let area = self.area.clone();
             im.connect_commit(move |_im, text| {
                 let mut s = state.borrow_mut();
+                s.preedit.clear();
                 let _ = s.pty.write(text.as_bytes());
                 drop(s);
                 area.queue_draw();
             });
         }
+        {
+            // Inline preedit (composing Hangul/CJK) — store the string so the
+            // renderer can draw it underlined at the cursor, matching VTE.
+            let state = self.state.clone();
+            let area = self.area.clone();
+            im.connect_preedit_changed(move |im| {
+                let (text, _attrs, _cursor) = im.preedit_string();
+                state.borrow_mut().preedit = text.to_string();
+                set_im_cursor_location(im, &state.borrow());
+                area.queue_draw();
+            });
+        }
+        {
+            let state = self.state.clone();
+            let area = self.area.clone();
+            im.connect_preedit_end(move |_im| {
+                state.borrow_mut().preedit.clear();
+                area.queue_draw();
+            });
+        }
+        // Keep the IME focused so composition works as soon as the pane has
+        // keyboard focus, and place the candidate window near the cursor.
         let im_for_focus = im.clone();
+        let state_for_loc = self.state.clone();
         let focus = gtk::EventControllerFocus::new();
-        focus.connect_enter(move |_| im_for_focus.focus_in());
+        focus.connect_enter(move |_| {
+            im_for_focus.focus_in();
+            set_im_cursor_location(&im_for_focus, &state_for_loc.borrow());
+        });
         let im_for_focus_out = im;
         let focus_out = gtk::EventControllerFocus::new();
         focus_out.connect_leave(move |_| im_for_focus_out.focus_out());
@@ -264,6 +299,45 @@ impl GhosttyPane {
         self.area.add_controller(key);
         self.area.add_controller(focus);
         self.area.add_controller(focus_out);
+    }
+
+    /// Mouse drag → libghostty selection. A plain click (no movement) clears any
+    /// existing selection; dragging selects the inclusive cell range.
+    fn install_selection(&self) {
+        let drag = gtk::GestureDrag::new();
+        // Primary button only.
+        drag.set_button(gdk::BUTTON_PRIMARY);
+
+        {
+            let state = self.state.clone();
+            let area = self.area.clone();
+            drag.connect_drag_begin(move |_g, _x, _y| {
+                let mut s = state.borrow_mut();
+                s.vt.clear_selection();
+                s.has_sel = false;
+                drop(s);
+                area.queue_draw();
+            });
+        }
+        {
+            let state = self.state.clone();
+            let area = self.area.clone();
+            drag.connect_drag_update(move |g, off_x, off_y| {
+                let Some((sx, sy)) = g.start_point() else {
+                    return;
+                };
+                let mut s = state.borrow_mut();
+                let (cols, rows) = s.vt.dims().unwrap_or((s.cols, s.rows));
+                let anchor = px_to_cell(sx, sy, s.cell_w, s.cell_h, cols, rows);
+                let end = px_to_cell(sx + off_x, sy + off_y, s.cell_w, s.cell_h, cols, rows);
+                if s.vt.set_selection(anchor, end, false) {
+                    s.has_sel = anchor != end;
+                }
+                drop(s);
+                area.queue_draw();
+            });
+        }
+        self.area.add_controller(drag);
     }
 
     fn install_focus(&self, callbacks: PaneCallbacks) {
@@ -347,12 +421,25 @@ impl GhosttyPane {
     }
 
     pub fn has_selection(&self) -> bool {
-        // Selection lands in M3 (libghostty selection API + drag handling).
-        false
+        self.state.borrow().has_sel
     }
 
     pub fn copy_selection_to_clipboard(&self) {
-        // No-op until selection lands (M3).
+        let text = {
+            let mut s = self.state.borrow_mut();
+            if !s.has_sel {
+                return;
+            }
+            // Refresh the snapshot so selection_text reads current `selected`
+            // flags, then extract the selected run.
+            s.vt.update();
+            s.vt.selection_text()
+        };
+        if let Some(text) = text.filter(|t| !t.is_empty()) {
+            if let Some(display) = gdk::Display::default() {
+                display.clipboard().set_text(&text);
+            }
+        }
     }
 
     pub fn paste_clipboard(&self) {
@@ -404,6 +491,30 @@ impl GhosttyPane {
 
 fn rgb(c: Rgb) -> (f64, f64, f64) {
     (c.r as f64 / 255.0, c.g as f64 / 255.0, c.b as f64 / 255.0)
+}
+
+/// Map a surface pixel position to a viewport cell, clamped to the grid.
+fn px_to_cell(x: f64, y: f64, cell_w: f64, cell_h: f64, cols: u16, rows: u16) -> (u16, u16) {
+    let col = if cell_w > 0.0 { (x / cell_w).floor().max(0.0) } else { 0.0 } as u32;
+    let row = if cell_h > 0.0 { (y / cell_h).floor().max(0.0) } else { 0.0 } as u32;
+    (
+        col.min(cols.saturating_sub(1) as u32) as u16,
+        row.min(rows.saturating_sub(1) as u32) as u16,
+    )
+}
+
+/// Tell the IME where the cursor is so the candidate window appears near the
+/// composing text.
+fn set_im_cursor_location(im: &gtk::IMMulticontext, state: &State) {
+    if let Some(c) = state.vt.cursor() {
+        let rect = gdk::Rectangle::new(
+            (c.x as f64 * state.cell_w) as i32,
+            (c.y as f64 * state.cell_h) as i32,
+            state.cell_w.max(1.0) as i32,
+            state.cell_h.max(1.0) as i32,
+        );
+        im.set_cursor_location(&rect);
+    }
 }
 
 /// Measure monospace cell metrics (width, height, ascent) for `font`, derived
@@ -508,10 +619,34 @@ fn draw(state: &mut State, cr: &cairo::Context, w: i32, h: i32) {
     }
 
     if let Some(cursor) = state.vt.cursor() {
-        if cursor.visible && cursor.x < cols && cursor.y < rows {
+        let cx = cursor.x as f64 * cw;
+        let cy = cursor.y as f64 * ch;
+        if !state.preedit.is_empty() {
+            // Inline IME preedit (composing Hangul/CJK): paint the composing
+            // text at the cursor with an underline, then the block cursor right
+            // after it — matching the VTE path's inline preedit.
+            layout.set_text(&state.preedit);
+            let pw = layout.pixel_size().0 as f64;
+            let (br2, bg2, bb2) = rgb(colors.bg);
+            cr.set_source_rgb(br2, bg2, bb2);
+            cr.rectangle(cx, cy, pw, ch);
+            let _ = cr.fill();
+            let (fr, fgc, fb) = rgb(colors.fg);
+            cr.set_source_rgb(fr, fgc, fb);
+            cr.move_to(cx, cy);
+            pangocairo::functions::show_layout(cr, &layout);
+            cr.rectangle(cx, cy + ascent + 2.0, pw, 1.0);
+            let _ = cr.fill();
+            if cursor.visible {
+                let (r, g, b) = rgb(cursor_rgb);
+                cr.set_source_rgba(r, g, b, 0.6);
+                cr.rectangle(cx + pw, cy, cw, ch);
+                let _ = cr.fill();
+            }
+        } else if cursor.visible && cursor.x < cols && cursor.y < rows {
             let (r, g, b) = rgb(cursor_rgb);
             cr.set_source_rgba(r, g, b, 0.6);
-            cr.rectangle(cursor.x as f64 * cw, cursor.y as f64 * ch, cw, ch);
+            cr.rectangle(cx, cy, cw, ch);
             let _ = cr.fill();
         }
     }

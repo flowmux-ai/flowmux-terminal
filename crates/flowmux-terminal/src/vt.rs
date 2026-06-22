@@ -67,6 +67,15 @@ extern "C" {
         cursor: *const u8,
     ) -> c_int;
     fn fxvt_set_palette(ctx: *mut FxvtCtx, rgb: *const u8, count: c_int) -> c_int;
+    fn fxvt_set_selection(
+        ctx: *mut FxvtCtx,
+        sx: u16,
+        sy: u32,
+        ex: u16,
+        ey: u32,
+        rectangle: c_int,
+    ) -> c_int;
+    fn fxvt_clear_selection(ctx: *mut FxvtCtx);
 }
 
 /// A 24-bit RGB color resolved by libghostty (palette + style flattened).
@@ -297,6 +306,63 @@ impl Vt {
         })
     }
 
+    /// Set the active selection to the inclusive viewport range
+    /// `start..=end` (each `(col, row)`); `rectangle` selects a block. The next
+    /// snapshot's per-cell `selected` flags reflect it.
+    pub fn set_selection(&mut self, start: (u16, u16), end: (u16, u16), rectangle: bool) -> bool {
+        unsafe {
+            fxvt_set_selection(
+                self.ctx,
+                start.0,
+                start.1 as u32,
+                end.0,
+                end.1 as u32,
+                rectangle as c_int,
+            ) == 0
+        }
+    }
+
+    /// Clear any active selection.
+    pub fn clear_selection(&mut self) {
+        unsafe { fxvt_clear_selection(self.ctx) };
+    }
+
+    /// Extract the currently selected text from the latest snapshot by walking
+    /// the per-cell `selected` flags, joining selected runs row by row. Returns
+    /// `None` when nothing is selected. Call [`Vt::update`] first.
+    pub fn selection_text(&self) -> Option<String> {
+        let (cols, rows) = self.dims()?;
+        let mut out = String::new();
+        let mut any = false;
+        let mut pending_rows = 0usize; // newlines deferred until the next selected row
+        for row in 0..rows {
+            let mut line = String::new();
+            let mut row_has = false;
+            for col in 0..cols {
+                if let Some(cell) = self.cell(row, col) {
+                    if cell.selected {
+                        row_has = true;
+                        line.push_str(&cell.text);
+                    }
+                }
+            }
+            if row_has {
+                if any {
+                    for _ in 0..=pending_rows {
+                        out.push('\n');
+                    }
+                }
+                // Trim trailing spaces from the selected run on this row.
+                out.push_str(line.trim_end_matches(' '));
+                any = true;
+                pending_rows = 0;
+            } else if any {
+                pending_rows += 1;
+            }
+        }
+        any.then_some(out)
+    }
+
     /// The UTF-8 text of a whole viewport row, trailing blanks trimmed.
     pub fn row_text(&self, row: u16) -> String {
         // Cells hold at most 8 grapheme codepoints; a generous fixed cap keeps
@@ -440,6 +506,25 @@ mod tests {
         assert!(cell.bg.is_some(), "explicit bg should set has_bg");
         // No explicit fg => seeded with the terminal default foreground.
         assert_eq!(cell.fg, colors.fg);
+    }
+
+    #[test]
+    fn selection_marks_cells_and_extracts_text() {
+        let mut vt = updated(40, 3);
+        vt.write(b"hello world");
+        assert!(vt.update());
+        // Select "hello" (cols 0..=4 on row 0).
+        assert!(vt.set_selection((0, 0), (4, 0), false));
+        assert!(vt.update());
+        assert!(vt.cell(0, 0).unwrap().selected, "first cell should be selected");
+        assert!(vt.cell(0, 4).unwrap().selected, "last selected cell");
+        assert!(!vt.cell(0, 6).unwrap().selected, "cell past selection is unselected");
+        assert_eq!(vt.selection_text().as_deref(), Some("hello"));
+
+        vt.clear_selection();
+        assert!(vt.update());
+        assert!(!vt.cell(0, 0).unwrap().selected, "selection cleared");
+        assert_eq!(vt.selection_text(), None);
     }
 
     #[test]
