@@ -10,7 +10,7 @@
 //! extracted from Ghostty (MIT, © Mitchell Hashimoto and Ghostty
 //! contributors); see the crate `NOTICE` for attribution.
 
-use std::os::raw::{c_char, c_int};
+use std::os::raw::{c_char, c_int, c_long};
 
 /// Opaque per-pane VT context owned by the C shim.
 #[repr(C)]
@@ -76,7 +76,44 @@ extern "C" {
         rectangle: c_int,
     ) -> c_int;
     fn fxvt_clear_selection(ctx: *mut FxvtCtx);
+    fn fxvt_scroll(ctx: *mut FxvtCtx, delta: c_long);
+    fn fxvt_mouse_enabled(ctx: *mut FxvtCtx) -> c_int;
+    fn fxvt_encode_mouse(
+        ctx: *mut FxvtCtx,
+        action: c_int,
+        button: c_int,
+        px: f64,
+        py: f64,
+        mods: c_int,
+        buf: *mut c_char,
+        cap: usize,
+    ) -> usize;
 }
+
+/// Mouse event kind for [`Vt::encode_mouse`] (matches the shim's `FXVT_MOUSE_*`).
+#[derive(Debug, Clone, Copy)]
+pub enum MouseAction {
+    Press = 0,
+    Release = 1,
+    Motion = 2,
+}
+
+/// Mouse button for [`Vt::encode_mouse`] (matches the shim's `FXVT_BTN_*`).
+/// `WheelUp`/`WheelDown` are reported as buttons 4/5.
+#[derive(Debug, Clone, Copy)]
+pub enum MouseButton {
+    None = 0,
+    Left = 1,
+    Right = 2,
+    Middle = 3,
+    WheelUp = 4,
+    WheelDown = 5,
+}
+
+/// Modifier bits for [`Vt::encode_mouse`] (shim `FXVT_MOD_*`).
+pub const MOD_SHIFT: u8 = 1;
+pub const MOD_CTRL: u8 = 2;
+pub const MOD_ALT: u8 = 4;
 
 /// A 24-bit RGB color resolved by libghostty (palette + style flattened).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -327,6 +364,49 @@ impl Vt {
         unsafe { fxvt_clear_selection(self.ctx) };
     }
 
+    /// Scroll the viewport by `delta` rows through scrollback (up is negative).
+    pub fn scroll(&mut self, delta: isize) {
+        unsafe { fxvt_scroll(self.ctx, delta as c_long) };
+    }
+
+    /// Whether the foreground app has enabled mouse tracking (modes
+    /// 1000/1002/1003). When true, pointer events should be reported to it via
+    /// [`Vt::encode_mouse`] rather than driving local selection.
+    pub fn mouse_enabled(&self) -> bool {
+        unsafe { fxvt_mouse_enabled(self.ctx) != 0 }
+    }
+
+    /// Encode a mouse event (surface-pixel position) into the bytes the
+    /// foreground app expects for its active mouse mode/format. Returns `None`
+    /// when there is nothing to send.
+    pub fn encode_mouse(
+        &mut self,
+        action: MouseAction,
+        button: MouseButton,
+        px: f64,
+        py: f64,
+        mods: u8,
+    ) -> Option<Vec<u8>> {
+        let mut buf = [0i8; 64];
+        let n = unsafe {
+            fxvt_encode_mouse(
+                self.ctx,
+                action as c_int,
+                button as c_int,
+                px,
+                py,
+                mods as c_int,
+                buf.as_mut_ptr(),
+                buf.len(),
+            )
+        };
+        if n == 0 {
+            None
+        } else {
+            Some(buf[..n].iter().map(|&b| b as u8).collect())
+        }
+    }
+
     /// Extract the currently selected text from the latest snapshot by walking
     /// the per-cell `selected` flags, joining selected runs row by row. Returns
     /// `None` when nothing is selected. Call [`Vt::update`] first.
@@ -506,6 +586,56 @@ mod tests {
         assert!(cell.bg.is_some(), "explicit bg should set has_bg");
         // No explicit fg => seeded with the terminal default foreground.
         assert_eq!(cell.fg, colors.fg);
+    }
+
+    #[test]
+    fn scroll_viewport_reveals_scrollback() {
+        let mut vt = Vt::new(20, 5, 500).expect("vt");
+        // Print 60 numbered lines so plenty scrolls into history.
+        for i in 0..60 {
+            vt.write(format!("line{i}\r\n").as_bytes());
+        }
+        assert!(vt.update());
+        let bottom_row0 = vt.row_text(0);
+        // Scroll up into history; row 0 should now show an earlier line.
+        vt.scroll(-40);
+        assert!(vt.update());
+        let scrolled_row0 = vt.row_text(0);
+        assert_ne!(
+            bottom_row0, scrolled_row0,
+            "scrolling up should reveal earlier scrollback"
+        );
+        // Back to bottom.
+        vt.scroll(1000);
+        assert!(vt.update());
+        assert_eq!(vt.row_text(0), bottom_row0);
+    }
+
+    #[test]
+    fn mouse_mode_toggles_with_dec_private_modes() {
+        let mut vt = updated(20, 3);
+        assert!(!vt.mouse_enabled(), "mouse tracking off by default");
+        vt.write(b"\x1b[?1000h"); // enable normal mouse tracking
+        assert!(vt.mouse_enabled(), "mode 1000 should enable tracking");
+        vt.write(b"\x1b[?1000l"); // disable
+        assert!(!vt.mouse_enabled(), "mode 1000 reset should disable tracking");
+    }
+
+    #[test]
+    fn encode_mouse_emits_sgr_report_when_enabled() {
+        let mut vt = updated(80, 24);
+        // Size the cells so pixel->cell mapping is well-defined.
+        assert!(vt.resize(80, 24, 8, 16));
+        vt.write(b"\x1b[?1000h\x1b[?1006h"); // normal tracking + SGR format
+        assert!(vt.mouse_enabled());
+        let bytes = vt
+            .encode_mouse(MouseAction::Press, MouseButton::Left, 8.0, 16.0, 0)
+            .expect("a press should encode in SGR mode");
+        // SGR mouse reports start with ESC [ < .
+        assert!(
+            bytes.starts_with(b"\x1b[<"),
+            "expected SGR mouse report, got {bytes:?}"
+        );
     }
 
     #[test]

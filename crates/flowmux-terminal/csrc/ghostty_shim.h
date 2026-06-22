@@ -104,6 +104,34 @@ int fxvt_set_selection(FxvtCtx *ctx, uint16_t sx, uint32_t sy, uint16_t ex,
 /* Clear any active selection. */
 void fxvt_clear_selection(FxvtCtx *ctx);
 
+/* Scroll the viewport by `delta` rows through scrollback (up = negative). */
+void fxvt_scroll(FxvtCtx *ctx, long delta);
+
+/* 1 if the foreground app has enabled any mouse-tracking mode (1000/1002/1003),
+ * so pointer events should be reported to it rather than driving selection. */
+int fxvt_mouse_enabled(FxvtCtx *ctx);
+
+/* Mouse action/button codes for fxvt_encode_mouse (stable shim ABI). */
+#define FXVT_MOUSE_PRESS   0
+#define FXVT_MOUSE_RELEASE 1
+#define FXVT_MOUSE_MOTION  2
+#define FXVT_BTN_NONE   0
+#define FXVT_BTN_LEFT   1
+#define FXVT_BTN_RIGHT  2
+#define FXVT_BTN_MIDDLE 3
+#define FXVT_BTN_WHEEL_UP   4
+#define FXVT_BTN_WHEEL_DOWN 5
+/* Modifier bits for fxvt_encode_mouse. */
+#define FXVT_MOD_SHIFT 1
+#define FXVT_MOD_CTRL  2
+#define FXVT_MOD_ALT   4
+
+/* Encode a mouse event (surface-pixel position `px,py`) into the bytes the
+ * foreground app expects, honoring its active mouse mode/format. Writes up to
+ * `cap` bytes into `buf` and returns the byte count (0 if nothing to send). */
+size_t fxvt_encode_mouse(FxvtCtx *ctx, int action, int button, double px,
+                         double py, int mods, char *buf, size_t cap);
+
 /* Read one cell at (row, col) in the viewport into *out.
  * Returns 1 if the cell exists and was written, 0 otherwise. */
 int fxvt_cell(FxvtCtx *ctx, uint16_t row, uint16_t col, FxvtCell *out);

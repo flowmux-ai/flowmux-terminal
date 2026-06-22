@@ -18,6 +18,13 @@ struct FxvtCtx {
     GhosttyRenderState render;
     GhosttyRenderStateRowIterator row_iter;
     GhosttyRenderStateRowCells cells;
+    GhosttyMouseEncoder mouse_enc;
+    GhosttyMouseEvent mouse_ev;
+    /* Geometry the mouse encoder needs to map pixels -> cells. */
+    uint16_t cols;
+    uint16_t rows;
+    uint32_t cell_w_px;
+    uint32_t cell_h_px;
 };
 
 FxvtCtx *fxvt_new(uint16_t cols, uint16_t rows, size_t scrollback) {
@@ -57,6 +64,18 @@ FxvtCtx *fxvt_new(uint16_t cols, uint16_t rows, size_t scrollback) {
         free(ctx);
         return NULL;
     }
+    // Mouse encoder/event are best-effort: if they fail to allocate, mouse
+    // reporting is simply unavailable (left NULL) and the rest still works.
+    if (ghostty_mouse_encoder_new(NULL, &ctx->mouse_enc) != GHOSTTY_SUCCESS) {
+        ctx->mouse_enc = NULL;
+    }
+    if (ghostty_mouse_event_new(NULL, &ctx->mouse_ev) != GHOSTTY_SUCCESS) {
+        ctx->mouse_ev = NULL;
+    }
+    ctx->cols = cols;
+    ctx->rows = rows;
+    ctx->cell_w_px = 1;
+    ctx->cell_h_px = 1;
     return ctx;
 }
 
@@ -64,6 +83,8 @@ void fxvt_free(FxvtCtx *ctx) {
     if (ctx == NULL) {
         return;
     }
+    if (ctx->mouse_ev) ghostty_mouse_event_free(ctx->mouse_ev);
+    if (ctx->mouse_enc) ghostty_mouse_encoder_free(ctx->mouse_enc);
     if (ctx->cells) ghostty_render_state_row_cells_free(ctx->cells);
     if (ctx->row_iter) ghostty_render_state_row_iterator_free(ctx->row_iter);
     if (ctx->render) ghostty_render_state_free(ctx->render);
@@ -83,10 +104,17 @@ int fxvt_resize(FxvtCtx *ctx, uint16_t cols, uint16_t rows,
     if (ctx == NULL || cols == 0 || rows == 0) {
         return -1;
     }
-    return ghostty_terminal_resize(ctx->terminal, cols, rows, cell_w_px, cell_h_px)
-                   == GHOSTTY_SUCCESS
-               ? 0
-               : -1;
+    int rc = ghostty_terminal_resize(ctx->terminal, cols, rows, cell_w_px, cell_h_px)
+                     == GHOSTTY_SUCCESS
+                 ? 0
+                 : -1;
+    if (rc == 0) {
+        ctx->cols = cols;
+        ctx->rows = rows;
+        ctx->cell_w_px = cell_w_px ? cell_w_px : 1;
+        ctx->cell_h_px = cell_h_px ? cell_h_px : 1;
+    }
+    return rc;
 }
 
 int fxvt_update(FxvtCtx *ctx) {
@@ -244,6 +272,101 @@ void fxvt_clear_selection(FxvtCtx *ctx) {
         /* A NULL value clears the selection. */
         ghostty_terminal_set(ctx->terminal, GHOSTTY_TERMINAL_OPT_SELECTION, NULL);
     }
+}
+
+void fxvt_scroll(FxvtCtx *ctx, long delta) {
+    if (ctx == NULL) {
+        return;
+    }
+    GhosttyTerminalScrollViewport behavior;
+    behavior.tag = GHOSTTY_SCROLL_VIEWPORT_DELTA;
+    behavior.value.delta = (intptr_t)delta;
+    ghostty_terminal_scroll_viewport(ctx->terminal, behavior);
+}
+
+int fxvt_mouse_enabled(FxvtCtx *ctx) {
+    if (ctx == NULL) {
+        return 0;
+    }
+    bool v = false;
+    if (ghostty_terminal_mode_get(ctx->terminal, GHOSTTY_MODE_NORMAL_MOUSE, &v) == GHOSTTY_SUCCESS
+        && v) {
+        return 1;
+    }
+    if (ghostty_terminal_mode_get(ctx->terminal, GHOSTTY_MODE_BUTTON_MOUSE, &v) == GHOSTTY_SUCCESS
+        && v) {
+        return 1;
+    }
+    if (ghostty_terminal_mode_get(ctx->terminal, GHOSTTY_MODE_ANY_MOUSE, &v) == GHOSTTY_SUCCESS
+        && v) {
+        return 1;
+    }
+    return 0;
+}
+
+size_t fxvt_encode_mouse(FxvtCtx *ctx, int action, int button, double px,
+                         double py, int mods, char *buf, size_t cap) {
+    if (ctx == NULL || ctx->mouse_enc == NULL || ctx->mouse_ev == NULL || buf == NULL) {
+        return 0;
+    }
+    /* Refresh the encoder's active tracking mode + report format from the
+     * terminal. */
+    ghostty_mouse_encoder_setopt_from_terminal(ctx->mouse_enc, ctx->terminal);
+
+    /* Give the encoder the pixel geometry so it can map the surface-pixel
+     * position to a cell (without this, encode produces nothing). */
+    GhosttyMouseEncoderSize enc_size;
+    memset(&enc_size, 0, sizeof(enc_size));
+    enc_size.size = sizeof(GhosttyMouseEncoderSize);
+    enc_size.screen_width = (uint32_t)ctx->cols * ctx->cell_w_px;
+    enc_size.screen_height = (uint32_t)ctx->rows * ctx->cell_h_px;
+    enc_size.cell_width = ctx->cell_w_px;
+    enc_size.cell_height = ctx->cell_h_px;
+    ghostty_mouse_encoder_setopt(ctx->mouse_enc, GHOSTTY_MOUSE_ENCODER_OPT_SIZE, &enc_size);
+
+    bool any_pressed = (action == FXVT_MOUSE_MOTION && button != FXVT_BTN_NONE);
+    ghostty_mouse_encoder_setopt(ctx->mouse_enc,
+                                 GHOSTTY_MOUSE_ENCODER_OPT_ANY_BUTTON_PRESSED, &any_pressed);
+
+    GhosttyMouseAction a = GHOSTTY_MOUSE_ACTION_PRESS;
+    if (action == FXVT_MOUSE_RELEASE) {
+        a = GHOSTTY_MOUSE_ACTION_RELEASE;
+    } else if (action == FXVT_MOUSE_MOTION) {
+        a = GHOSTTY_MOUSE_ACTION_MOTION;
+    }
+    ghostty_mouse_event_set_action(ctx->mouse_ev, a);
+
+    if (button == FXVT_BTN_NONE) {
+        ghostty_mouse_event_clear_button(ctx->mouse_ev);
+    } else {
+        GhosttyMouseButton b = GHOSTTY_MOUSE_BUTTON_LEFT;
+        switch (button) {
+            case FXVT_BTN_RIGHT: b = GHOSTTY_MOUSE_BUTTON_RIGHT; break;
+            case FXVT_BTN_MIDDLE: b = GHOSTTY_MOUSE_BUTTON_MIDDLE; break;
+            case FXVT_BTN_WHEEL_UP: b = GHOSTTY_MOUSE_BUTTON_FOUR; break;
+            case FXVT_BTN_WHEEL_DOWN: b = GHOSTTY_MOUSE_BUTTON_FIVE; break;
+            default: b = GHOSTTY_MOUSE_BUTTON_LEFT; break;
+        }
+        ghostty_mouse_event_set_button(ctx->mouse_ev, b);
+    }
+
+    GhosttyMousePosition pos;
+    pos.x = (float)px;
+    pos.y = (float)py;
+    ghostty_mouse_event_set_position(ctx->mouse_ev, pos);
+
+    GhosttyMods m = 0;
+    if (mods & FXVT_MOD_SHIFT) m |= GHOSTTY_MODS_SHIFT;
+    if (mods & FXVT_MOD_CTRL) m |= GHOSTTY_MODS_CTRL;
+    if (mods & FXVT_MOD_ALT) m |= GHOSTTY_MODS_ALT;
+    ghostty_mouse_event_set_mods(ctx->mouse_ev, m);
+
+    size_t out_len = 0;
+    if (ghostty_mouse_encoder_encode(ctx->mouse_enc, ctx->mouse_ev, buf, cap, &out_len)
+        != GHOSTTY_SUCCESS) {
+        return 0;
+    }
+    return out_len;
 }
 
 /* Bind ctx->row_iter to the snapshot and advance it to `row`, then bind

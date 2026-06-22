@@ -25,7 +25,7 @@ use gtk::prelude::*;
 
 use flowmux_core::{PaneId, SurfaceId};
 use flowmux_terminal::pty::Pty;
-use flowmux_terminal::vt::{Colors, Rgb, Vt};
+use flowmux_terminal::vt::{Colors, MouseAction, MouseButton, Rgb, Vt};
 
 use crate::ui::terminal_pane::PaneCallbacks;
 
@@ -54,6 +54,11 @@ struct State {
     has_sel: bool,
     /// Inline IME preedit string (composing Hangul/CJK) shown at the cursor.
     preedit: String,
+    /// Last pointer position in surface pixels (for wheel mouse reports).
+    pointer: (f64, f64),
+    /// Whether a left-button drag selection is in progress, and its anchor cell.
+    selecting: bool,
+    anchor: (u16, u16),
 }
 
 impl State {
@@ -141,6 +146,9 @@ impl GhosttyPane {
             selection_fg: None,
             has_sel: false,
             preedit: String::new(),
+            pointer: (0.0, 0.0),
+            selecting: false,
+            anchor: (0, 0),
         }));
 
         let area = gtk::DrawingArea::new();
@@ -166,7 +174,7 @@ impl GhosttyPane {
         pane.install_resize();
         pane.install_pty_pump(callbacks.clone());
         pane.install_input();
-        pane.install_selection();
+        pane.install_mouse(callbacks.clone());
         pane.install_focus(callbacks);
 
         pane
@@ -301,43 +309,135 @@ impl GhosttyPane {
         self.area.add_controller(focus_out);
     }
 
-    /// Mouse drag → libghostty selection. A plain click (no movement) clears any
-    /// existing selection; dragging selects the inclusive cell range.
-    fn install_selection(&self) {
-        let drag = gtk::GestureDrag::new();
-        // Primary button only.
-        drag.set_button(gdk::BUTTON_PRIMARY);
-
+    /// Mouse handling: drag selection, mouse reporting to apps that request it
+    /// (modes 1000/1002/1003), wheel scrollback, and Ctrl-click URL opening.
+    fn install_mouse(&self, callbacks: PaneCallbacks) {
+        // Pointer motion: extend an active selection, or report motion to the
+        // app; always remember the position for wheel reports.
+        let motion = gtk::EventControllerMotion::new();
         {
             let state = self.state.clone();
             let area = self.area.clone();
-            drag.connect_drag_begin(move |_g, _x, _y| {
+            motion.connect_motion(move |_c, x, y| {
                 let mut s = state.borrow_mut();
-                s.vt.clear_selection();
-                s.has_sel = false;
-                drop(s);
-                area.queue_draw();
+                s.pointer = (x, y);
+                if s.selecting {
+                    let (cols, rows) = s.vt.dims().unwrap_or((s.cols, s.rows));
+                    let anchor = s.anchor;
+                    let end = px_to_cell(x, y, s.cell_w, s.cell_h, cols, rows);
+                    if s.vt.set_selection(anchor, end, false) {
+                        s.has_sel = anchor != end;
+                    }
+                    drop(s);
+                    area.queue_draw();
+                } else if s.vt.mouse_enabled() {
+                    if let Some(bytes) =
+                        s.vt.encode_mouse(MouseAction::Motion, MouseButton::None, x, y, 0)
+                    {
+                        let _ = s.pty.write(&bytes);
+                    }
+                }
+            });
+        }
+        self.area.add_controller(motion);
+
+        // Press/release: start/extend selection, report to the app, or open a
+        // Ctrl-clicked URL.
+        let click = gtk::GestureClick::new();
+        click.set_button(0); // listen to every button
+        {
+            let state = self.state.clone();
+            let area = self.area.clone();
+            let on_open_url = callbacks.on_open_url.clone();
+            let id = self.id;
+            click.connect_pressed(move |g, _n, x, y| {
+                let button = g.current_button();
+                let mods = mods_from_state(g.current_event_state());
+                let mut s = state.borrow_mut();
+                s.pointer = (x, y);
+
+                // Ctrl + left click → open the URL under the pointer.
+                if button == gdk::BUTTON_PRIMARY && (mods & flowmux_terminal::vt::MOD_CTRL) != 0 {
+                    let (cols, rows) = s.vt.dims().unwrap_or((s.cols, s.rows));
+                    let (col, row) = px_to_cell(x, y, s.cell_w, s.cell_h, cols, rows);
+                    s.vt.update();
+                    let line = s.vt.row_text(row);
+                    drop(s);
+                    if let Some(url) = find_url_at(&line, col as usize) {
+                        (on_open_url.borrow_mut())(id, url);
+                    }
+                    return;
+                }
+
+                // App mouse reporting (unless Shift forces local selection).
+                let shift = (mods & flowmux_terminal::vt::MOD_SHIFT) != 0;
+                if s.vt.mouse_enabled() && !shift {
+                    let gb = ghostty_button(button);
+                    if let Some(bytes) = s.vt.encode_mouse(MouseAction::Press, gb, x, y, mods) {
+                        let _ = s.pty.write(&bytes);
+                    }
+                    return;
+                }
+
+                // Otherwise begin a selection on the primary button.
+                if button == gdk::BUTTON_PRIMARY {
+                    s.vt.clear_selection();
+                    s.has_sel = false;
+                    let (cols, rows) = s.vt.dims().unwrap_or((s.cols, s.rows));
+                    s.anchor = px_to_cell(x, y, s.cell_w, s.cell_h, cols, rows);
+                    s.selecting = true;
+                    drop(s);
+                    area.queue_draw();
+                }
             });
         }
         {
             let state = self.state.clone();
-            let area = self.area.clone();
-            drag.connect_drag_update(move |g, off_x, off_y| {
-                let Some((sx, sy)) = g.start_point() else {
-                    return;
-                };
+            click.connect_released(move |g, _n, x, y| {
+                let button = g.current_button();
+                let mods = mods_from_state(g.current_event_state());
                 let mut s = state.borrow_mut();
-                let (cols, rows) = s.vt.dims().unwrap_or((s.cols, s.rows));
-                let anchor = px_to_cell(sx, sy, s.cell_w, s.cell_h, cols, rows);
-                let end = px_to_cell(sx + off_x, sy + off_y, s.cell_w, s.cell_h, cols, rows);
-                if s.vt.set_selection(anchor, end, false) {
-                    s.has_sel = anchor != end;
+                let shift = (mods & flowmux_terminal::vt::MOD_SHIFT) != 0;
+                if s.selecting {
+                    s.selecting = false;
+                } else if s.vt.mouse_enabled() && !shift {
+                    let gb = ghostty_button(button);
+                    if let Some(bytes) = s.vt.encode_mouse(MouseAction::Release, gb, x, y, mods) {
+                        let _ = s.pty.write(&bytes);
+                    }
+                }
+            });
+        }
+        self.area.add_controller(click);
+
+        // Wheel: report to the app when mouse tracking is on, else scroll
+        // through scrollback.
+        let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+        {
+            let state = self.state.clone();
+            let area = self.area.clone();
+            scroll.connect_scroll(move |_c, _dx, dy| {
+                let mut s = state.borrow_mut();
+                if s.vt.mouse_enabled() {
+                    let (px, py) = s.pointer;
+                    let btn = if dy < 0.0 {
+                        MouseButton::WheelUp
+                    } else {
+                        MouseButton::WheelDown
+                    };
+                    if let Some(bytes) = s.vt.encode_mouse(MouseAction::Press, btn, px, py, 0) {
+                        let _ = s.pty.write(&bytes);
+                    }
+                } else {
+                    // Up (dy < 0) scrolls into history; ~3 lines per notch.
+                    s.vt.scroll((dy * 3.0).round() as isize);
                 }
                 drop(s);
                 area.queue_draw();
+                glib::Propagation::Stop
             });
         }
-        self.area.add_controller(drag);
+        self.area.add_controller(scroll);
     }
 
     fn install_focus(&self, callbacks: PaneCallbacks) {
@@ -501,6 +601,61 @@ fn px_to_cell(x: f64, y: f64, cell_w: f64, cell_h: f64, cols: u16, rows: u16) ->
         col.min(cols.saturating_sub(1) as u32) as u16,
         row.min(rows.saturating_sub(1) as u32) as u16,
     )
+}
+
+/// GTK modifier state → shim mouse-modifier bits.
+fn mods_from_state(state: gdk::ModifierType) -> u8 {
+    let mut m = 0;
+    if state.contains(gdk::ModifierType::SHIFT_MASK) {
+        m |= flowmux_terminal::vt::MOD_SHIFT;
+    }
+    if state.contains(gdk::ModifierType::CONTROL_MASK) {
+        m |= flowmux_terminal::vt::MOD_CTRL;
+    }
+    if state.contains(gdk::ModifierType::ALT_MASK) {
+        m |= flowmux_terminal::vt::MOD_ALT;
+    }
+    m
+}
+
+/// Map a GTK button number to a libghostty mouse button.
+fn ghostty_button(button: u32) -> MouseButton {
+    if button == gdk::BUTTON_MIDDLE {
+        MouseButton::Middle
+    } else if button == gdk::BUTTON_SECONDARY {
+        MouseButton::Right
+    } else {
+        MouseButton::Left
+    }
+}
+
+/// Find a URL covering column `col` in a row's text. Columns are treated as
+/// char indices, which is exact for the ASCII URLs this targets. Trailing
+/// sentence punctuation is trimmed; bare `www.` hosts get an `https://` scheme.
+fn find_url_at(line: &str, col: usize) -> Option<String> {
+    let chars: Vec<char> = line.chars().collect();
+    if col >= chars.len() || chars[col].is_whitespace() {
+        return None;
+    }
+    let mut start = col;
+    while start > 0 && !chars[start - 1].is_whitespace() {
+        start -= 1;
+    }
+    let mut end = col;
+    while end < chars.len() && !chars[end].is_whitespace() {
+        end += 1;
+    }
+    let token: String = chars[start..end].iter().collect();
+    let trimmed = token
+        .trim_start_matches(|c: char| "([{<\"'".contains(c))
+        .trim_end_matches(|c: char| ".,;:!?)]}'\"".contains(c));
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        Some(trimmed.to_string())
+    } else if trimmed.starts_with("www.") {
+        Some(format!("https://{trimmed}"))
+    } else {
+        None
+    }
 }
 
 /// Tell the IME where the cursor is so the candidate window appears near the
@@ -712,4 +867,43 @@ fn encode_key(keyval: gdk::Key, state: gdk::ModifierType) -> Option<Vec<u8>> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_url_at;
+
+    #[test]
+    fn finds_http_url_under_column() {
+        let line = "see https://example.com/path for details";
+        // Column 10 falls inside the URL token.
+        assert_eq!(
+            find_url_at(line, 10).as_deref(),
+            Some("https://example.com/path")
+        );
+    }
+
+    #[test]
+    fn trims_trailing_punctuation() {
+        let line = "visit (https://rust-lang.org).";
+        assert_eq!(
+            find_url_at(line, 20).as_deref(),
+            Some("https://rust-lang.org")
+        );
+    }
+
+    #[test]
+    fn bare_www_gets_https_scheme() {
+        let line = "go to www.example.org now";
+        assert_eq!(
+            find_url_at(line, 8).as_deref(),
+            Some("https://www.example.org")
+        );
+    }
+
+    #[test]
+    fn no_url_on_plain_or_whitespace() {
+        assert_eq!(find_url_at("just some words here", 5), None);
+        assert_eq!(find_url_at("a  b", 1), None); // whitespace column
+    }
 }
