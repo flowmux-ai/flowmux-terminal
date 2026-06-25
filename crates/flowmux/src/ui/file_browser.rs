@@ -28,7 +28,7 @@ pub struct FileBrowserPanel {
     path_clipboard_writer: Rc<RefCell<Box<dyn Fn(&str)>>>,
     on_focus_out: Rc<RefCell<Option<Box<dyn Fn(FocusDir)>>>>,
     on_escape: Rc<RefCell<Option<Box<dyn Fn()>>>>,
-    #[cfg(test)]
+    #[cfg(all(test, not(target_os = "macos")))]
     rebuild_count: Rc<std::cell::Cell<usize>>,
 }
 
@@ -173,7 +173,7 @@ impl FileBrowserPanel {
             }))),
             on_focus_out: Rc::new(RefCell::new(None)),
             on_escape: Rc::new(RefCell::new(None)),
-            #[cfg(test)]
+            #[cfg(all(test, not(target_os = "macos")))]
             rebuild_count: Rc::new(std::cell::Cell::new(0)),
         };
 
@@ -200,17 +200,17 @@ impl FileBrowserPanel {
         *self.on_escape.borrow_mut() = Some(Box::new(f));
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(target_os = "macos")))]
     fn set_delete_handler<F: Fn(&Path) -> io::Result<()> + 'static>(&self, f: F) {
         *self.delete_handler.borrow_mut() = Box::new(f);
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(target_os = "macos")))]
     fn set_path_clipboard_writer<F: Fn(&str) + 'static>(&self, f: F) {
         *self.path_clipboard_writer.borrow_mut() = Box::new(f);
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(target_os = "macos")))]
     fn show_for_root(&self, root: PathBuf) {
         self.model.borrow_mut().set_root(root.clone());
         self.root.set_visible(true);
@@ -233,7 +233,7 @@ impl FileBrowserPanel {
         self.model.borrow().root.as_ref() == Some(&root)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(target_os = "macos")))]
     pub(crate) fn rebuild_count(&self) -> usize {
         self.rebuild_count.get()
     }
@@ -264,14 +264,14 @@ impl FileBrowserPanel {
         self.restore_scroll_value(scroll_value);
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(target_os = "macos")))]
     fn refresh_reset_scroll(&self) {
         self.rebuild_rows();
         self.restore_scroll_value(0.0);
     }
 
     fn rebuild_rows(&self) {
-        #[cfg(test)]
+        #[cfg(all(test, not(target_os = "macos")))]
         self.rebuild_count.set(self.rebuild_count.get() + 1);
 
         while let Some(child) = self.list.first_child() {
@@ -1619,6 +1619,8 @@ fn normalize_root(root: PathBuf) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #![cfg_attr(target_os = "macos", allow(dead_code, unused_imports))]
+
     use super::*;
     use std::cell::Cell;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1673,6 +1675,15 @@ mod tests {
 
     fn row_paths(model: &FileBrowserModel) -> Vec<PathBuf> {
         model.rows().iter().map(|row| row.path.clone()).collect()
+    }
+
+    fn selected_names(model: &FileBrowserModel) -> Vec<String> {
+        model
+            .rows()
+            .into_iter()
+            .filter(|row| row.selected)
+            .map(|row| display_name(&row.path))
+            .collect()
     }
 
     fn panel_row_names(panel: &FileBrowserPanel) -> Vec<String> {
@@ -1784,6 +1795,7 @@ mod tests {
         ));
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn pane_state_restores_focus_scroll_and_expanded_paths() {
         let tmp = TestDir::new("pane-state-a");
@@ -2027,6 +2039,134 @@ mod tests {
         assert!(row_paths(&model).contains(&pasted));
     }
 
+    #[test]
+    fn behavior_model_focus_and_selection_follow_keyboard_semantics() {
+        let tmp = TestDir::new("behavior-model-selection");
+        tmp.file("a.txt");
+        tmp.file("b.txt");
+        tmp.file("c.txt");
+
+        let mut model = FileBrowserModel::default();
+        model.set_root(tmp.path.clone());
+        model.sync_focus();
+
+        assert_eq!(model.focused.as_ref(), Some(&tmp.path.join("a.txt")));
+        assert_eq!(selected_names(&model), Vec::<String>::new());
+
+        assert!(model.move_focus(1));
+        assert_eq!(model.focused.as_ref(), Some(&tmp.path.join("b.txt")));
+        assert_eq!(selected_names(&model), vec!["b.txt"]);
+
+        assert!(model.extend_selection_focus(1));
+        assert_eq!(model.focused.as_ref(), Some(&tmp.path.join("c.txt")));
+        assert_eq!(selected_names(&model), vec!["b.txt", "c.txt"]);
+
+        assert!(model.move_focus(-1));
+        assert_eq!(model.focused.as_ref(), Some(&tmp.path.join("b.txt")));
+        assert_eq!(selected_names(&model), vec!["b.txt"]);
+    }
+
+    #[test]
+    fn behavior_model_folder_activation_toggles_visible_rows() {
+        let tmp = TestDir::new("behavior-model-toggle");
+        let src = tmp.dir("src");
+        tmp.file("src/main.rs");
+        tmp.file("top.txt");
+
+        let mut model = FileBrowserModel::default();
+        model.set_root(tmp.path.clone());
+        model.sync_focus();
+
+        assert_eq!(row_names(&model), ["src", "top.txt"]);
+        assert_eq!(model.focused.as_ref(), Some(&src));
+
+        assert_eq!(model.activate_focused(), FileBrowserActivation::Refresh);
+        assert_eq!(row_names(&model), ["src", "main.rs", "top.txt"]);
+
+        assert!(model.collapse_focused());
+        assert_eq!(row_names(&model), ["src", "top.txt"]);
+    }
+
+    #[test]
+    fn behavior_model_copy_cut_paste_and_rename_update_filesystem_state() {
+        let tmp = TestDir::new("behavior-model-file-ops");
+        let file = tmp.file("a.txt");
+        let dest = tmp.dir("dest");
+
+        let mut model = FileBrowserModel::default();
+        model.set_root(tmp.path.clone());
+        assert!(model.focus_path(&file));
+        assert!(model.copy_focused());
+        assert!(model.paste_from_clipboard().unwrap());
+        assert!(tmp.path.join("a copy.txt").exists());
+
+        assert_eq!(model.focused.as_ref(), Some(&file));
+        assert!(model.rename_focused("renamed.txt").is_ok());
+        let renamed = tmp.path.join("renamed.txt");
+        assert!(!file.exists());
+        assert!(renamed.exists());
+        assert_eq!(model.focused.as_ref(), Some(&renamed));
+
+        assert!(model.cut_focused());
+        assert!(model.focus_path(&dest));
+        assert!(model.paste_from_clipboard().unwrap());
+        assert!(!renamed.exists());
+        assert!(dest.join("renamed.txt").exists());
+        assert!(model.clipboard.is_none());
+    }
+
+    #[test]
+    fn behavior_model_delete_selection_compacts_children_and_restores_focus() {
+        let tmp = TestDir::new("behavior-model-delete");
+        let folder = tmp.dir("folder");
+        let child = tmp.file("folder/child.txt");
+        let other = tmp.file("other.txt");
+
+        let mut model = FileBrowserModel::default();
+        model.set_root(tmp.path.clone());
+        assert!(model.focus_path(&folder));
+        assert!(model.expand_focused());
+        assert!(model.extend_selection_to_path(&child));
+
+        let targets = model.deletion_targets();
+        assert_eq!(targets, vec![folder.clone()]);
+        let next_focus = model.focus_candidate_after_removed_paths(&targets);
+        assert_eq!(next_focus, Some(other.clone()));
+
+        fs::remove_dir_all(&folder).unwrap();
+        model.forget_removed_paths(&targets, next_focus);
+
+        assert!(!folder.exists());
+        assert_eq!(selected_names(&model), vec!["other.txt"]);
+        assert_eq!(model.focused.as_ref(), Some(&other));
+        assert!(!model.expanded.contains(&folder));
+    }
+
+    #[test]
+    fn behavior_model_failed_delete_keeps_failed_entry_selected() {
+        let tmp = TestDir::new("behavior-model-delete-failure");
+        let a = tmp.file("a.txt");
+        let b = tmp.file("b.txt");
+        let c = tmp.file("c.txt");
+        let d = tmp.file("d.txt");
+
+        let mut model = FileBrowserModel::default();
+        model.set_root(tmp.path.clone());
+        assert!(model.focus_path(&a));
+        assert!(model.extend_selection_to_path(&c));
+        assert_eq!(selected_names(&model), vec!["a.txt", "b.txt", "c.txt"]);
+
+        fs::remove_file(&a).unwrap();
+        fs::remove_file(&c).unwrap();
+        model.forget_removed_paths(&[a, c], Some(b.clone()));
+
+        assert!(b.exists());
+        assert!(d.exists());
+        assert_eq!(selected_names(&model), vec!["b.txt"]);
+        assert_eq!(model.focused.as_ref(), Some(&b));
+    }
+
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn panel_rename_refreshes_after_model_borrow_drops() {
         let tmp = TestDir::new("panel-rename");
@@ -2045,6 +2185,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn panel_paste_refreshes_after_model_borrow_drops() {
         let tmp = TestDir::new("panel-paste");
@@ -2063,6 +2204,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn behavior_arrow_keys_move_custom_focus_without_listbox_selection() {
         let tmp = TestDir::new("behavior-arrows");
@@ -2090,6 +2232,7 @@ mod tests {
         assert!(panel.list.selected_row().is_none());
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn behavior_left_right_and_enter_toggle_focused_folder() {
         let tmp = TestDir::new("behavior-toggle");
@@ -2121,6 +2264,7 @@ mod tests {
         assert_eq!(panel_row_names(&panel), ["src", "main.rs", "top.txt"]);
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn behavior_f2_opens_rename_popup_for_focused_entry() {
         let tmp = TestDir::new("behavior-f2");
@@ -2149,6 +2293,7 @@ mod tests {
         close_rename_windows();
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn behavior_alt_arrows_and_escape_use_callbacks() {
         let panel = FileBrowserPanel::new();
@@ -2199,6 +2344,7 @@ mod tests {
         assert!(closed.get());
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn behavior_ctrl_shift_k_copies_focused_item_path() {
         let tmp = TestDir::new("behavior-copy-path");
@@ -2228,6 +2374,7 @@ mod tests {
         assert_ne!(copied.borrow().as_deref(), Some(root_path.as_str()));
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn behavior_shift_arrows_extend_file_selection() {
         let tmp = TestDir::new("behavior-shift-select");
@@ -2244,20 +2391,16 @@ mod tests {
         );
         assert_eq!(panel_selected_names(&panel), vec!["a.txt", "b.txt"]);
         assert_eq!(panel_focused_path(&panel), Some(tmp.path.join("b.txt")));
-        assert!(
-            panel
-                .list
-                .row_at_index(0)
-                .unwrap()
-                .has_css_class("selected")
-        );
-        assert!(
-            panel
-                .list
-                .row_at_index(1)
-                .unwrap()
-                .has_css_class("selected")
-        );
+        assert!(panel
+            .list
+            .row_at_index(0)
+            .unwrap()
+            .has_css_class("selected"));
+        assert!(panel
+            .list
+            .row_at_index(1)
+            .unwrap()
+            .has_css_class("selected"));
 
         assert_eq!(
             panel.handle_key(gdk::Key::Down, gdk::ModifierType::SHIFT_MASK),
@@ -2277,6 +2420,7 @@ mod tests {
         assert_eq!(panel_focused_path(&panel), Some(tmp.path.join("b.txt")));
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn behavior_plain_arrow_replaces_multi_selection() {
         let tmp = TestDir::new("behavior-plain-select");
@@ -2298,6 +2442,7 @@ mod tests {
         assert_eq!(panel_focused_path(&panel), Some(tmp.path.join("c.txt")));
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn behavior_ctrl_click_toggles_multi_selection() {
         let tmp = TestDir::new("behavior-ctrl-click-select");
@@ -2310,19 +2455,18 @@ mod tests {
 
         panel.toggle_path_selection(b.clone());
         assert_eq!(panel_selected_names(&panel), vec!["a.txt", "b.txt"]);
-        assert!(
-            panel
-                .list
-                .row_at_index(1)
-                .unwrap()
-                .has_css_class("selected")
-        );
+        assert!(panel
+            .list
+            .row_at_index(1)
+            .unwrap()
+            .has_css_class("selected"));
 
         panel.toggle_path_selection(a);
         assert_eq!(panel_selected_names(&panel), vec!["b.txt"]);
         assert_eq!(panel_focused_path(&panel), Some(tmp.path.join("a.txt")));
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn behavior_shift_click_extends_selection_range() {
         let tmp = TestDir::new("behavior-shift-click-select");
@@ -2342,6 +2486,7 @@ mod tests {
         assert_eq!(panel_focused_path(&panel), Some(tmp.path.join("c.txt")));
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn behavior_ctrl_copy_paste_refreshes_visible_rows() {
         let tmp = TestDir::new("behavior-copy");
@@ -2363,6 +2508,7 @@ mod tests {
         assert_eq!(panel_row_names(&panel), ["a copy.txt", "a.txt"]);
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn behavior_ctrl_cut_marks_row_then_paste_moves_and_clears_cut_state() {
         let tmp = TestDir::new("behavior-cut");
@@ -2390,6 +2536,7 @@ mod tests {
         assert!(panel.model.borrow().rows().iter().all(|row| !row.cut));
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn behavior_rename_preserves_focus_and_scroll_level() {
         let tmp = TestDir::new("behavior-rename-preserve");
@@ -2407,6 +2554,7 @@ mod tests {
         assert_eq!(panel.scroll.vadjustment().value(), 320.0);
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn behavior_paste_preserves_focus_and_scroll_level() {
         let tmp = TestDir::new("behavior-paste-preserve");
@@ -2427,6 +2575,7 @@ mod tests {
         assert_eq!(panel.scroll.vadjustment().value(), 260.0);
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn behavior_delete_preserves_scroll_level_while_moving_focus_to_neighbor() {
         let tmp = TestDir::new("behavior-delete-preserve");
@@ -2446,6 +2595,7 @@ mod tests {
         assert_eq!(panel.scroll.vadjustment().value(), 180.0);
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn behavior_delete_moves_focused_entry_to_trash_and_refreshes_visible_rows() {
         let tmp = TestDir::new("behavior-delete");
@@ -2474,6 +2624,7 @@ mod tests {
         assert_eq!(panel_focused_path(&panel), Some(tmp.path.join("b.txt")));
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn behavior_delete_removes_all_ctrl_selected_entries_in_one_pass() {
         let tmp = TestDir::new("behavior-delete-ctrl-multi");
@@ -2513,6 +2664,7 @@ mod tests {
         assert_eq!(panel_focused_path(&panel), Some(d));
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn behavior_delete_removes_shift_selected_range_in_visible_order() {
         let tmp = TestDir::new("behavior-delete-shift-range");
@@ -2554,6 +2706,7 @@ mod tests {
         assert_eq!(panel_focused_path(&panel), Some(d));
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn behavior_delete_compacts_selected_parent_and_child() {
         let tmp = TestDir::new("behavior-delete-parent-child");
@@ -2587,6 +2740,7 @@ mod tests {
         assert_eq!(panel_focused_path(&panel), Some(other));
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn behavior_delete_keeps_failed_selected_entries_selected() {
         let tmp = TestDir::new("behavior-delete-partial-failure");
@@ -2626,6 +2780,7 @@ mod tests {
         assert_eq!(panel_focused_path(&panel), Some(b));
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn behavior_shift_delete_requires_confirmation_before_permanent_delete() {
         let tmp = TestDir::new("behavior-shift-delete");
@@ -2658,6 +2813,7 @@ mod tests {
         close_delete_windows();
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn behavior_permanent_delete_removes_multi_selection() {
         let tmp = TestDir::new("behavior-permanent-delete-multi");

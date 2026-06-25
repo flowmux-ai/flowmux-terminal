@@ -14,12 +14,38 @@
 
 use std::path::PathBuf;
 
+fn env_dir(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
+fn base_config_dir() -> Option<PathBuf> {
+    env_dir("XDG_CONFIG_HOME").or_else(dirs::config_dir)
+}
+
+fn base_data_dir() -> Option<PathBuf> {
+    env_dir("XDG_DATA_HOME").or_else(dirs::data_dir)
+}
+
+fn base_state_dir() -> Option<PathBuf> {
+    env_dir("XDG_STATE_HOME")
+        .or_else(dirs::state_dir)
+        .or_else(base_data_dir)
+}
+
+fn base_runtime_dir() -> Option<PathBuf> {
+    env_dir("FLOWMUX_RUNTIME_DIR")
+        .or_else(|| env_dir("XDG_RUNTIME_DIR"))
+        .or_else(dirs::runtime_dir)
+}
+
 pub fn config_dir() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("flowmux"))
+    base_config_dir().map(|d| d.join("flowmux"))
 }
 
 pub fn data_dir() -> Option<PathBuf> {
-    dirs::data_dir().map(|d| d.join("flowmux"))
+    base_data_dir().map(|d| d.join("flowmux"))
 }
 
 /// Directory holding the agent wrapper shims (`claude`, `codex`, …)
@@ -32,7 +58,7 @@ pub fn agent_shim_dir() -> Option<PathBuf> {
 }
 
 pub fn state_dir() -> Option<PathBuf> {
-    dirs::state_dir().map(|d| d.join("flowmux"))
+    base_state_dir().map(|d| d.join("flowmux"))
 }
 
 /// True when the current process runs inside a Flatpak sandbox.
@@ -56,6 +82,10 @@ pub fn host_visible_cache_dir() -> Option<PathBuf> {
 /// pointer (symlink) at startup; CLI invocations with no
 /// `FLOWMUX_SOCKET_PATH` env fall back to this path.
 ///
+/// `FLOWMUX_RUNTIME_DIR` overrides only flowmux's socket directory.
+/// It intentionally does not require changing `XDG_RUNTIME_DIR`,
+/// which would hide compositor sockets such as WSLg's Wayland socket.
+///
 /// Outside Flatpak the legacy `flowmux.sock` under `$XDG_RUNTIME_DIR`
 /// stays in use so non-sandbox installs keep their existing wire-up.
 pub fn runtime_socket() -> PathBuf {
@@ -64,7 +94,7 @@ pub fn runtime_socket() -> PathBuf {
             return cache.join("current.sock");
         }
     }
-    if let Some(rt) = dirs::runtime_dir() {
+    if let Some(rt) = base_runtime_dir() {
         rt.join("flowmux.sock")
     } else {
         std::env::temp_dir().join(format!("flowmux-{}.sock", whoami()))
@@ -88,7 +118,7 @@ pub fn runtime_socket_for_pid(pid: u32) -> PathBuf {
             return cache.join(file);
         }
     }
-    if let Some(rt) = dirs::runtime_dir() {
+    if let Some(rt) = base_runtime_dir() {
         rt.join(file)
     } else {
         std::env::temp_dir().join(format!("{}-{}", whoami(), file))
@@ -103,12 +133,12 @@ pub fn host_config_dir_for(agent_subdir: &str) -> Option<PathBuf> {
     if is_flatpak_sandbox() {
         std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config").join(agent_subdir))
     } else {
-        dirs::config_dir().map(|d| d.join(agent_subdir))
+        base_config_dir().map(|d| d.join(agent_subdir))
     }
 }
 
 pub fn ghostty_config_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("ghostty").join("config"))
+    base_config_dir().map(|d| d.join("ghostty").join("config"))
 }
 
 fn whoami() -> String {
@@ -149,6 +179,39 @@ mod tests {
             name.contains("flowmux-42.sock") || name.contains("-flowmux-42.sock"),
             "unexpected socket name: {name}"
         );
+    }
+
+    #[test]
+    fn flowmux_runtime_dir_overrides_xdg_runtime_dir_for_sockets() {
+        let _g = crate::test_env::env_lock().lock().unwrap();
+        let prev_flowmux = std::env::var_os("FLOWMUX_RUNTIME_DIR");
+        let prev_xdg = std::env::var_os("XDG_RUNTIME_DIR");
+        std::env::set_var("FLOWMUX_RUNTIME_DIR", "/tmp/flowmux-runtime-test");
+        std::env::set_var("XDG_RUNTIME_DIR", "/tmp/xdg-runtime-test");
+
+        assert_eq!(
+            runtime_socket(),
+            PathBuf::from("/tmp/flowmux-runtime-test/flowmux.sock")
+        );
+        assert_eq!(
+            runtime_socket_for_pid(4242),
+            PathBuf::from("/tmp/flowmux-runtime-test/flowmux-4242.sock")
+        );
+
+        match prev_flowmux {
+            Some(v) => std::env::set_var("FLOWMUX_RUNTIME_DIR", v),
+            None => std::env::remove_var("FLOWMUX_RUNTIME_DIR"),
+        }
+        match prev_xdg {
+            Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
+            None => std::env::remove_var("XDG_RUNTIME_DIR"),
+        }
+    }
+
+    #[test]
+    fn state_dir_is_available_on_non_xdg_platforms() {
+        let dir = state_dir().expect("state dir should fall back to data dir when needed");
+        assert!(dir.ends_with("flowmux"));
     }
 
     /// host_visible_cache_dir derives from $HOME directly so a Flatpak
@@ -196,7 +259,10 @@ mod tests {
         let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
         let prev_home = std::env::var_os("HOME");
         std::env::set_var("FLATPAK_ID", "com.flowmux.App");
-        std::env::set_var("XDG_CONFIG_HOME", "/home/junsu/.var/app/com.flowmux.App/config");
+        std::env::set_var(
+            "XDG_CONFIG_HOME",
+            "/home/junsu/.var/app/com.flowmux.App/config",
+        );
         std::env::set_var("HOME", "/home/junsu");
         let dir = host_config_dir_for("opencode").unwrap();
         assert_eq!(dir, PathBuf::from("/home/junsu/.config/opencode"));

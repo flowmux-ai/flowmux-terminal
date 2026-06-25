@@ -79,9 +79,18 @@ adw = { package = "libadwaita", version = "0.7", features = ["v1_5"] }
 # lowest set that exposes `check_hyperlink_at` / `check_match_at` /
 # `match_add_regex`, which the URL link handler below relies on.
 vte = { package = "vte4", version = "0.8", features = ["v0_70"] }
-webkit6 = "0.4"
 nix = { workspace = true }
 libc = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit6 = "0.4"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSBitmapImageRep", "NSImage", "NSImageRep", "NSResponder", "NSView", "NSWindow"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSData", "NSDictionary", "NSError", "NSGeometry", "NSObject", "NSString", "NSURL", "NSURLRequest", "NSUUID"] }
+objc2-web-kit = { version = "0.3.2", default-features = false, features = ["std", "WKNavigation", "WKNavigationAction", "WKPreferences", "WKSnapshotConfiguration", "WKUIDelegate", "WKWebView", "WKWebViewConfiguration", "WKWebsiteDataStore", "WKWindowFeatures", "block2", "objc2-app-kit", "objc2-core-foundation"] }
 
 [dev-dependencies]
 rusqlite = { version = "0.32", features = ["bundled"] }

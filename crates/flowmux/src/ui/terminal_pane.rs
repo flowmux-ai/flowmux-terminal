@@ -515,14 +515,16 @@ impl TerminalPane {
 
         let pid: Rc<Cell<Option<i32>>> = Rc::new(Cell::new(None));
         let pid_for_cb = pid.clone();
+        let saved_nofile_limit = cap_vte_spawn_nofile_limit();
+        let saved_nofile_limit_for_child = saved_nofile_limit;
         term.spawn_async(
             vte::PtyFlags::DEFAULT,
             cwd_str,
             &argv_refs,
             &envv_refs,
             glib::SpawnFlags::DEFAULT,
-            || {}, // child setup (runs in child after fork)
-            -1,    // no timeout
+            move || restore_nofile_limit_in_child(saved_nofile_limit_for_child),
+            -1, // no timeout
             gtk::gio::Cancellable::NONE,
             move |result| {
                 match result {
@@ -534,6 +536,7 @@ impl TerminalPane {
                 }
             },
         );
+        restore_vte_spawn_nofile_limit(saved_nofile_limit);
 
         Self {
             id,
@@ -578,8 +581,11 @@ impl TerminalPane {
     ///
     /// Shift+Enter reaches the child through a window accelerator
     /// (`win.insert-newline`), so unlike plain Enter the keypress never
-    /// touches the VTE / ibus path — the composing syllable is not
-    /// committed by it. We force the commit with a focus-cycle flush, feed
+    /// touches the VTE / IME path — the composing syllable is not
+    /// committed by it. This is needed for the asynchronous ibus path and
+    /// for GTK's macOS IM path, where the native Korean IME can otherwise
+    /// commit the last syllable after the injected Shift+Enter bytes. We
+    /// force the commit with a focus-cycle flush, feed
     /// `bytes` from VTE's `commit` signal on an idle tick (VTE writes the
     /// committed bytes during that emission, so an idle feed always lands
     /// behind them), and fall back to a direct feed when nothing is
@@ -588,7 +594,7 @@ impl TerminalPane {
     /// fallback, so it never disturbs ordinary typing.
     pub fn feed_after_preedit_commit(&self, bytes: &'static [u8]) {
         scroll_terminal_to_bottom(&self.widget);
-        if !ibus_im_module_active() {
+        if !insert_newline_needs_preedit_commit_ordering() {
             self.widget.feed_child(bytes);
             return;
         }
@@ -656,6 +662,81 @@ impl TerminalPane {
     }
 }
 
+#[derive(Clone, Copy)]
+struct NoFileLimit {
+    cur: libc::rlim_t,
+    max: libc::rlim_t,
+}
+
+#[cfg(target_os = "macos")]
+fn cap_vte_spawn_nofile_limit() -> Option<NoFileLimit> {
+    const VTE_SPAWN_SOFT_LIMIT: libc::rlim_t = 4096;
+
+    // Homebrew VTE on macOS walks the full soft fd limit while spawning.
+    // Codex/LaunchServices can inherit a 1M limit, which makes that path hang.
+    let current = read_nofile_limit()?;
+    let capped_cur = current.max.min(VTE_SPAWN_SOFT_LIMIT);
+    if current.cur <= capped_cur {
+        return None;
+    }
+
+    if set_nofile_limit(NoFileLimit {
+        cur: capped_cur,
+        max: current.max,
+    }) {
+        Some(current)
+    } else {
+        tracing::warn!("could not cap RLIMIT_NOFILE before VTE spawn");
+        None
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn cap_vte_spawn_nofile_limit() -> Option<NoFileLimit> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn restore_vte_spawn_nofile_limit(saved: Option<NoFileLimit>) {
+    if let Some(limit) = saved {
+        if !set_nofile_limit(limit) {
+            tracing::warn!("could not restore RLIMIT_NOFILE after VTE spawn");
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn restore_vte_spawn_nofile_limit(_saved: Option<NoFileLimit>) {}
+
+fn restore_nofile_limit_in_child(saved: Option<NoFileLimit>) {
+    if let Some(limit) = saved {
+        let _ = set_nofile_limit(limit);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn read_nofile_limit() -> Option<NoFileLimit> {
+    let mut limit = std::mem::MaybeUninit::<libc::rlimit>::uninit();
+    let rc = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, limit.as_mut_ptr()) };
+    if rc != 0 {
+        tracing::warn!("could not read RLIMIT_NOFILE before VTE spawn");
+        return None;
+    }
+    let limit = unsafe { limit.assume_init() };
+    Some(NoFileLimit {
+        cur: limit.rlim_cur,
+        max: limit.rlim_max,
+    })
+}
+
+fn set_nofile_limit(limit: NoFileLimit) -> bool {
+    let raw = libc::rlimit {
+        rlim_cur: limit.cur,
+        rlim_max: limit.max,
+    };
+    unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw) == 0 }
+}
+
 /// Prepend `flowmuxctl pty-tee --pane <id> --surface <id> --` in front
 /// of the user's shell argv so OSC 9 / 99 / 777 escapes emitted by
 /// terminal-side agents (Claude Code, Codex, OpenCode, …) reach the
@@ -668,11 +749,7 @@ impl TerminalPane {
 /// Falls back to the original argv when `flowmuxctl` cannot be
 /// located. The terminal then works exactly as before, just without
 /// OSC-driven alarms — strictly a graceful degradation.
-fn wrap_argv_with_pty_tee(
-    argv: Vec<String>,
-    pane: PaneId,
-    surface: SurfaceId,
-) -> Vec<String> {
+fn wrap_argv_with_pty_tee(argv: Vec<String>, pane: PaneId, surface: SurfaceId) -> Vec<String> {
     let Some(ctl) = flowmux_terminal::find_flowmuxctl() else {
         tracing::warn!(
             "flowmuxctl not found next to the GUI binary; OSC 9/99/777 alarms \
@@ -893,9 +970,7 @@ fn is_plain_ctrl_c(keyval: gtk::gdk::Key, state: gtk::gdk::ModifierType) -> bool
             | ModifierType::SUPER_MASK
             | ModifierType::META_MASK);
     relevant == ModifierType::CONTROL_MASK
-        && keyval
-            .to_unicode()
-            .is_some_and(|ch| ch == 'c' || ch == 'C')
+        && keyval.to_unicode().is_some_and(|ch| ch == 'c' || ch == 'C')
 }
 
 /// Recover Shift+symbol keys that the ibus sync-mode path swallows while
@@ -922,8 +997,8 @@ fn install_ibus_shifted_symbol_passthrough(container: &gtk::Overlay, term: &vte:
     key.set_propagation_phase(gtk::PropagationPhase::Capture);
     let term_widget = term.clone();
     key.connect_key_pressed(move |_, keyval, _keycode, state| {
-        let relevant =
-            state & (ModifierType::CONTROL_MASK | ModifierType::ALT_MASK | ModifierType::SHIFT_MASK);
+        let relevant = state
+            & (ModifierType::CONTROL_MASK | ModifierType::ALT_MASK | ModifierType::SHIFT_MASK);
         if relevant != ModifierType::SHIFT_MASK {
             return glib::Propagation::Proceed;
         }
@@ -978,6 +1053,17 @@ fn ibus_im_module_active() -> bool {
     std::env::var("GTK_IM_MODULE")
         .map(|m| m.trim() == "ibus")
         .unwrap_or(false)
+}
+
+fn insert_newline_needs_preedit_commit_ordering() -> bool {
+    insert_newline_needs_preedit_commit_ordering_for(
+        ibus_im_module_active(),
+        cfg!(target_os = "macos"),
+    )
+}
+
+fn insert_newline_needs_preedit_commit_ordering_for(ibus_active: bool, macos: bool) -> bool {
+    ibus_active || macos
 }
 
 /// Submit Enter as a carriage return, but only *after* any IME syllable
@@ -1503,11 +1589,16 @@ fn install_ibus_nav_workaround(term: &vte::Terminal, smart_page_enabled: bool) {
 /// argv used when the caller asks for the default shell (no explicit
 /// command).
 ///
-/// **Outside a sandbox** — run `$SHELL -l`. The `-l` flag makes any
-/// POSIX-ish shell source the per-shell profile (.bash_profile /
-/// .profile / .zprofile / fish login conf), which in turn pulls
-/// .bashrc / .zshrc so the user's PS1 + helpers are defined before
-/// the first prompt. Same convention xterm / alacritty / kitty use.
+/// **Outside a sandbox on Linux** — run `$SHELL -l`. The `-l` flag makes
+/// any POSIX-ish shell source the per-shell profile (.bash_profile /
+/// .profile / .zprofile / fish login conf), which in turn pulls .bashrc /
+/// .zshrc so the user's PS1 + helpers are defined before the first prompt.
+/// Same convention xterm / alacritty / kitty use.
+///
+/// **On macOS** — use the user's shell in fast-start mode where the shell
+/// supports it. The GUI process already supplies PATH and flowmux's pane env,
+/// while skipping zsh/bash startup files avoids command-lookup stalls seen
+/// under the GUI app + pty-tee launch path before the first prompt appears.
 ///
 /// **Inside Flatpak** — wrap the host shell in an inline Python
 /// bridge. `flatpak-spawn --host` forwards stdin/stdout FDs to a host
@@ -1560,7 +1651,22 @@ fn default_shell_argv() -> Vec<String> {
         ]
     } else {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
-        vec![shell, "-l".into()]
+        if cfg!(target_os = "macos") {
+            macos_fast_shell_argv(shell)
+        } else {
+            vec![shell, "-l".into()]
+        }
+    }
+}
+
+fn macos_fast_shell_argv(shell: String) -> Vec<String> {
+    match std::path::Path::new(&shell)
+        .file_name()
+        .and_then(|name| name.to_str())
+    {
+        Some("zsh") => vec![shell, "-f".into()],
+        Some("bash") => vec![shell, "--noprofile".into(), "--norc".into()],
+        _ => vec![shell],
     }
 }
 
@@ -1806,6 +1912,35 @@ mod tests {
     }
 
     #[test]
+    fn insert_newline_preedit_ordering_covers_ibus_and_macos() {
+        assert!(insert_newline_needs_preedit_commit_ordering_for(
+            true, false
+        ));
+        assert!(insert_newline_needs_preedit_commit_ordering_for(
+            false, true
+        ));
+        assert!(!insert_newline_needs_preedit_commit_ordering_for(
+            false, false
+        ));
+    }
+
+    #[test]
+    fn macos_fast_shell_argv_skips_known_startup_files() {
+        assert_eq!(
+            macos_fast_shell_argv("/bin/zsh".into()),
+            vec!["/bin/zsh", "-f"]
+        );
+        assert_eq!(
+            macos_fast_shell_argv("/bin/bash".into()),
+            vec!["/bin/bash", "--noprofile", "--norc"]
+        );
+        assert_eq!(
+            macos_fast_shell_argv("/opt/homebrew/bin/fish".into()),
+            vec!["/opt/homebrew/bin/fish"]
+        );
+    }
+
+    #[test]
     fn vte_capture_key_controllers_are_legacy_opt_in() {
         assert!(!terminal_capture_key_controllers_enabled(false));
         assert!(terminal_capture_key_controllers_enabled(true));
@@ -1933,9 +2068,7 @@ mod tests {
         assert!(should_install_ibus_nav_workaround(
             false, false, true, false
         ));
-        assert!(should_install_ibus_nav_workaround(
-            false, true, true, false
-        ));
+        assert!(should_install_ibus_nav_workaround(false, true, true, false));
         // On by default under WSL/WSLg.
         assert!(should_install_ibus_nav_workaround(
             false, false, false, true
@@ -1949,8 +2082,6 @@ mod tests {
             false, false, false, false
         ));
         // The disable env wins everywhere (bisection kill switch).
-        assert!(!should_install_ibus_nav_workaround(
-            true, true, true, true
-        ));
+        assert!(!should_install_ibus_nav_workaround(true, true, true, true));
     }
 }

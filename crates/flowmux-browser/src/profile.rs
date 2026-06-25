@@ -171,10 +171,13 @@ mod tests {
 
     #[test]
     fn data_dir_under_flowmux_browser_subtree() {
-        // Use a temp HOME so we don't pollute the real XDG dir.
+        // Use a temp data root so we don't pollute the real profile dir. Linux
+        // follows XDG_DATA_HOME, while macOS derives data_dir from HOME.
         let tmp = tempfile::tempdir().unwrap();
         let original = std::env::var_os("XDG_DATA_HOME");
+        let original_home = std::env::var_os("HOME");
         std::env::set_var("XDG_DATA_HOME", tmp.path());
+        std::env::set_var("HOME", tmp.path());
 
         let dir = BrowserProfile::Default.data_dir().unwrap();
         assert!(dir.starts_with(tmp.path()));
@@ -184,6 +187,10 @@ mod tests {
         match original {
             Some(v) => std::env::set_var("XDG_DATA_HOME", v),
             None => std::env::remove_var("XDG_DATA_HOME"),
+        }
+        match original_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
         }
     }
 

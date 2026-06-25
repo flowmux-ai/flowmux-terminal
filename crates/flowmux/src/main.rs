@@ -6,6 +6,7 @@
 //! through an [`async_channel`] bridge.
 
 mod bridge;
+mod builtin_icons;
 mod ipc_handler;
 mod keybindings;
 mod notifications;
@@ -18,9 +19,11 @@ use bridge::Bridge;
 use flowmux_config::paths;
 use flowmux_daemon::{DaemonHandler, StateStore};
 use ipc_handler::GuiHandler;
+use std::cell::RefCell;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Command;
+use std::rc::Rc;
 use std::sync::Arc;
 use tracing::info;
 use ui::{spawn_dispatch_loop, WindowController};
@@ -153,9 +156,7 @@ fn main() -> anyhow::Result<()> {
         // portal path rejects the sync-mode PostProcessKeyEvent call on
         // Ubuntu 24.04, though, so leave it async there and rely on the
         // terminal-pane ordering/bypass workarounds below.
-        if std::env::var_os("IBUS_ENABLE_SYNC_MODE").is_none()
-            && !platform::running_under_wsl()
-        {
+        if std::env::var_os("IBUS_ENABLE_SYNC_MODE").is_none() && !platform::running_under_wsl() {
             std::env::set_var("IBUS_ENABLE_SYNC_MODE", "1");
         }
     }
@@ -187,6 +188,7 @@ fn main() -> anyhow::Result<()> {
             );
         }
     }
+    cleanup_stale_runtime_sockets(&socket);
     // Refresh the "current" socket pointer so a host-side process
     // (e.g. OpenCode plugin spawned with `flatpak run --command=
     // flowmuxctl …`) can find this daemon without knowing the PID.
@@ -293,7 +295,20 @@ fn main() -> anyhow::Result<()> {
     // path silently never runs.
     let tokio_handle_for_activate = rt.handle().clone();
     let shared_notifier_for_activate = shared_notifier;
+    let active_window_for_activate: Rc<
+        RefCell<Option<gtk::glib::WeakRef<adw::ApplicationWindow>>>,
+    > = Rc::new(RefCell::new(None));
     app.connect_activate(move |app| {
+        if let Some(window) = active_window_for_activate
+            .borrow()
+            .as_ref()
+            .and_then(|window| window.upgrade())
+        {
+            window.present();
+            return;
+        }
+
+        builtin_icons::install();
         gtk::Window::set_default_icon_name(APP_ID);
 
         // Resolve the visual theme once per activation so a config edit
@@ -352,6 +367,7 @@ fn main() -> anyhow::Result<()> {
             controller_for_init.restore_from_store().await;
             controller_for_init.show_status_when_empty();
         });
+        *active_window_for_activate.borrow_mut() = Some(controller.window.downgrade());
         controller.window.present();
     });
 
@@ -425,6 +441,59 @@ fn refresh_runtime_socket_pointer(target: &std::path::Path) {
     }
 }
 
+fn cleanup_stale_runtime_sockets(current: &std::path::Path) {
+    let Some(dir) = current.parent() else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path == current {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(pid) = pid_from_runtime_socket_name(name) else {
+            continue;
+        };
+        if process_exists(pid) {
+            continue;
+        }
+        if let Err(e) = std::fs::remove_file(&path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(error = %e, path = %path.display(), "could not remove stale runtime socket");
+            }
+        } else {
+            tracing::debug!(path = %path.display(), pid, "removed stale runtime socket");
+        }
+    }
+}
+
+fn pid_from_runtime_socket_name(name: &str) -> Option<u32> {
+    let stem = name.strip_suffix(".sock")?;
+    let pid = stem
+        .strip_prefix("flowmux-")
+        .or_else(|| stem.rsplit_once("-flowmux-").map(|(_, pid)| pid))?;
+    pid.parse().ok()
+}
+
+#[cfg(unix)]
+fn process_exists(pid: u32) -> bool {
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if rc == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+#[cfg(not(unix))]
+fn process_exists(_pid: u32) -> bool {
+    true
+}
+
 fn delegate_to_cli_if_needed() -> anyhow::Result<bool> {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     if args.is_empty() {
@@ -482,9 +551,7 @@ fn ibus_daemon_available() -> bool {
         "/usr/local/bin/ibus-daemon",
         "/bin/ibus-daemon",
     ];
-    CANDIDATES
-        .iter()
-        .any(|p| std::path::Path::new(p).exists())
+    CANDIDATES.iter().any(|p| std::path::Path::new(p).exists())
 }
 
 fn should_force_ibus_im_module(current: Option<&str>, ibus_reachable: bool) -> bool {
@@ -505,6 +572,7 @@ fn gtk_im_module_is_ibus(current: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(target_os = "macos"))]
     use gtk::gio::ApplicationFlags;
 
     /// Regression guard for cross-window workspace navigation: the bug was
@@ -514,6 +582,7 @@ mod tests {
     /// window B's workspace. The fix is `NON_UNIQUE` on the application
     /// builder; if a future refactor drops it, this test fails before
     /// the user does.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn application_uses_non_unique_so_each_window_runs_in_its_own_process() {
         // libadwaita refuses to initialize without a display server.
@@ -554,5 +623,21 @@ mod tests {
         assert!(gtk_im_module_is_ibus(Some(" ibus ")));
         assert!(!gtk_im_module_is_ibus(None));
         assert!(!gtk_im_module_is_ibus(Some("wayland")));
+    }
+
+    #[test]
+    fn runtime_socket_pid_parser_accepts_linux_and_temp_fallback_names() {
+        assert_eq!(
+            pid_from_runtime_socket_name("flowmux-1234.sock"),
+            Some(1234)
+        );
+        assert_eq!(
+            pid_from_runtime_socket_name("junsu-flowmux-5678.sock"),
+            Some(5678)
+        );
+        assert_eq!(pid_from_runtime_socket_name("notflowmux-1234.sock"), None);
+        assert_eq!(pid_from_runtime_socket_name("flowmux.sock"), None);
+        assert_eq!(pid_from_runtime_socket_name("flowmux-current.sock"), None);
+        assert_eq!(pid_from_runtime_socket_name("flowmux-abc.sock"), None);
     }
 }

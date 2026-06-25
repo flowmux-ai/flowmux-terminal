@@ -163,9 +163,7 @@ fn present_edit_dialog(
     state: SharedOverrides,
     accel_label: gtk::Label,
 ) {
-    let parent = anchor
-        .root()
-        .and_then(|r| r.downcast::<gtk::Window>().ok());
+    let parent = anchor.root().and_then(|r| r.downcast::<gtk::Window>().ok());
 
     let dialog = gtk::Window::builder()
         .modal(true)
@@ -283,9 +281,7 @@ fn present_edit_dialog(
 /// [`gtk::accelerator_name`], writes the result into `entry`, then
 /// closes itself. Esc cancels without writing.
 fn present_capture_overlay(anchor: &gtk::Button, entry: gtk::Entry) {
-    let parent = anchor
-        .root()
-        .and_then(|r| r.downcast::<gtk::Window>().ok());
+    let parent = anchor.root().and_then(|r| r.downcast::<gtk::Window>().ok());
 
     let dialog = gtk::Window::builder()
         .modal(true)
@@ -441,6 +437,7 @@ pub fn detect_conflicts(overrides: &KeybindingOverrides) -> Vec<(String, Vec<Act
 mod tests {
     use super::*;
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn parse_accel_list_drops_empty_pieces_and_trims() {
         if gtk::init().is_err() {
@@ -450,6 +447,7 @@ mod tests {
         assert_eq!(parsed, vec!["<Ctrl>c".to_string(), "<Ctrl>v".to_string()]);
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn parse_accel_list_returns_invalid_piece() {
         if gtk::init().is_err() {

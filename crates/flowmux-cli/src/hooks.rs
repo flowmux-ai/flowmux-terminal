@@ -20,7 +20,6 @@ use flowmux_ipc::{
 };
 use serde::{de::DeserializeOwned, Deserialize};
 use std::io::{IsTerminal, Read};
-use anyhow::Context;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
@@ -33,6 +32,7 @@ const HOOK_NOTIFY_TIMEOUT: Duration = Duration::from_millis(750);
 /// the fields we surface (event name, optional message, optional
 /// last assistant text). Unknown fields are ignored so a new agent
 /// release doesn't break us.
+#[allow(dead_code)]
 #[derive(Debug, Default, Deserialize)]
 pub struct ClaudeHookInput {
     #[serde(default)]
@@ -213,7 +213,9 @@ async fn send_best_effort_with_timeout(client: &Client, req: Request, timeout: D
             title,
             level,
             ..
-        } => format!("Notify(title={title:?}, pane={pane:?}, surface={surface:?}, level={level:?})"),
+        } => {
+            format!("Notify(title={title:?}, pane={pane:?}, surface={surface:?}, level={level:?})")
+        }
         other => format!("{other:?}"),
     };
     flowmux_config::notify_debug!("cli/hook", "sending {summary}");
@@ -295,10 +297,7 @@ async fn connect_daemon_with_timeout(socket: Option<PathBuf>, timeout: Duration)
 
 async fn try_connect(socket: &PathBuf, timeout: Duration) -> Option<Client> {
     let exists = socket.exists();
-    flowmux_config::notify_debug!(
-        "cli/hook",
-        "try_connect path={socket:?} exists={exists}"
-    );
+    flowmux_config::notify_debug!("cli/hook", "try_connect path={socket:?} exists={exists}");
     match tokio::time::timeout(timeout, Client::connect(socket)).await {
         Ok(Ok(c)) => {
             flowmux_config::notify_debug!("cli/hook", "connected to {socket:?}");

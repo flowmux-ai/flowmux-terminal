@@ -10,8 +10,8 @@ Secret Service implementations, retain their own distribution licenses.
 
 ## License Overview
 
-- Apache License 2.0 (333)
-- MIT License (88)
+- Apache License 2.0 (340)
+- MIT License (92)
 - Unicode License v3 (19)
 - BSD 3-Clause "New" or "Revised" License (5)
 - Mozilla Public License 2.0 (2)
@@ -1621,9 +1621,12 @@ Used by:
 - once_cell_polyfill 1.70.2
 - serde_spanned 1.1.1
 - toml 1.1.2+spec-1.1.0
+- toml_datetime 0.6.11
 - toml_datetime 1.1.1+spec-1.1.0
+- toml_edit 0.22.27
 - toml_edit 0.25.11+spec-1.1.0
 - toml_parser 1.1.2+spec-1.1.0
+- toml_write 0.1.2
 
 ```text
                                  Apache License
@@ -2033,7 +2036,7 @@ Used by:
 ### Apache License 2.0
 
 Used by:
-- russh-sftp 2.1.2
+- russh-sftp 2.2.2
 
 ```text
                                  Apache License
@@ -4159,7 +4162,7 @@ Used by:
 - blocking 1.6.2
 - bstr 1.12.1
 - bumpalo 3.20.2
-- cc 1.2.61
+- cc 1.2.62
 - cfg-if 1.0.4
 - concurrent-queue 2.5.0
 - core-foundation-sys 0.8.7
@@ -4172,16 +4175,17 @@ Used by:
 - event-listener-strategy 0.5.4
 - event-listener 5.4.1
 - fastrand 2.4.1
-- filetime 0.2.27
+- filetime 0.2.29
 - find-msvc-tools 0.1.9
 - flate2 1.1.9
 - fnv 1.0.7
 - form_urlencoded 1.2.2
+- fs2 0.4.3
 - futures-lite 2.6.1
 - group 0.13.0
 - hashbrown 0.14.5
 - hashbrown 0.16.1
-- hashbrown 0.17.0
+- hashbrown 0.17.1
 - heck 0.5.0
 - hermit-abi 0.5.2
 - idna 1.1.0
@@ -4207,7 +4211,6 @@ Used by:
 - percent-encoding 2.3.2
 - piper 0.2.5
 - pkg-config 0.3.33
-- plain 0.2.3
 - polling 3.11.0
 - regex-automata 0.4.14
 - regex-syntax 0.8.10
@@ -6958,10 +6961,14 @@ Used by:
 - gix-path 0.10.22
 - gix-trace 0.1.19
 - gix-validate 0.10.1
+- gloo-timers 0.4.0
 - itoa 1.0.18
 - libc 0.2.186
 - md5 0.7.0
 - miniz_oxide 0.8.9
+- objc2-app-kit 0.3.2
+- objc2-core-foundation 0.3.2
+- objc2-web-kit 0.3.2
 - pageant 0.0.1
 - pin-project-lite 0.2.17
 - portable-atomic-util 0.2.7
@@ -6980,7 +6987,7 @@ Used by:
 - serde_bytes 0.11.19
 - serde_core 1.0.228
 - serde_derive 1.0.228
-- serde_json 1.0.149
+- serde_json 1.0.150
 - serde_repr 0.1.20
 - shlex 1.3.0
 - syn 2.0.117
@@ -7569,7 +7576,6 @@ SOFTWARE.
 
 Used by:
 - redox_syscall 0.5.18
-- redox_syscall 0.7.5
 
 ```text
 Copyright (c) 2017 Redox OS Developers
@@ -7791,7 +7797,7 @@ DEALINGS IN THE SOFTWARE.
 ### MIT License
 
 Used by:
-- maybe-async 0.2.10
+- maybe-async 0.2.11
 
 ```text
 Copyright (c) 2020 Guoli Lyu
@@ -7930,7 +7936,7 @@ SOFTWARE.
 ### MIT License
 
 Used by:
-- dashmap 6.1.0
+- dashmap 6.2.1
 
 ```text
 MIT License
@@ -8039,9 +8045,13 @@ SOFTWARE.
 ### MIT License
 
 Used by:
+- block2 0.6.2
 - javascriptcore6-sys 0.4.0
 - javascriptcore6 0.4.0
 - libm 0.2.16
+- objc2-encode 4.1.0
+- objc2-foundation 0.3.2
+- objc2 0.6.4
 - webkit6-sys 0.4.0
 - webkit6 0.4.0
 
@@ -8072,7 +8082,7 @@ USE OR OTHER DEALINGS IN THE SOFTWARE.
 Used by:
 - tokio-stream 0.1.18
 - tokio-util 0.7.18
-- tokio 1.52.2
+- tokio 1.52.3
 
 ```text
 MIT License
@@ -8169,7 +8179,8 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 - winnow 0.6.26
-- winnow 1.0.2
+- winnow 0.7.15
+- winnow 1.0.3
 
 ```text
 Permission is hereby granted, free of charge, to any person obtaining
@@ -8196,6 +8207,8 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ### MIT License
 
 Used by:
+- vte4-sys 0.8.0
+- vte4 0.8.0
 
 ```text
 Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -9441,7 +9454,7 @@ Used by:
 - yoke-derive 0.8.2
 - yoke 0.8.2
 - zerofrom-derive 0.1.7
-- zerofrom 0.1.7
+- zerofrom 0.1.8
 - zerotrie 0.2.4
 - zerovec-derive 0.11.3
 - zerovec 0.11.6

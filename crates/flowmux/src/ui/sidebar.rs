@@ -379,6 +379,7 @@ impl Sidebar {
     /// to [`Self::upsert_with_subtitles`]. The side-panel row widget tree is a
     /// GTK object and awkward to read directly, so the cache is the source of truth.
     #[cfg(test)]
+    #[cfg_attr(all(test, target_os = "macos"), allow(dead_code))]
     pub(crate) fn cached_subtitles(&self, id: WorkspaceId) -> Option<Vec<String>> {
         self.subtitle_cache.borrow().get(&id).cloned()
     }
@@ -1051,6 +1052,8 @@ fn build_meta_column(ws: &Workspace, subtitles: &[String]) -> gtk::Box {
 
 #[cfg(test)]
 mod tests {
+    #![cfg_attr(target_os = "macos", allow(dead_code, unused_imports))]
+
     use super::*;
     use flowmux_core::{Pane, PaneContent, PaneId, PaneSurface, Surface, SurfaceId, SurfaceKind};
     use std::path::PathBuf;
@@ -1086,6 +1089,7 @@ mod tests {
 
     /// Smoke test that row_widget can build a stable widget tree with a name
     /// and subtitle lines. Requires GTK init, so headless environments skip it.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn row_widget_builds_with_one_to_three_subtitle_lines() {
         if gtk::init().is_err() {

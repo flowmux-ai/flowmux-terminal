@@ -70,13 +70,18 @@ async fn spawn_server(handler: Arc<CountingPing>) -> (PathBuf, tokio::task::Join
         // run loops forever; the test drops the handle once it's done.
         let _ = run(&socket, handler).await;
     });
-    // Wait for the socket to materialize before returning.
+    // Wait until the socket is actually accepting connections. On macOS
+    // the path can exist briefly before connect() stops returning
+    // ECONNREFUSED, which made this stress test race the server bind.
     let start = Instant::now();
-    while !socket_path.exists() {
+    loop {
+        if socket_path.exists() && UnixStream::connect(&socket_path).await.is_ok() {
+            break;
+        }
         if start.elapsed() > Duration::from_secs(5) {
             panic!("server never bound socket");
         }
-        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
     }
     (socket_path, task)
 }

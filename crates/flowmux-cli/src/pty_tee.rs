@@ -49,8 +49,8 @@ use std::cell::RefCell;
 use std::ffi::{CString, OsString};
 use std::io::Write;
 use std::os::fd::{AsRawFd, IntoRawFd, OwnedFd, RawFd};
-use std::os::unix::ffi::OsStringExt;
-use std::path::PathBuf;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc;
@@ -124,8 +124,7 @@ fn run_pty_pump(
     notify_tx: mpsc::Sender<NotifyEvent>,
 ) -> anyhow::Result<i32> {
     // 1. Allocate the inner PTY pair the shell will live on.
-    let OpenptyResult { master, slave } =
-        openpty(None, None).context("openpty for inner shell")?;
+    let OpenptyResult { master, slave } = openpty(None, None).context("openpty for inner shell")?;
 
     // 2. Mirror the outer terminal size onto the inner PTY *before*
     //    fork so the shell starts with the right $LINES/$COLUMNS and
@@ -197,6 +196,8 @@ fn run_pty_pump(
         pending_for_cb.borrow_mut().push(payload.to_string());
     });
     let mut input_modes = TerminalInputModes::default();
+    let mut cwd_tracker = CwdOscTracker::default();
+    cwd_tracker.emit_if_changed(child_pid);
 
     // 7. Pump loop.
     let mut buf = [0u8; 8192];
@@ -234,11 +235,7 @@ fn run_pty_pump(
             let mut sink = [0u8; 64];
             loop {
                 let n = unsafe {
-                    libc::read(
-                        sig_r.as_raw_fd(),
-                        sink.as_mut_ptr() as *mut _,
-                        sink.len(),
-                    )
+                    libc::read(sig_r.as_raw_fd(), sink.as_mut_ptr() as *mut _, sink.len())
                 };
                 if n <= 0 {
                     break;
@@ -249,6 +246,7 @@ fn run_pty_pump(
             if let Some(ws) = winsize_from_fd(libc::STDIN_FILENO) {
                 let _ = set_winsize(master_fd, &ws);
             }
+            cwd_tracker.emit_if_changed(child_pid);
             // Reap the child non-blockingly. If it's gone we drain the
             // remaining inner-master bytes below and break.
             if let Some(code) = try_reap(child_pid) {
@@ -303,6 +301,7 @@ fn run_pty_pump(
                         break;
                     }
                     flush_pending(&pending, &notify_tx);
+                    cwd_tracker.emit_if_changed(child_pid);
                 }
                 ReadOutcome::WouldBlock => {}
                 ReadOutcome::Eof | ReadOutcome::Err(_) => {
@@ -347,7 +346,7 @@ fn child_exec(slave: OwnedFd, argv: Vec<OsString>) -> ! {
     }
 
     let slave_fd = slave.into_raw_fd();
-    if unsafe { libc::ioctl(slave_fd, libc::TIOCSCTTY, 0) } < 0 {
+    if unsafe { libc::ioctl(slave_fd, libc::TIOCSCTTY as libc::c_ulong, 0) } < 0 {
         let err = std::io::Error::last_os_error();
         let msg = format!("flowmuxctl pty-tee: TIOCSCTTY failed: {err}\n");
         let _ = std::io::stderr().write_all(msg.as_bytes());
@@ -535,6 +534,93 @@ fn write_all(fd: RawFd, mut data: &[u8]) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+#[derive(Default)]
+struct CwdOscTracker {
+    last: Option<PathBuf>,
+}
+
+impl CwdOscTracker {
+    fn emit_if_changed(&mut self, pid: Pid) {
+        let Some(cwd) = child_cwd(pid) else {
+            return;
+        };
+        if self.last.as_ref() == Some(&cwd) {
+            return;
+        }
+
+        let seq = osc7_for_path(&cwd);
+        if write_all(libc::STDOUT_FILENO, &seq).is_ok() {
+            self.last = Some(cwd);
+        }
+    }
+}
+
+fn osc7_for_path(path: &Path) -> Vec<u8> {
+    let mut seq = b"\x1b]7;file://".to_vec();
+    for &byte in path.as_os_str().as_bytes() {
+        if is_file_uri_path_byte(byte) {
+            seq.push(byte);
+        } else {
+            const HEX: &[u8; 16] = b"0123456789ABCDEF";
+            seq.push(b'%');
+            seq.push(HEX[(byte >> 4) as usize]);
+            seq.push(HEX[(byte & 0x0f) as usize]);
+        }
+    }
+    seq.push(b'\x07');
+    seq
+}
+
+fn is_file_uri_path_byte(byte: u8) -> bool {
+    matches!(
+        byte,
+        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'.' | b'_' | b'~'
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn child_cwd(pid: Pid) -> Option<PathBuf> {
+    std::fs::read_link(format!("/proc/{}/cwd", pid.as_raw())).ok()
+}
+
+#[cfg(target_os = "macos")]
+fn child_cwd(pid: Pid) -> Option<PathBuf> {
+    let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
+    let rc = unsafe {
+        libc::proc_pidinfo(
+            pid.as_raw(),
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            &mut info as *mut _ as *mut libc::c_void,
+            std::mem::size_of::<libc::proc_vnodepathinfo>() as libc::c_int,
+        )
+    };
+    if rc <= 0 {
+        return None;
+    }
+
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            info.pvi_cdir.vip_path.as_ptr() as *const u8,
+            std::mem::size_of_val(&info.pvi_cdir.vip_path),
+        )
+    };
+    let len = bytes
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(bytes.len());
+    if len == 0 {
+        return None;
+    }
+
+    Some(PathBuf::from(OsString::from_vec(bytes[..len].to_vec())))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn child_cwd(_pid: Pid) -> Option<PathBuf> {
+    None
 }
 
 fn set_nonblocking(fd: RawFd) -> anyhow::Result<()> {

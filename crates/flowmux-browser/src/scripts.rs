@@ -727,7 +727,7 @@ mod tests {
     }
 
     #[test]
-    fn count_returns_querySelectorAll_length_as_string() {
+    fn count_returns_query_selector_all_length_as_string() {
         let s = count_selector("a");
         assert!(s.contains("querySelectorAll"));
         assert!(s.contains("String("));

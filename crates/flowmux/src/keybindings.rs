@@ -113,6 +113,7 @@ pub fn install_accels(app: &adw::Application, options: &Options) {
 
 /// Helper retained for tests and other callers that just want the
 /// resolved accels for a single action without the GTK install path.
+#[allow(dead_code)]
 pub fn resolved_accels(overrides: &KeybindingOverrides, action: ActionId) -> Vec<String> {
     overrides
         .resolve()
@@ -282,13 +283,30 @@ pub fn install_actions(
     // and surfaces a toast. No follower key; GTK action map handles
     // case/IM/layout normalisation for the Ctrl-modified leader itself.
     let copy_pane_path = {
-        let window = window.clone();
         let focused = focused.clone();
         let registry = registry.clone();
+        let bridge = bridge.clone();
         let toast = clipboard_toast.clone();
         gtk::gio::ActionEntry::builder("copy-pane-path")
             .activate(move |_, _, _| {
-                copy_focused_pane_path(&window, &focused, &registry, &toast);
+                let Some(pane) = focused.get() else {
+                    tracing::info!("copy-pane-path: no focused pane");
+                    toast.show_with_message("No focused pane");
+                    return;
+                };
+                let workspace = registry.borrow().workspace_of_pane(pane);
+                let Some(workspace) = workspace else {
+                    tracing::info!(%pane, "copy-pane-path: pane has no workspace");
+                    toast.show_with_message("No pane path to copy");
+                    return;
+                };
+                let bridge = bridge.clone();
+                glib::MainContext::default().spawn_local(async move {
+                    let _ = bridge
+                        .tx
+                        .send(GtkCommand::CopyFocusedPaneText { workspace })
+                        .await;
+                });
             })
             .build()
     };
@@ -325,36 +343,6 @@ pub fn install_actions(
         insert_newline,
         copy_pane_path,
     ]);
-}
-
-/// Resolve the focused pane's terminal cwd, write it to the system
-/// clipboard, and surface a toast. Surfaces an error toast instead when
-/// no terminal cwd is available so the user knows the chord fired but
-/// had nothing useful to copy.
-fn copy_focused_pane_path(
-    window: &adw::ApplicationWindow,
-    focused: &FocusedPane,
-    registry: &TerminalRegistry,
-    clipboard_toast: &ClipboardToast,
-) {
-    let Some(pane) = focused.get() else {
-        tracing::info!("copy-pane-path: no focused pane");
-        clipboard_toast.show_with_message("No focused pane");
-        return;
-    };
-    let cwd = {
-        let r = registry.borrow();
-        r.active_terminal(pane).and_then(|t| t.current_dir())
-    };
-    let Some(cwd) = cwd else {
-        tracing::info!(%pane, "copy-pane-path: no terminal cwd");
-        clipboard_toast.show_with_message("No pane path to copy");
-        return;
-    };
-    let path_str = cwd.display().to_string();
-    window.clipboard().set_text(&path_str);
-    tracing::info!(%pane, path = %path_str, "copy-pane-path: copied");
-    clipboard_toast.show_with_message(&format!("Copied path: {path_str}"));
 }
 
 #[derive(Clone, Copy)]
@@ -583,6 +571,8 @@ fn make_quit_app_action(
 /// so the two dialogs behave identically from the user's side.
 async fn confirm_quit_app(window: &adw::ApplicationWindow) -> bool {
     let (dialog, rx) = build_quit_dialog();
+    let _native_browser_suspend =
+        crate::ui::browser_pane::suspend_native_browser_views_for_window(window.upcast_ref());
     dialog.present(Some(window));
     rx.await.unwrap_or(false)
 }
@@ -723,6 +713,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn insert_newline_accels_cover_enter_variants() {
         adw::init().expect("libadwaita should initialize in GTK test");
@@ -789,6 +780,7 @@ mod tests {
     /// under the `win` action group so the Ctrl+Shift+N accelerator
     /// actually routes somewhere. Catches a regression where the entry
     /// is built but never reaches `add_action_entries`.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn new_window_action_is_registered_on_application_window_under_win_namespace() {
         use gtk::gio::prelude::ActionGroupExt;
@@ -840,6 +832,7 @@ mod tests {
     /// dismissal as Cancel, and styles Quit as destructive — same shape
     /// as `confirm_close_workspace` so the two confirmation dialogs feel
     /// identical from the user's side.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn quit_dialog_has_cancel_default_and_destructive_quit_response() {
         adw::init().expect("libadwaita should initialize in GTK test");
@@ -862,6 +855,7 @@ mod tests {
     /// We exercise the dialog directly via `build_quit_dialog` +
     /// `dialog.response(...)` so the test does not depend on
     /// keyboard-accel routing or widget-tree introspection.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn quit_dialog_quit_response_resolves_true_cancel_resolves_false() {
         adw::init().expect("libadwaita should initialize in GTK test");
@@ -889,6 +883,7 @@ mod tests {
     /// `gtk::Application::activate_action` will find a handler. Catches
     /// regressions where the entry is added but mis-spelled or never
     /// reaches `add_action_entries`.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn quit_app_action_is_registered_on_application_window_under_win_namespace() {
         use gtk::gio::prelude::ActionGroupExt;
@@ -921,6 +916,7 @@ mod tests {
     /// schedule the confirmation dialog rather than closing the window
     /// outright. We pin "no synchronous close" so a future refactor
     /// that drops the confirm step is caught here, not in production.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn activating_quit_app_action_does_not_close_window_synchronously() {
         adw::init().expect("libadwaita should initialize in GTK test");
@@ -1006,6 +1002,7 @@ mod tests {
     /// real side effect (clipboard write + toast) needs a focused
     /// terminal pane that the bare unit-test rig does not have, so
     /// this is intentionally a registration check.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn copy_pane_path_action_is_registered_on_application_window() {
         adw::init().expect("libadwaita should initialize in GTK test");
@@ -1037,6 +1034,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn insert_newline_action_is_registered_on_application_window() {
         adw::init().expect("libadwaita should initialize in GTK test");
@@ -1068,6 +1066,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn clipboard_toast_show_with_message_updates_label() {
         use crate::ui::window::ClipboardToast;

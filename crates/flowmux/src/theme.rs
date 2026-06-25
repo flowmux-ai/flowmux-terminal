@@ -39,13 +39,13 @@ pub struct ResolvedTheme {
     pub palette: Vec<gdk::RGBA>,
 }
 
-/// Ghostty's default ANSI 16-color palette, copied verbatim from
-/// ghostty's `src/terminal/color.zig` `Name.default()` (the Tomorrow
-/// scheme). flowmux inlines this so a fresh install matches Ghostty
-/// without reading any external config.
+/// Ghostty's default ANSI 16-color palette, based on the Tomorrow
+/// scheme. The two black slots are raised slightly for flowmux's
+/// `#282c34` default background so ANSI black text remains legible on a
+/// fresh install.
 const DEFAULT_PALETTE: [&str; 16] = [
-    "#1d1f21", "#cc6666", "#b5bd68", "#f0c674", "#81a2be", "#b294bb", "#8abeb7", "#c5c8c6",
-    "#666666", "#d54e53", "#b9ca4a", "#e7c547", "#7aa6da", "#c397d8", "#70c0b1", "#eaeaea",
+    "#5c6370", "#cc6666", "#b5bd68", "#f0c674", "#81a2be", "#b294bb", "#8abeb7", "#c5c8c6",
+    "#7f848e", "#d54e53", "#b9ca4a", "#e7c547", "#7aa6da", "#c397d8", "#70c0b1", "#eaeaea",
 ];
 
 impl ResolvedTheme {
@@ -224,11 +224,9 @@ impl ResolvedTheme {
 }}
 .flowmux-pane.focused {{
     border-color: {focus};
-    box-shadow: inset 0 0 0 1px {focus};
 }}
 .flowmux-pane.focused.flowmux-solo {{
     border-color: {border};
-    box-shadow: none;
 }}
 .flowmux-pane .flowmux-terminal {{
     padding: 7px;
@@ -254,7 +252,7 @@ impl ResolvedTheme {
     border-color: {border};
 }}
 .flowmux-pane-tabs.has-multi-tabs > .flowmux-pane-tab.active {{
-    box-shadow: inset 0 2px 0 {focus};
+    border-top: 2px solid {focus};
 }}
 .flowmux-pane-tab-main {{
     min-height: 22px;
@@ -320,16 +318,15 @@ paned > separator {{
    only highlights users see. libadwaita ships rules whose selectors
    include row.activatable plus :selected combined with :hover, :active,
    .has-open-popup, and a child-combinator variant with a 1px inset
-   box-shadow border. Plain row:selected loses on specificity, so each
-   variant is matched explicitly with .activatable below and the inset
-   border is cleared too. */
+   border. Plain row:selected loses on specificity, so each variant is
+   matched explicitly with .activatable below and the border is cleared too. */
 .navigation-sidebar row.activatable:selected,
 .navigation-sidebar row.activatable:selected:focus,
 .navigation-sidebar row.activatable:selected.has-open-popup,
 .navigation-sidebar > row.activatable:selected,
 .navigation-sidebar > row.activatable:selected.has-open-popup {{
     background-color: transparent;
-    box-shadow: none;
+    border-left: 0 solid transparent;
 }}
 /* Visible "active workspace" indicator. A left-edge accent
    stripe in the focus color lets the user see which workspace is
@@ -338,7 +335,7 @@ paned > separator {{
    losing the flowmux-attention override below
    (amber wins because it is layered last). The :hover/:focus/:active/
    .has-open-popup variants must mirror the suppression block above: those
-   selectors clear box-shadow at the same specificity, so without matching
+   selectors clear borders at the same specificity, so without matching
    variants here the stripe vanishes whenever the row is hovered. */
 .navigation-sidebar row.activatable:selected,
 .navigation-sidebar row.activatable:selected:hover,
@@ -349,7 +346,7 @@ paned > separator {{
 .navigation-sidebar > row.activatable:selected:hover,
 .navigation-sidebar > row.activatable:selected:active,
 .navigation-sidebar > row.activatable:selected.has-open-popup {{
-    box-shadow: inset 5px 0 0 {focus_full};
+    border-left: 5px solid {focus_full};
     /* Nudge the selected row's content 5px right (base left padding is
        10px) so the active workspace reads as indented. */
     padding-left: 15px;
@@ -376,7 +373,7 @@ paned > separator {{
 }}
 .navigation-sidebar row.flowmux-attention {{
     background-color: rgba(245, 158, 11, 0.18);
-    box-shadow: inset 3px 0 0 rgba(245, 158, 11, 0.85);
+    border-left: 3px solid rgba(245, 158, 11, 0.85);
 }}
 /* Agent Running: the workspace's left color bar "breathes" by cycling
    its opacity. The class lives on the row; the rule targets the bar. */
@@ -391,19 +388,19 @@ paned > separator {{
     opacity: 0.4;
 }}
 .navigation-sidebar row.flowmux-drop-above {{
-    box-shadow: inset 0 2px 0 rgba(96, 165, 250, 0.95);
+    border-top: 2px solid rgba(96, 165, 250, 0.95);
 }}
 .navigation-sidebar row.flowmux-drop-below {{
-    box-shadow: inset 0 -2px 0 rgba(96, 165, 250, 0.95);
+    border-bottom: 2px solid rgba(96, 165, 250, 0.95);
 }}
 .flowmux-pane-tab.flowmux-pane-tab-dragging {{
     opacity: 0.4;
 }}
 .flowmux-pane-tab.flowmux-pane-tab-drop-before {{
-    box-shadow: inset 2px 0 0 rgba(96, 165, 250, 0.95);
+    border-left: 2px solid rgba(96, 165, 250, 0.95);
 }}
 .flowmux-pane-tab.flowmux-pane-tab-drop-after {{
-    box-shadow: inset -2px 0 0 rgba(96, 165, 250, 0.95);
+    border-right: 2px solid rgba(96, 165, 250, 0.95);
 }}
 .flowmux-file-browser {{
     background-color: {sidebar};
@@ -411,7 +408,7 @@ paned > separator {{
     border-left: 1px solid {border};
 }}
 .flowmux-file-browser.focused {{
-    box-shadow: inset 2px 0 0 {focus};
+    border-left: 2px solid {focus};
 }}
 .flowmux-file-browser-header {{
     padding: 8px 8px 6px 10px;
@@ -443,7 +440,6 @@ paned > separator {{
     color: {fg};
     border: 1px solid {toast_border};
     border-radius: 8px;
-    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
     padding: 8px 14px;
 }}
 .flowmux-overlay-menu {{
@@ -451,7 +447,6 @@ paned > separator {{
     color: {fg};
     border: 1px solid {toast_border};
     border-radius: 8px;
-    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
     padding: 4px 0;
 }}
 "#,
@@ -528,12 +523,28 @@ mod tests {
 
     /// Helper that yields a deterministic CSS string. We intentionally
     /// construct the theme through `from_ghostty` with an empty config
-    /// so the assertions key on selectors / shorthand box-shadow values,
+    /// so the assertions key on selectors / border values,
     /// not on theme-derived colour bytes that depend on Ghostty's
     /// shipped fallback palette.
     fn sample_css() -> String {
         let cfg = flowmux_config::ghostty::GhosttyConfig::default();
         ResolvedTheme::from_ghostty(&cfg).css("#fff4b3", 0.5)
+    }
+
+    #[test]
+    fn builtin_ansi_black_stays_legible_on_default_background() {
+        let cfg = flowmux_config::ghostty::GhosttyConfig::default();
+        let theme = ResolvedTheme::from_ghostty(&cfg);
+        let bg_luma = relative_luminance(&theme.bg);
+
+        assert!(
+            relative_luminance(&theme.palette[0]) - bg_luma > 0.20,
+            "ANSI black must not disappear into the default terminal background"
+        );
+        assert!(
+            relative_luminance(&theme.palette[8]) - bg_luma > 0.30,
+            "ANSI bright black must remain visibly brighter than the default background"
+        );
     }
 
     /// A "selected" workspace row in the side panel must be visually
@@ -549,7 +560,7 @@ mod tests {
             .expect("selected-row rule must exist");
         let tail = &css[selected_block_start..];
         assert!(
-            tail.contains("box-shadow: inset 5px 0 0"),
+            tail.contains("border-left: 5px solid"),
             "selected workspace row is missing its left-edge accent stripe"
         );
         // The very last `:selected` rule wins because every block in
@@ -560,7 +571,7 @@ mod tests {
             .find("background-color: transparent")
             .expect("suppression rule must still be present");
         let accent_block = tail
-            .find("inset 5px 0 0")
+            .find("border-left: 5px solid")
             .expect("accent rule must be present");
         assert!(
             accent_block > suppression_block,
@@ -584,8 +595,8 @@ mod tests {
             .expect("solo override missing");
         let tail = &css[solo_rule_idx..];
         assert!(
-            tail.contains("box-shadow: none"),
-            "solo override must clear the box-shadow"
+            tail.contains("border-color:"),
+            "solo override must clear the border color"
         );
     }
 
@@ -600,8 +611,8 @@ mod tests {
             .expect("multi-tab active-stripe selector missing");
         let tail = &css[stripe_idx..];
         assert!(
-            tail.contains("box-shadow: inset 0 2px 0"),
-            "active-tab top stripe must use a 2px inset box-shadow"
+            tail.contains("border-top: 2px solid"),
+            "active-tab top stripe must use a 2px top border"
         );
     }
 }

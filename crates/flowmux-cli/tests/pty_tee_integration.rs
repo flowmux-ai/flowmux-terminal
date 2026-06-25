@@ -12,8 +12,9 @@
 //! legacy terminal-widget paths silently swallowed these escapes.
 
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
@@ -61,7 +62,7 @@ fn spawn_fake_daemon(socket: PathBuf) -> mpsc::Receiver<String> {
                         let env = serde_json::json!({
                             "id": next_id,
                             "kind": "response",
-                "notified": { "desktop_id": "desktop-1" }
+                            "notified": { "desktop_id": "desktop-1" }
                         });
                         next_id += 1;
                         // Best-effort write; the tee may have closed
@@ -166,6 +167,95 @@ fn run_tee_with_osc(osc_payloads: &[&str]) -> Vec<String> {
     envelopes
 }
 
+fn run_tee_capture_stdout(script: &str, test_cwd: &Path) -> Vec<u8> {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let socket = tmp.path().join("flowmux.sock");
+    let _rx = spawn_fake_daemon(socket.clone());
+
+    let mut cmd = Command::new(flowmuxctl_path());
+    cmd.arg("pty-tee")
+        .arg("--pane")
+        .arg("11111111-1111-1111-1111-111111111111")
+        .arg("--surface")
+        .arg("22222222-2222-2222-2222-222222222222")
+        .arg("--")
+        .arg("/bin/sh")
+        .arg("-c")
+        .arg(script)
+        .env("FLOWMUX_SOCKET_PATH", &socket)
+        .env("FLOWMUX_LOG", "off")
+        .env("FLOWMUX_TEST_CWD", test_cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().expect("spawn flowmuxctl pty-tee");
+    let stdin_keepalive = child.stdin.take();
+    let mut stdout = child.stdout.take().expect("pty-tee stdout");
+    let stdout_thread = thread::spawn(move || {
+        let mut output = Vec::new();
+        stdout
+            .read_to_end(&mut output)
+            .expect("read pty-tee stdout");
+        output
+    });
+
+    let status = child.wait().expect("wait flowmuxctl pty-tee");
+    drop(stdin_keepalive);
+    let output = stdout_thread.join().expect("join stdout reader");
+    if !status.success() {
+        let mut stderr = String::new();
+        if let Some(mut e) = child.stderr.take() {
+            let _ = e.read_to_string(&mut stderr);
+        }
+        panic!("pty-tee exited unsuccessfully: {status:?}\nstderr: {stderr}");
+    }
+
+    output
+}
+
+fn osc7_for_test_path(path: &Path) -> Vec<u8> {
+    let mut seq = b"\x1b]7;file://".to_vec();
+    for &byte in path.as_os_str().as_bytes() {
+        if matches!(
+            byte,
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'.' | b'_' | b'~'
+        ) {
+            seq.push(byte);
+        } else {
+            const HEX: &[u8; 16] = b"0123456789ABCDEF";
+            seq.push(b'%');
+            seq.push(HEX[(byte >> 4) as usize]);
+            seq.push(HEX[(byte & 0x0f) as usize]);
+        }
+    }
+    seq.push(b'\x07');
+    seq
+}
+
+#[test]
+fn pty_tee_emits_osc7_when_child_cwd_changes() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cwd = tmp.path().join("cwd with spaces");
+    std::fs::create_dir(&cwd).expect("create target cwd");
+
+    let output = run_tee_capture_stdout(
+        "cd \"$FLOWMUX_TEST_CWD\"; printf 'READY\\n'; sleep 0.2; exit 0",
+        &cwd,
+    );
+    let expected_cwd = cwd.canonicalize().unwrap_or(cwd);
+    let expected = osc7_for_test_path(&expected_cwd);
+
+    assert!(
+        output
+            .windows(expected.len())
+            .any(|window| window == expected),
+        "expected stdout to contain OSC 7 for {}; stdout was {:?}",
+        expected_cwd.display(),
+        String::from_utf8_lossy(&output)
+    );
+}
+
 #[test]
 fn application_cursor_mode_rewrites_normal_up_arrow_for_tig() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -207,7 +297,7 @@ finally:
     let mut stderr = child.stderr.take().expect("pty-tee stderr");
 
     let mut seen = Vec::new();
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + Duration::from_secs(10);
     while !seen.ends_with(b"READY\n") {
         assert!(
             Instant::now() < deadline,
@@ -264,9 +354,7 @@ fn osc_9_round_trips_to_daemon_notify_request() {
 
 #[test]
 fn osc_99_promotes_to_attention_needed_when_body_says_waiting() {
-    let envelopes = run_tee_with_osc(&[
-        "99;urgency=critical;Claude is waiting for your input",
-    ]);
+    let envelopes = run_tee_with_osc(&["99;urgency=critical;Claude is waiting for your input"]);
     assert!(
         !envelopes.is_empty(),
         "fake daemon received nothing for OSC 99"

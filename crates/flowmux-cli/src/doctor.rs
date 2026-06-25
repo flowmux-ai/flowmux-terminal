@@ -231,7 +231,10 @@ fn codex_legacy_entry(home: &Path, codex_home: Option<&Path>) -> Option<Entry> {
     Some(Entry {
         name: "codex legacy skill".into(),
         status: Status::NeedsFix,
-        detail: format!("{} (pre-skills sibling — `flowmux fix` removes it)", path.display()),
+        detail: format!(
+            "{} (pre-skills sibling — `flowmux fix` removes it)",
+            path.display()
+        ),
     })
 }
 
@@ -591,10 +594,16 @@ fn section_desktop() -> Section {
     let desktop_detail = match &report.desktop {
         desktop_install::AssetStatus::Ok => desktop_path.display().to_string(),
         desktop_install::AssetStatus::Missing => {
-            format!("{} (missing — `flowmux fix` installs)", desktop_path.display())
+            format!(
+                "{} (missing — `flowmux fix` installs)",
+                desktop_path.display()
+            )
         }
         desktop_install::AssetStatus::Drift => {
-            format!("{} (drift — `flowmux fix` re-syncs)", desktop_path.display())
+            format!(
+                "{} (drift — `flowmux fix` re-syncs)",
+                desktop_path.display()
+            )
         }
         desktop_install::AssetStatus::Error(e) => {
             format!("{}: {e}", desktop_path.display())
@@ -742,7 +751,8 @@ pub fn run_fix(home: &Path, codex_home: Option<&Path>, flowmux_bin: &str) -> Fix
                     detail: format!(
                         "wrote {} file(s) under {}",
                         report.touched_count(),
-                        layout.apps_dir
+                        layout
+                            .apps_dir
                             .parent()
                             .unwrap_or(&layout.apps_dir)
                             .display()
@@ -1190,10 +1200,7 @@ mod tests {
             .flat_map(|s| &s.entries)
             .any(|e| e.name == "codex legacy skill"));
         let fix2 = run_fix(home.path(), None, "flowmux");
-        assert!(!fix2
-            .outcomes
-            .iter()
-            .any(|o| o.area == "codex legacy skill"));
+        assert!(!fix2.outcomes.iter().any(|o| o.area == "codex legacy skill"));
     }
 
     /// Process-wide guard for tests that mutate $HOME. Restored on drop.

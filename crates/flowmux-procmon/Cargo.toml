@@ -9,5 +9,6 @@ description = "Process descendant + listening-port detection for flowmux workspa
 
 [dependencies]
 anyhow = { workspace = true }
+libc = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

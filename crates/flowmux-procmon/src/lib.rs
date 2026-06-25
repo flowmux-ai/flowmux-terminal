@@ -1,14 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Watch a process tree under a workspace's root PID and report which
-//! TCP ports it has bound in LISTEN state. Mirrors cmux's sidebar
-//! "listening ports" pill on Linux by parsing `/proc/<pid>/net/tcp[6]`
-//! and `/proc/<pid>/fd/*` socket inodes.
+//! TCP ports it has bound in LISTEN state. On Linux, mirrors cmux's
+//! sidebar "listening ports" pill by parsing `/proc/<pid>/net/tcp[6]`
+//! and `/proc/<pid>/fd/*` socket inodes. Other Unix platforms still
+//! support PID liveness, but report no descendants or listening ports.
 //!
-//! No external deps — pure procfs reads.
+//! No platform command dependencies — procfs reads on Linux, `kill(0)`
+//! liveness elsewhere.
 
 use std::collections::HashSet;
+#[cfg(target_os = "linux")]
 use std::fs;
 use std::io;
+#[cfg(target_os = "linux")]
 use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
@@ -20,17 +24,29 @@ pub enum ProcError {
 }
 
 /// Report whether process `pid` is still alive, by testing for the
-/// existence of `/proc/<pid>`. Dependency-free equivalent of
-/// `kill(pid, 0)` returning anything other than `ESRCH`. Used by the
+/// existence of `/proc/<pid>` on Linux and `kill(pid, 0)` elsewhere.
+/// Used by the
 /// daemon's agent-liveness sweep to clear a presence whose agent process
 /// vanished (hard kill / closed terminal) without firing `SessionEnd`.
 pub fn pid_alive(pid: u32) -> bool {
-    std::path::Path::new(&format!("/proc/{pid}")).exists()
+    if pid == 0 {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return std::path::Path::new(&format!("/proc/{pid}")).exists();
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
 }
 
 /// Return all PIDs descended from `root` (inclusive). Walks
 /// `/proc/<pid>/status` PPid edges. O(n_procs); cheap enough to call
 /// per-second on the GTK main loop.
+#[cfg(target_os = "linux")]
 pub fn descendants(root: u32) -> Result<HashSet<u32>, ProcError> {
     let mut by_parent: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
     for entry in fs::read_dir("/proc")? {
@@ -62,13 +78,31 @@ pub fn descendants(root: u32) -> Result<HashSet<u32>, ProcError> {
     Ok(out)
 }
 
+#[cfg(not(target_os = "linux"))]
+pub fn descendants(root: u32) -> Result<HashSet<u32>, ProcError> {
+    Ok(HashSet::from([root]))
+}
+
 /// Read the comm (executable basename) of a process, trimmed.
+#[cfg(target_os = "linux")]
 pub fn comm_of(pid: u32) -> Option<String> {
     std::fs::read_to_string(format!("/proc/{pid}/comm"))
         .ok()
         .map(|s| s.trim().to_string())
 }
 
+#[cfg(not(target_os = "linux"))]
+pub fn comm_of(pid: u32) -> Option<String> {
+    if pid != std::process::id() {
+        return None;
+    }
+    std::env::current_exe().ok().and_then(|p| {
+        p.file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+    })
+}
+
+#[cfg(target_os = "linux")]
 fn read_ppid(pid: u32) -> Option<u32> {
     let text = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
     for line in text.lines() {
@@ -80,6 +114,7 @@ fn read_ppid(pid: u32) -> Option<u32> {
 }
 
 /// Local TCP ports in LISTEN state owned by any pid in `pids`.
+#[cfg(target_os = "linux")]
 pub fn listening_ports(pids: &HashSet<u32>) -> Result<Vec<u16>, ProcError> {
     let inodes = collect_socket_inodes(pids)?;
     let mut ports = HashSet::new();
@@ -130,6 +165,12 @@ pub fn listening_ports(pids: &HashSet<u32>) -> Result<Vec<u16>, ProcError> {
     Ok(v)
 }
 
+#[cfg(not(target_os = "linux"))]
+pub fn listening_ports(_pids: &HashSet<u32>) -> Result<Vec<u16>, ProcError> {
+    Ok(Vec::new())
+}
+
+#[cfg(target_os = "linux")]
 fn collect_socket_inodes(pids: &HashSet<u32>) -> Result<HashSet<u64>, ProcError> {
     let mut out = HashSet::new();
     for &pid in pids {
@@ -177,6 +218,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn listening_ports_reports_current_process_tcp_listener() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -201,6 +243,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn listening_ports_filters_to_pids_owning_the_socket() {
         // A second process's listener should not show up under our PID.
         let other = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -230,6 +273,7 @@ mod tests {
         // must not include a path separator (kernel truncates to basename
         // and 16 chars).
         assert!(!comm.contains('/'));
+        #[cfg(target_os = "linux")]
         assert!(comm.len() <= 16);
     }
 }

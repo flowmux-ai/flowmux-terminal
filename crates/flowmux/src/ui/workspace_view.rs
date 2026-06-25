@@ -18,7 +18,6 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use webkit6::prelude::*;
 
 const TAB_DND_MIME: &str = "application/x-flowmux-tab";
 const TAB_DND_PAYLOAD_MAX: usize = 128;
@@ -169,7 +168,7 @@ impl PaneRegistry {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(target_os = "macos")))]
     pub fn surface_title_text(&self, surface: SurfaceId) -> Option<String> {
         self.surface_tab_labels
             .get(&surface)
@@ -457,7 +456,7 @@ impl PaneRegistry {
             )
         } else if let Some(browser) = self.browsers.remove(&surface) {
             (
-                browser.web_view.clone().upcast::<gtk::Widget>(),
+                browser.focus_widget(),
                 SurfaceKind::Browser { initial_url: None },
             )
         } else {
@@ -1052,6 +1051,7 @@ mod tab_dnd_tests {
         assert!(parse_tab_dnd_payload("not a tab drag").is_err());
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn take_surface_for_tearoff_moves_widget_out_of_source_pane() {
         let pane = PaneId::new();
@@ -1568,7 +1568,7 @@ fn build_panel(
             );
             // Apply the zoom option to the new browser tab immediately so
             // widgets created before apply_zoom still start in sync.
-            pane.web_view.set_zoom_level(opts.zoom_factor());
+            pane.set_zoom_level(opts.zoom_factor());
 
             // Browser tabs use the same focus marker and on_focus callback.
             // on_focus updates WindowController.focused_pane, then

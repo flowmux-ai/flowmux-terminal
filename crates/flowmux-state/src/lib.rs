@@ -69,7 +69,7 @@ pub enum StateError {
     Io(#[from] std::io::Error),
     #[error("serde: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("XDG state dir is unavailable")]
+    #[error("state dir is unavailable")]
     NoStateDir,
     #[error("schema version {found} is newer than supported ({supported})")]
     SchemaTooNew { found: u32, supported: u32 },

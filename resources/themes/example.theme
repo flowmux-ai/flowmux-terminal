@@ -24,8 +24,8 @@ foreground   = #ffffff
 # cursor-color is intentionally omitted — flowmux mirrors Ghostty by
 # following `foreground` when unset.
 
-# 16-color ANSI palette (Ghostty default — the Tomorrow scheme) ----
-palette = 0=#1d1f21
+# 16-color ANSI palette (Tomorrow with legible dark-theme black slots) ----
+palette = 0=#5c6370
 palette = 1=#cc6666
 palette = 2=#b5bd68
 palette = 3=#f0c674
@@ -33,7 +33,7 @@ palette = 4=#81a2be
 palette = 5=#b294bb
 palette = 6=#8abeb7
 palette = 7=#c5c8c6
-palette = 8=#666666
+palette = 8=#7f848e
 palette = 9=#d54e53
 palette = 10=#b9ca4a
 palette = 11=#e7c547

@@ -34,7 +34,6 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
-use webkit6::prelude::*;
 
 fn notification_summary(entry: NotificationEntry) -> NotificationSummary {
     NotificationSummary {
@@ -58,6 +57,39 @@ enum CommandPaletteCommand {
     OpenUnread,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CopyableText {
+    kind: &'static str,
+    value: String,
+    live_terminal_cwd: Option<PathBuf>,
+}
+
+impl CopyableText {
+    fn live_path(cwd: PathBuf) -> Self {
+        Self {
+            kind: "path",
+            value: cwd.display().to_string(),
+            live_terminal_cwd: Some(cwd),
+        }
+    }
+
+    fn stored_path(cwd: PathBuf) -> Self {
+        Self {
+            kind: "path",
+            value: cwd.display().to_string(),
+            live_terminal_cwd: None,
+        }
+    }
+
+    fn url(url: String) -> Option<Self> {
+        (!url.is_empty()).then_some(Self {
+            kind: "URL",
+            value: url,
+            live_terminal_cwd: None,
+        })
+    }
+}
+
 fn command_palette_commands() -> &'static [CommandPaletteCommand] {
     &[
         CommandPaletteCommand::OpenBrowser,
@@ -74,6 +106,41 @@ fn command_palette_label(command: CommandPaletteCommand) -> &'static str {
         CommandPaletteCommand::ReloadConfig => "Reload config",
         CommandPaletteCommand::OpenUnread => "Open unread notification",
     }
+}
+
+fn stored_surface_copy_text_from_workspace(
+    ws: &Workspace,
+    pane: PaneId,
+    surface: SurfaceId,
+) -> Option<CopyableText> {
+    ws.surfaces
+        .iter()
+        .find_map(|surface_root| surface_root.root_pane.find_surface(pane, surface))
+        .and_then(|pane_surface| match pane_surface.kind {
+            SurfaceKind::Terminal { cwd: Some(cwd), .. } => Some(CopyableText::stored_path(cwd)),
+            SurfaceKind::Terminal { cwd: None, .. } => None,
+            SurfaceKind::Browser { initial_url } => initial_url.and_then(CopyableText::url),
+        })
+}
+
+fn stored_terminal_cwd_from_workspace(
+    ws: &Workspace,
+    pane: PaneId,
+    surface: SurfaceId,
+) -> Option<PathBuf> {
+    ws.surfaces
+        .iter()
+        .find_map(|surface_root| surface_root.root_pane.find_surface(pane, surface))
+        .and_then(|pane_surface| match pane_surface.kind {
+            SurfaceKind::Terminal { cwd, .. } => cwd,
+            SurfaceKind::Browser { .. } => None,
+        })
+}
+
+fn active_surface_from_workspace(ws: &Workspace, pane: PaneId) -> Option<SurfaceId> {
+    ws.surfaces
+        .iter()
+        .find_map(|surface_root| surface_root.root_pane.active_surface_id(pane))
 }
 
 fn shell_quote(arg: &str) -> String {
@@ -793,7 +860,7 @@ impl WindowController {
             if let Some(term) = r.active_terminal(target) {
                 term.grab_focus();
             } else if let Some(browser) = r.active_browser(target) {
-                browser.web_view.grab_focus();
+                browser.grab_focus();
             }
         });
     }
@@ -953,7 +1020,7 @@ impl WindowController {
                     if let Some(term) = r.terminals.get(&surface_id) {
                         term.grab_focus();
                     } else if let Some(browser) = r.browsers.get(&surface_id) {
-                        browser.web_view.grab_focus();
+                        browser.grab_focus();
                     }
                 });
                 return;
@@ -1268,7 +1335,7 @@ impl WindowController {
             // widgets, then drop the window on the second idle. Avoid timeout to
             // keep the polling-timer regression guard intact.
             for browser in controller.pane_registry.borrow().browsers.values() {
-                browser.web_view.stop_loading();
+                browser.stop_loading();
             }
             let window = controller.window.clone();
             glib::idle_add_local_once(move || {
@@ -1320,6 +1387,46 @@ impl WindowController {
                 .set_surface_title(surface, &title);
         }
         Some(ws_id)
+    }
+
+    fn live_surface_copy_text(&self, surface: SurfaceId) -> Option<CopyableText> {
+        let registry = self.pane_registry.borrow();
+        if let Some(term) = registry.terminals.get(&surface) {
+            return term.current_dir().map(CopyableText::live_path);
+        }
+        registry
+            .browsers
+            .get(&surface)
+            .and_then(|browser| CopyableText::url(browser.current_url()))
+    }
+
+    async fn stored_surface_copy_text(
+        &self,
+        pane: PaneId,
+        surface: SurfaceId,
+    ) -> Option<CopyableText> {
+        let ws_id = self.pane_registry.borrow().workspace_of_pane(pane)?;
+        let ws = self.store.get_workspace(ws_id).await?;
+        stored_surface_copy_text_from_workspace(&ws, pane, surface)
+    }
+
+    async fn copyable_surface_text(
+        &self,
+        pane: PaneId,
+        surface: SurfaceId,
+    ) -> Option<CopyableText> {
+        if let Some(text) = self.live_surface_copy_text(surface) {
+            if let Some(cwd) = text.live_terminal_cwd.clone() {
+                if let Some(ws_id) = self.update_terminal_cwd(pane, surface, cwd).await {
+                    self.refresh_window_title().await;
+                    self.sync_workspace_label(ws_id).await;
+                    self.refresh_file_browser_from_focus().await;
+                }
+            }
+            return Some(text);
+        }
+
+        self.stored_surface_copy_text(pane, surface).await
     }
 
     /// Single entry point for recomputing workspace label and subtitles.
@@ -1452,10 +1559,7 @@ impl WindowController {
 
     fn focus_direction_or_file_browser(&self, from: PaneId, dir: FocusDir) {
         let moved = self.focus_in_direction(from, dir).is_some();
-        if dir == FocusDir::Right
-            && self.file_browser.widget().is_visible()
-            && !moved
-        {
+        if dir == FocusDir::Right && self.file_browser.widget().is_visible() && !moved {
             self.file_browser_source_pane.set(Some(from));
             self.focus_file_browser();
         }
@@ -1647,6 +1751,10 @@ impl WindowController {
             }
             dialog.close();
         });
+        let _native_browser_suspend =
+            crate::ui::browser_pane::suspend_native_browser_views_for_window(
+                self.window.upcast_ref(),
+            );
         dialog.present(Some(&self.window));
         rx.await.unwrap_or(false)
     }
@@ -1682,6 +1790,10 @@ impl WindowController {
             }
             dialog.close();
         });
+        let _native_browser_suspend =
+            crate::ui::browser_pane::suspend_native_browser_views_for_window(
+                self.window.upcast_ref(),
+            );
         dialog.present(Some(&self.window));
         rx.await.unwrap_or(false)
     }
@@ -1753,7 +1865,7 @@ impl WindowController {
             if let Some(term) = r.active_terminal(pane) {
                 term.grab_focus();
             } else if let Some(browser) = r.active_browser(pane) {
-                browser.web_view.grab_focus();
+                browser.grab_focus();
             } else {
                 tracing::debug!(%pane, "focus_pane: no surface registered for pane");
             }
@@ -1797,7 +1909,7 @@ impl WindowController {
             if let Some(term) = r.active_terminal(leaf_id) {
                 term.grab_focus();
             } else if let Some(browser) = r.active_browser(leaf_id) {
-                browser.web_view.grab_focus();
+                browser.grab_focus();
             }
         });
     }
@@ -1860,7 +1972,7 @@ impl WindowController {
                             terminal.set_font_scale(opts.zoom_factor());
                         }
                         for browser in registry.browsers.values() {
-                            browser.web_view.set_zoom_level(opts.zoom_factor());
+                            browser.set_zoom_level(opts.zoom_factor());
                         }
                         // Focus border color/opacity apply by reloading one CSS string
                         // into the same CssProvider instance, so all widgets update automatically.
@@ -1941,7 +2053,7 @@ impl WindowController {
                             if let Some(term) = r.active_terminal(new_pane) {
                                 term.grab_focus();
                             } else if let Some(browser) = r.active_browser(new_pane) {
-                                browser.web_view.grab_focus();
+                                browser.grab_focus();
                             }
                         });
                         let _ = ack.send(Ok(new_pane));
@@ -2066,7 +2178,7 @@ impl WindowController {
                     if let Some(term) = r.terminals.get(&surface) {
                         term.grab_focus();
                     } else if let Some(browser) = r.browsers.get(&surface) {
-                        browser.web_view.grab_focus();
+                        browser.grab_focus();
                     }
                 });
             }
@@ -2691,38 +2803,35 @@ impl WindowController {
                 let result = inject_cookies_into_webkit(&cookies);
                 let _ = ack.send(result);
             }
-            GtkCommand::ShowSurfaceFolder { pane: _, surface } => {
+            GtkCommand::ShowSurfaceFolder { pane, surface } => {
                 let cwd = self
                     .pane_registry
                     .borrow()
                     .terminals
                     .get(&surface)
                     .and_then(|t| t.current_dir());
-                match cwd {
+                let stored = match self.pane_registry.borrow().workspace_of_pane(pane) {
+                    Some(workspace) => self
+                        .store
+                        .get_workspace(workspace)
+                        .await
+                        .and_then(|ws| stored_terminal_cwd_from_workspace(&ws, pane, surface)),
+                    None => None,
+                };
+                match cwd.or(stored) {
                     Some(p) => crate::ui::show_in_folder::open_directory(&p),
                     None => {
-                        tracing::info!(%surface, "show-in-folder: surface has no resolvable cwd");
+                        tracing::info!(%pane, %surface, "show-in-folder: surface has no resolvable cwd");
                     }
                 }
             }
             GtkCommand::CopySurfaceText { pane, surface } => {
-                let text = {
-                    let r = self.pane_registry.borrow();
-                    if let Some(term) = r.terminals.get(&surface) {
-                        term.current_dir()
-                            .map(|p| ("path", p.display().to_string()))
-                    } else {
-                        r.browsers
-                            .get(&surface)
-                            .map(|b| ("URL", b.current_url()))
-                            .filter(|(_, s)| !s.is_empty())
-                    }
-                };
+                let text = self.copyable_surface_text(pane, surface).await;
                 match text {
-                    Some((kind, value)) => {
-                        self.window.clipboard().set_text(&value);
+                    Some(text) => {
+                        self.window.clipboard().set_text(&text.value);
                         self.clipboard_toast
-                            .show_with_message(&format!("Copied {kind}: {value}"));
+                            .show_with_message(&format!("Copied {}: {}", text.kind, text.value));
                     }
                     None => {
                         tracing::info!(%pane, %surface, "copy-surface-text: no path/url");
@@ -2748,28 +2857,21 @@ impl WindowController {
                             .and_then(|s| s.root_pane.first_leaf_id()),
                     )
                     .collect();
-                let resolved = {
-                    let r = self.pane_registry.borrow();
-                    candidate_panes.iter().find_map(|p| {
-                        if let Some(term) = r.active_terminal(*p) {
-                            return term
-                                .current_dir()
-                                .map(|cwd| ("path", cwd.display().to_string()));
-                        }
-                        if let Some(browser) = r.active_browser(*p) {
-                            let url = browser.current_url();
-                            if !url.is_empty() {
-                                return Some(("URL", url));
-                            }
-                        }
-                        None
-                    })
-                };
-                let (kind, value) =
-                    resolved.unwrap_or_else(|| ("path", ws.root_dir.display().to_string()));
-                self.window.clipboard().set_text(&value);
+                let mut resolved = None;
+                for pane in candidate_panes {
+                    let surface = self.pane_registry.borrow().active_surface(pane);
+                    let Some(surface) = surface else {
+                        continue;
+                    };
+                    if let Some(text) = self.copyable_surface_text(pane, surface).await {
+                        resolved = Some(text);
+                        break;
+                    }
+                }
+                let text = resolved.unwrap_or_else(|| CopyableText::stored_path(ws.root_dir));
+                self.window.clipboard().set_text(&text.value);
                 self.clipboard_toast
-                    .show_with_message(&format!("Copied {kind}: {value}"));
+                    .show_with_message(&format!("Copied {}: {}", text.kind, text.value));
             }
             GtkCommand::ShowFocusedPaneFolder { workspace } => {
                 flowmux_config::notify_debug!(
@@ -2799,13 +2901,18 @@ impl WindowController {
                             .and_then(|s| s.root_pane.first_leaf_id()),
                     )
                     .collect();
-                let cwd = {
+                let path = {
                     let r = self.pane_registry.borrow();
-                    candidate_panes
-                        .iter()
-                        .find_map(|p| r.active_terminal(*p).and_then(|t| t.current_dir()))
-                };
-                let path = cwd.unwrap_or_else(|| ws.root_dir.clone());
+                    candidate_panes.iter().find_map(|pane| {
+                        let surface = r
+                            .active_surface(*pane)
+                            .or_else(|| active_surface_from_workspace(&ws, *pane))?;
+                        r.active_terminal(*pane)
+                            .and_then(|t| t.current_dir())
+                            .or_else(|| stored_terminal_cwd_from_workspace(&ws, *pane, surface))
+                    })
+                }
+                .unwrap_or_else(|| ws.root_dir.clone());
                 crate::ui::show_in_folder::open_directory(&path);
             }
             GtkCommand::BrowserEval { pane, source, ack } => {
@@ -2866,44 +2973,34 @@ impl WindowController {
                         // refs — drop them so a stale `eN` can't resolve to
                         // an element on the old page.
                         browser.refs.borrow_mut().clear(browser.ref_scope);
-                        browser.web_view.load_uri(&url);
+                        browser.load_uri(&url);
                         let _ = ack.send(Ok(BrowserActionResult::Ok));
                     }
                     BrowserOp::Back => {
-                        let moved = browser.web_view.can_go_back();
+                        let moved = browser.go_back();
                         if moved {
                             browser.refs.borrow_mut().clear(browser.ref_scope);
-                            browser.web_view.go_back();
                         }
                         let _ = ack.send(Ok(BrowserActionResult::Bool(moved)));
                     }
                     BrowserOp::Forward => {
-                        let moved = browser.web_view.can_go_forward();
+                        let moved = browser.go_forward();
                         if moved {
                             browser.refs.borrow_mut().clear(browser.ref_scope);
-                            browser.web_view.go_forward();
                         }
                         let _ = ack.send(Ok(BrowserActionResult::Bool(moved)));
                     }
                     BrowserOp::Reload => {
                         browser.refs.borrow_mut().clear(browser.ref_scope);
-                        browser.web_view.reload();
+                        browser.reload();
                         let _ = ack.send(Ok(BrowserActionResult::Ok));
                     }
                     BrowserOp::Url => {
-                        let value = browser
-                            .web_view
-                            .uri()
-                            .map(|uri| uri.to_string())
-                            .unwrap_or_default();
+                        let value = browser.current_url();
                         let _ = ack.send(Ok(BrowserActionResult::String(value)));
                     }
                     BrowserOp::Title => {
-                        let value = browser
-                            .web_view
-                            .title()
-                            .map(|title| title.to_string())
-                            .unwrap_or_default();
+                        let value = browser.current_title();
                         let _ = ack.send(Ok(BrowserActionResult::String(value)));
                     }
                     BrowserOp::Click { target } => match resolve_ref(&browser, &target) {
@@ -3258,7 +3355,7 @@ impl WindowController {
                 Some(id)
             } else if let Some(browser) = registry.active_browser(id) {
                 self.focused_pane.set(Some(id));
-                browser.web_view.grab_focus();
+                browser.grab_focus();
                 Some(id)
             } else {
                 tracing::debug!(target_pane = %id, "no active surface to focus");
@@ -3503,6 +3600,10 @@ impl WindowController {
             }
             dialog.close();
         });
+        let _native_browser_suspend =
+            crate::ui::browser_pane::suspend_native_browser_views_for_window(
+                self.window.upcast_ref(),
+            );
         dialog.present(Some(&self.window));
         rx.await.unwrap_or(false)
     }
@@ -3520,7 +3621,7 @@ impl WindowController {
             terminal.set_font_scale(opts.zoom_factor());
         }
         for browser in registry.browsers.values() {
-            browser.web_view.set_zoom_level(opts.zoom_factor());
+            browser.set_zoom_level(opts.zoom_factor());
         }
         drop(registry);
 
@@ -4420,7 +4521,7 @@ impl ClipboardToast {
         });
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(target_os = "macos")))]
     pub fn current_message(&self) -> String {
         self.label.text().to_string()
     }
@@ -4603,23 +4704,12 @@ fn run_browser_screenshot(
     ack: tokio::sync::oneshot::Sender<Result<BrowserActionResult, String>>,
 ) {
     let cell = std::cell::Cell::new(Some(ack));
-    browser.web_view.snapshot(
-        webkit6::SnapshotRegion::Visible,
-        webkit6::SnapshotOptions::NONE,
-        gtk::gio::Cancellable::NONE,
-        move |result| {
-            if let Some(ack) = cell.take() {
-                let mapped = match result {
-                    Ok(texture) => texture
-                        .save_to_png(&path)
-                        .map(|_| BrowserActionResult::String(path.display().to_string()))
-                        .map_err(|e| e.to_string()),
-                    Err(e) => Err(e.to_string()),
-                };
-                let _ = ack.send(mapped);
-            }
-        },
-    );
+    browser.snapshot_to_png(path, move |result| {
+        if let Some(ack) = cell.take() {
+            let mapped = result.map(BrowserActionResult::String);
+            let _ = ack.send(mapped);
+        }
+    });
 }
 
 pub fn spawn_dispatch_loop(rx: async_channel::Receiver<GtkCommand>, controller: WindowController) {
@@ -4636,10 +4726,93 @@ fn file_browser_return_pane(focused: Option<PaneId>, source: Option<PaneId>) -> 
 
 #[cfg(test)]
 mod tests {
+    #![cfg_attr(target_os = "macos", allow(dead_code, unused_imports))]
+
     use super::*;
     use flowmux_core::PaneContent;
     use flowmux_state::State;
 
+    fn workspace_with_tabbed_surface(
+        pane: PaneId,
+        pane_surface: PaneSurface,
+        root_dir: PathBuf,
+    ) -> Workspace {
+        let active = pane_surface.id;
+        Workspace {
+            id: WorkspaceId::new(),
+            name: "copy-test".into(),
+            custom_title: None,
+            root_dir,
+            git: None,
+            listening_ports: vec![],
+            color: None,
+            surfaces: vec![Surface {
+                id: SurfaceId::new(),
+                title: "copy-test".into(),
+                kind: pane_surface.kind.clone(),
+                root_pane: Pane::Leaf {
+                    id: pane,
+                    content: PaneContent::Tabs {
+                        active,
+                        surfaces: vec![pane_surface],
+                    },
+                },
+            }],
+        }
+    }
+
+    #[test]
+    fn stored_copy_text_uses_terminal_cwd_from_state() {
+        let pane = PaneId::new();
+        let cwd = PathBuf::from("/tmp/flowmux-copy-path");
+        let pane_surface = PaneSurface::terminal("copy", Some(cwd.clone()));
+        let surface = pane_surface.id;
+        let ws = workspace_with_tabbed_surface(pane, pane_surface, PathBuf::from("/tmp/root"));
+
+        assert_eq!(
+            stored_surface_copy_text_from_workspace(&ws, pane, surface),
+            Some(CopyableText::stored_path(cwd))
+        );
+    }
+
+    #[test]
+    fn stored_terminal_cwd_uses_terminal_cwd_from_state() {
+        let pane = PaneId::new();
+        let cwd = PathBuf::from("/tmp/flowmux-show-folder");
+        let pane_surface = PaneSurface::terminal("show", Some(cwd.clone()));
+        let surface = pane_surface.id;
+        let ws = workspace_with_tabbed_surface(pane, pane_surface, PathBuf::from("/tmp/root"));
+
+        assert_eq!(
+            stored_terminal_cwd_from_workspace(&ws, pane, surface),
+            Some(cwd)
+        );
+    }
+
+    #[test]
+    fn active_surface_falls_back_to_workspace_state() {
+        let pane = PaneId::new();
+        let pane_surface = PaneSurface::terminal("show", Some("/tmp/flowmux-show-folder".into()));
+        let surface = pane_surface.id;
+        let ws = workspace_with_tabbed_surface(pane, pane_surface, PathBuf::from("/tmp/root"));
+
+        assert_eq!(active_surface_from_workspace(&ws, pane), Some(surface));
+    }
+
+    #[test]
+    fn stored_copy_text_uses_browser_url_from_state() {
+        let pane = PaneId::new();
+        let pane_surface = PaneSurface::browser("docs", "https://example.test/docs".into());
+        let surface = pane_surface.id;
+        let ws = workspace_with_tabbed_surface(pane, pane_surface, PathBuf::from("/tmp/root"));
+
+        assert_eq!(
+            stored_surface_copy_text_from_workspace(&ws, pane, surface),
+            CopyableText::url("https://example.test/docs".into())
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn terminal_cwd_event_updates_rendered_tab_label_and_respects_manual_rename() {
         adw::init().expect("libadwaita should initialize in GTK test");
@@ -4749,6 +4922,7 @@ mod tests {
     /// Verify that focus changes, tab activation, and RefreshWindowTitle update
     /// adw::ApplicationWindow.title to "flowmux - {focused tab name}". With no
     /// focus, it falls back to plain "flowmux".
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn refresh_window_title_uses_focused_pane_active_surface() {
         adw::init().expect("libadwaita should initialize in GTK test");
@@ -4814,6 +4988,7 @@ mod tests {
     /// Verify that `BrowserUriChanged` dispatch stores the last navigated URL.
     /// To test only store interaction without launching webkit::WebView, create
     /// a browser surface in state with add_browser_surface_to_pane first.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn browser_uri_changed_dispatch_persists_url_in_state() {
         adw::init().expect("libadwaita should initialize in GTK test");
@@ -4866,6 +5041,7 @@ mod tests {
 
     /// `BrowserTitleChanged` dispatch updates both store and tab label, while
     /// user-renamed surfaces remain protected from automatic updates.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn browser_title_changed_dispatch_updates_state_but_skips_locked() {
         adw::init().expect("libadwaita should initialize in GTK test");
@@ -4934,6 +5110,7 @@ mod tests {
     /// `TerminalTitleChanged` dispatch updates the tab label from OSC 0/2
     /// titles. Empty strings are ignored, and title_locked=true surfaces are
     /// protected because user rename wins.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn terminal_title_changed_dispatch_updates_tab_and_skips_locked() {
         adw::init().expect("libadwaita should initialize in GTK test");
@@ -5035,6 +5212,7 @@ mod tests {
     /// cwd-driven folder labels. Instead, cwd changes should update both tab and
     /// window title to the folder name, while external program titles such as
     /// vi/codex should still pass through.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn terminal_cwd_change_updates_tab_and_window_title_and_ignores_shell_ps1_echo() {
         adw::init().expect("libadwaita should initialize in GTK test");
@@ -5155,6 +5333,7 @@ mod tests {
     /// When a new tab is added (NewSurface), that tab becomes active and the
     /// window title updates to the new tab name instead of keeping the previous
     /// active tab name.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn new_surface_dispatch_updates_window_title_to_new_tab() {
         adw::init().expect("libadwaita should initialize in GTK test");
@@ -5210,6 +5389,7 @@ mod tests {
     }
 
     /// ActivateSurface dispatch alone recomputes the window title from the active tab.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn activate_surface_dispatch_refreshes_window_title() {
         adw::init().expect("libadwaita should initialize in GTK test");
@@ -5272,6 +5452,7 @@ mod tests {
     /// Verify that ReorderSurface dispatch updates both store and PaneRegistry,
     /// preserves the active tab, treats same-position moves as no-ops, and does
     /// not affect tabs in other panes.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn reorder_surface_dispatch_updates_store_and_widget_order() {
         adw::init().expect("libadwaita should initialize in GTK test");
@@ -5407,6 +5588,7 @@ mod tests {
     /// calling it should update store/tab labels for registered (pane, surface,
     /// cwd) entries and no-op when nothing changed. This is the body called by
     /// the one-second timer handler (`install_cwd_polling_fallback`) each tick.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn poll_terminal_cwds_picks_up_changes_without_osc7_event() {
         adw::init().expect("libadwaita should initialize in GTK test");
@@ -5481,6 +5663,7 @@ mod tests {
     /// claude must not be reverted to the folder name by the one-second cwd
     /// polling fallback. poll_terminal_cwds passes the same cwd each tick, so
     /// that path must never touch `surface.title`.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn program_title_persists_across_cwd_polling() {
         adw::init().expect("libadwaita should initialize in GTK test");
@@ -5560,6 +5743,7 @@ mod tests {
     /// inside the same workspace. Verify PaneRegistry::pane_ids_in_workspace
     /// filters out panes from other workspaces, because focus_in_direction builds
     /// its candidate list through this function.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn pane_ids_in_workspace_isolates_other_workspaces() {
         adw::init().expect("libadwaita should initialize in GTK test");
@@ -5612,6 +5796,7 @@ mod tests {
     /// If the user clicks only a workspace in the side panel and focused_pane is
     /// None, pressing any Alt+arrow direction should make the dispatcher focus
     /// the active workspace's first leaf pane.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn focus_direction_from_none_falls_back_to_first_leaf_of_active_workspace() {
         adw::init().expect("libadwaita should initialize in GTK test");
@@ -5685,6 +5870,7 @@ mod tests {
         assert_eq!(file_browser_return_pane(Some(focused), None), Some(focused));
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn file_browser_focus_out_left_restores_saved_source_focus() {
         let (controller, _ws_id, pane) =
@@ -5698,6 +5884,7 @@ mod tests {
         assert_eq!(controller.focused_pane.get(), Some(pane));
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn file_browser_focus_direction_command_uses_file_browser_focus_out() {
         let (controller, _ws_id, pane) =
@@ -5732,6 +5919,7 @@ mod tests {
         assert!(!controller.file_browser_active.get());
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn file_browser_alt_left_moves_to_left_neighbor_without_second_press() {
         let (controller, _ws_id, pane_a) =
@@ -5763,6 +5951,7 @@ mod tests {
         assert!(!controller.file_browser_active.get());
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn file_browser_state_is_scoped_per_pane() {
         let (controller, ws_id, pane_a) =
@@ -5878,6 +6067,7 @@ mod tests {
         assert!(state_a_again.expanded.contains(&root_a.join("expanded-a")));
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn file_browser_same_pane_root_refresh_does_not_rebuild_rows() {
         let (controller, ws_id, pane) =
@@ -5921,6 +6111,7 @@ mod tests {
         assert!(controller.file_browser.rebuild_count() > rebuild_count);
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn file_browser_escape_hides_panel_and_restores_saved_source_focus() {
         let (controller, _ws_id, pane) =
@@ -5936,6 +6127,7 @@ mod tests {
         assert_eq!(controller.focused_pane.get(), Some(pane));
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn clicking_second_workspace_moves_focus_into_it_so_alt_arrow_stays_there() {
         adw::init().expect("libadwaita should initialize in GTK test");
@@ -6244,6 +6436,182 @@ mod tests {
         assert_eq!(lines, vec!["Browser-DocsHome".to_string()]);
     }
 
+    fn run_async<T>(future: impl std::future::Future<Output = T>) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(future)
+    }
+
+    async fn sync_workspace_label_state_only(
+        store: &StateStore,
+        ws_id: WorkspaceId,
+        mru: &[PaneId],
+    ) -> Vec<String> {
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        let head_pane = mru.first().copied().or_else(|| {
+            ws.surfaces
+                .first()
+                .and_then(|surface| surface.root_pane.first_leaf_id())
+        });
+        if let Some(head_pane) = head_pane {
+            if let Some(new_name) = focused_surface_full_title(&ws, head_pane) {
+                store.set_workspace_name(ws_id, new_name).await;
+            }
+        }
+
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        collect_subtitle_lines(&ws, mru, 3)
+    }
+
+    #[test]
+    fn scenario_workspace_name_and_subtitles_track_focused_terminals_state_only() {
+        run_async(async {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "flowmux-scn-name-subtitles-state-{}-{nonce}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&root).unwrap();
+
+            let store = StateStore::new_lazy(State::default());
+            let ws_id = store.create_workspace(None, root.clone()).await;
+            let ws = store.get_workspace(ws_id).await.unwrap();
+            let pane_a = ws.surfaces[0].root_pane.first_leaf_id().unwrap();
+            let surface_a = ws.surfaces[0].root_pane.active_surface_id(pane_a).unwrap();
+
+            let mut mru = vec![pane_a];
+            let subs = sync_workspace_label_state_only(&store, ws_id, &mru).await;
+            let ws = store.get_workspace(ws_id).await.unwrap();
+            assert_eq!(
+                ws.display_title(),
+                root.file_name().unwrap().to_string_lossy()
+            );
+            assert_eq!(subs, vec![shorten_cwd_path(&root)]);
+
+            let project_a = std::path::PathBuf::from("/home/flowmux-scn/dev/projectA");
+            store
+                .update_surface_cwd(pane_a, surface_a, project_a.clone())
+                .await;
+            let subs = sync_workspace_label_state_only(&store, ws_id, &mru).await;
+            let ws = store.get_workspace(ws_id).await.unwrap();
+            assert_eq!(ws.name, "projectA");
+            assert_eq!(ws.display_title(), "projectA");
+            assert_eq!(subs, vec![".../flowmux-scn/dev/projectA"]);
+
+            assert!(store.rename_workspace(ws_id, "MyName".into()).await);
+            let project_b = std::path::PathBuf::from("/home/flowmux-scn/dev/projectB");
+            store
+                .update_surface_cwd(pane_a, surface_a, project_b.clone())
+                .await;
+            let subs = sync_workspace_label_state_only(&store, ws_id, &mru).await;
+            let ws = store.get_workspace(ws_id).await.unwrap();
+            assert_eq!(ws.name, "projectB");
+            assert_eq!(ws.display_title(), "MyName");
+            assert_eq!(subs, vec![".../flowmux-scn/dev/projectB"]);
+
+            let (_, pane_b) = store
+                .split_pane(pane_a, SplitDirection::Vertical)
+                .await
+                .expect("split should succeed");
+            let ws = store.get_workspace(ws_id).await.unwrap();
+            let surface_b = ws.surfaces[0].root_pane.active_surface_id(pane_b).unwrap();
+            let project_c = std::path::PathBuf::from("/home/flowmux-scn/dev/projectC");
+            store
+                .update_surface_cwd(pane_b, surface_b, project_c.clone())
+                .await;
+
+            mru.retain(|pane| *pane != pane_b);
+            mru.insert(0, pane_b);
+            let subs = sync_workspace_label_state_only(&store, ws_id, &mru).await;
+            let ws = store.get_workspace(ws_id).await.unwrap();
+            assert_eq!(ws.name, "projectC");
+            assert_eq!(ws.display_title(), "MyName");
+            assert_eq!(
+                subs,
+                vec![
+                    ".../flowmux-scn/dev/projectC",
+                    ".../flowmux-scn/dev/projectB",
+                ]
+            );
+
+            mru.retain(|pane| *pane != pane_a);
+            mru.insert(0, pane_a);
+            let subs = sync_workspace_label_state_only(&store, ws_id, &mru).await;
+            assert_eq!(
+                subs,
+                vec![
+                    ".../flowmux-scn/dev/projectB",
+                    ".../flowmux-scn/dev/projectC",
+                ]
+            );
+
+            let (_, pane_c) = store
+                .split_pane(pane_b, SplitDirection::Horizontal)
+                .await
+                .expect("second split should succeed");
+            let ws = store.get_workspace(ws_id).await.unwrap();
+            let surface_c = ws.surfaces[0].root_pane.active_surface_id(pane_c).unwrap();
+            let project_d = std::path::PathBuf::from("/home/flowmux-scn/dev/projectD");
+            store
+                .update_surface_cwd(pane_c, surface_c, project_d.clone())
+                .await;
+
+            mru.retain(|pane| *pane != pane_c);
+            mru.insert(0, pane_c);
+            let subs = sync_workspace_label_state_only(&store, ws_id, &mru).await;
+            assert_eq!(
+                subs,
+                vec![
+                    ".../flowmux-scn/dev/projectD",
+                    ".../flowmux-scn/dev/projectB",
+                    ".../flowmux-scn/dev/projectC",
+                ]
+            );
+
+            mru.retain(|pane| *pane != pane_a);
+            mru.insert(0, pane_a);
+            let subs = sync_workspace_label_state_only(&store, ws_id, &mru).await;
+            assert_eq!(
+                subs,
+                vec![
+                    ".../flowmux-scn/dev/projectB",
+                    ".../flowmux-scn/dev/projectD",
+                    ".../flowmux-scn/dev/projectC",
+                ]
+            );
+
+            let (_, browser_surface) = store
+                .add_browser_surface_to_pane(pane_a, "https://example.com/docs".into())
+                .await
+                .expect("browser tab should be added");
+            assert!(store
+                .rename_surface(pane_a, browser_surface, "DocsHome".into())
+                .await
+                .is_some());
+            mru.retain(|pane| *pane != pane_a);
+            mru.insert(0, pane_a);
+            let subs = sync_workspace_label_state_only(&store, ws_id, &mru).await;
+            let ws = store.get_workspace(ws_id).await.unwrap();
+            assert_eq!(ws.name, "DocsHome");
+            assert_eq!(ws.display_title(), "MyName");
+            assert_eq!(
+                subs,
+                vec![
+                    "Browser-DocsHome",
+                    ".../flowmux-scn/dev/projectD",
+                    ".../flowmux-scn/dev/projectC",
+                ]
+            );
+
+            let _ = std::fs::remove_dir_all(&root);
+        });
+    }
+
     /// Scenario test for the requested side-panel workspace row behavior:
     ///   1. On focus, ws.name = active surface label and subtitles = that cwd.
     ///   2. One cd immediately updates ws.name and subtitles to the new folder/path.
@@ -6252,6 +6620,7 @@ mod tests {
     ///   5. Moving focus to another pane puts that pane's cwd on the first subtitle.
     ///   6. With three split panes, focusing each once produces three subtitles.
     ///   7. Refocusing an existing MRU pane keeps length 3 and only updates the head.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn scenario_workspace_name_and_subtitles_track_focused_terminals_end_to_end() {
         adw::init().expect("libadwaita should initialize in GTK test");
@@ -6511,6 +6880,7 @@ mod tests {
     /// workspace name, so the subsequent `add_named` of the sibling
     /// silently no-op'd and the workspace went blank — the user
     /// reported it as "every pane closed".
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn close_right_pane_in_side_by_side_split_keeps_left_pane_visible() {
         adw::init().expect("libadwaita should initialize in GTK test");
@@ -6636,6 +7006,7 @@ mod tests {
     /// exactly that. This test pins the contract for the incremental path:
     /// the same widget instance survives split, survives close-of-sibling,
     /// and the pane's terminal is reachable through the registry.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn closing_split_sibling_preserves_surviving_pane_terminal_widget_identity() {
         adw::init().expect("libadwaita should initialize in GTK test");
@@ -6769,6 +7140,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn pane_split_applied_preserves_existing_terminal_widget_identity() {
         let (controller, ws_id, pane) =
@@ -6815,6 +7187,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn browser_open_split_preserves_source_terminal_widget_identity() {
         let (controller, _ws_id, pane) =
@@ -6864,6 +7237,7 @@ mod tests {
     /// → split B down to get C, so the tree is Split{A, Split{B, C}} with two
     /// levels of `gtk::Paned`. Closing C must collapse only the inner paned
     /// and leave A and B's terminal widgets intact.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn closing_inner_pane_in_two_level_split_preserves_other_panes() {
         adw::init().expect("libadwaita should initialize in GTK test");
@@ -7036,6 +7410,7 @@ mod tests {
     /// grand-paned `set_*_child` slot replacement that does NOT auto-
     /// hand focus to the surviving sibling, so an explicit handoff is
     /// required there.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn closing_focused_pane_in_nested_split_moves_focus_to_previous_pane() {
         adw::init().expect("libadwaita should initialize in GTK test");
@@ -7138,6 +7513,7 @@ mod tests {
     /// close path actually exercises grand_paned slot replacement (the only
     /// path where focus_after_close can disagree with GTK's own focus
     /// chain handling).
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn closing_unfocused_pane_in_nested_split_keeps_focus_where_it_was() {
         adw::init().expect("libadwaita should initialize in GTK test");
@@ -7223,6 +7599,7 @@ mod tests {
     /// Same nested-split shape as the CloseFocused regression so the
     /// grand-paned slot replacement is exercised; only the dispatched
     /// command differs.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn closing_focused_pane_via_alt_w_in_nested_split_focuses_sibling() {
         adw::init().expect("libadwaita should initialize in GTK test");
@@ -7443,6 +7820,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn notification_management_dispatch_lists_marks_and_clears() {
         let (controller, ws_id, pane) =
@@ -7502,6 +7880,7 @@ mod tests {
     /// the store must report `unread_count() == 0` — that is the value
     /// the dock receives, so this is the regression guard against the
     /// "badge stays on 2" symptom.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn workspace_activation_sweeps_all_unread_for_that_workspace() {
         let (controller, ws_id, pane) =
@@ -7543,6 +7922,7 @@ mod tests {
     /// `FocusPane` (the `flowmux focus-pane` path) grabs focus for a
     /// known pane id and returns a clean error for an unknown one rather
     /// than silently no-op'ing.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn focus_pane_command_acks_known_pane_and_errors_unknown() {
         let (controller, _ws_id, pane) =
@@ -7569,6 +7949,7 @@ mod tests {
 
     /// Reactivating an already-active workspace must be a safe no-op for
     /// the badge: nothing to sweep, `unread_count()` already at 0.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn repeat_workspace_activation_is_idempotent_for_unread_count() {
         let (controller, ws_id, pane) =
@@ -7592,6 +7973,7 @@ mod tests {
 
     /// Two workspaces, alarms on each. Activating one must only sweep
     /// that workspace's entries — the other workspace's count stays.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn activating_one_workspace_does_not_sweep_other_workspaces() {
         adw::init().expect("libadwaita should initialize in GTK test");
@@ -7654,6 +8036,7 @@ mod tests {
     /// accidentally widening the sweep and silencing global toasts.
     /// `RefreshLauncherBadge` after the activation, however, must run so
     /// the dock count reflects the still-unread global entry.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn workspace_activation_leaves_global_notifications_untouched() {
         let (controller, ws_id, pane) =
@@ -7686,6 +8069,7 @@ mod tests {
     /// workspace) must (1) detect the staleness via `SetDesktopIdResult`
     /// and (2) leave `unread_count()` at the same value as before — the
     /// entry was already read, so the badge should not regress.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn late_set_desktop_id_after_workspace_sweep_keeps_unread_count_stable() {
         let (controller, ws_id, pane) =
@@ -7737,6 +8121,7 @@ mod tests {
     /// they are timing-dependent on when the GLib main context schedules
     /// the spawned future. The user-visible invariant is the store
     /// state, which is what the dock would receive next.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn rapid_push_push_activate_sequence_drains_unread_to_zero() {
         let (controller, ws_id, pane) =
@@ -7774,6 +8159,7 @@ mod tests {
     /// still the only path that drains it. This guards against a
     /// regression where a pane-with-no-workspace entry would otherwise
     /// silently keep the dock badge inflated.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn workspace_activation_does_not_sweep_pane_entries_without_workspace() {
         let (controller, ws_id, pane) =
@@ -7807,6 +8193,7 @@ mod tests {
     /// must be untouched. Pins the user-visible feature: clicking the
     /// trash icon next to a notification removes that notification
     /// from the popover list while leaving every other entry alone.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn delete_notification_dispatch_removes_only_targeted_unread_entry() {
         let (controller, ws_id, pane) =
@@ -7862,6 +8249,7 @@ mod tests {
     /// the unread count. Without this branch the dispatcher would
     /// republish the badge unnecessarily on every read-row delete,
     /// or — worse — skip the popover refresh and leave a ghost row.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn delete_notification_dispatch_on_read_entry_keeps_unread_count() {
         let (controller, ws_id, pane) =
@@ -7894,6 +8282,7 @@ mod tests {
     /// raced) must be a safe no-op — no panic, no badge change, no
     /// FDO close roundtrip. This pins the dispatcher's `Unknown` arm
     /// so a future refactor that removes it surfaces here.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn delete_notification_dispatch_on_unknown_id_is_safe_noop() {
         let (controller, ws_id, pane) =
@@ -7945,6 +8334,7 @@ mod tests {
     /// is the source of truth for what we re-publish, so verifying it
     /// drains to 0 here is equivalent to verifying the next
     /// `update_launcher_count` call would carry `count = 0`.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn popover_open_sequence_drains_single_notification_to_zero() {
         let (controller, ws_id, pane) =
@@ -8004,6 +8394,7 @@ mod tests {
     /// Then the late `SetNotificationDesktopId` arrives. The store
     /// reports `Stale` and the dispatcher fires the close + refresh on
     /// its own. The ENTIRE story must end with `unread_count() = 0`.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn popover_open_then_late_desktop_id_still_drains_badge() {
         let (controller, ws_id, pane) =
@@ -8056,6 +8447,7 @@ mod tests {
     /// reply is in-flight. The sweep must close the two known toasts
     /// and the badge must drain to 0; the in-flight third entry
     /// reaches the dispatcher later as `Stale`.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn popover_open_with_partial_desktop_ids_still_clears_badge() {
         let (controller, ws_id, pane) =
@@ -8129,6 +8521,7 @@ mod tests {
     /// sweeps. After the final activation the badge must be at 0 and
     /// every entry whose desktop_id was attached before the sweep must
     /// be marked read.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn stress_many_notifications_with_periodic_sweeps_drains_to_zero() {
         let (controller, ws_id, pane) =
@@ -8202,6 +8595,7 @@ mod tests {
     /// unread entry); pushes between opens must inflate it again. This
     /// pins the symptom "the bell popover sweep does not drop the
     /// badge" against batch arrival patterns.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn stress_popover_open_drains_badge_across_repeated_batches() {
         let (controller, ws_id, pane) =
@@ -8265,6 +8659,7 @@ mod tests {
     /// after each step is that `unread_count()` equals the number of
     /// entries with `read == false` actually in the store — no entry
     /// can be "ghost unread" or "ghost read".
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn stress_mixed_ack_channels_keep_unread_count_in_sync_with_entries() {
         let (controller, ws_id, pane) =
@@ -8380,6 +8775,7 @@ mod tests {
     /// LauncherEntry signal in tests (no D-Bus) but we can pin that
     /// every dispatch returns cleanly and the in-store count never
     /// drifts from the computed unread set.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn stress_refresh_burst_is_safely_coalesced() {
         let (controller, ws_id, pane) =

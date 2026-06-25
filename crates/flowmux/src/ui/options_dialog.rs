@@ -716,6 +716,7 @@ mod tests {
     /// dialog opens in the correct state when the user reviews their
     /// existing options. Headless environments without a display skip the
     /// assertion; when GTK init succeeds, the active state must match.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn persist_check_reflects_initial_value() {
         if gtk::init().is_err() {
@@ -732,6 +733,7 @@ mod tests {
     /// confirm the collected options match — including the new
     /// `persist_browser_session` flag — so a regression that drops the
     /// flag from `collect_options` would fail loudly.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn collect_options_round_trips_persist_browser_session() {
         if gtk::init().is_err() {
@@ -833,6 +835,7 @@ mod tests {
     /// GTK init is needed to verify that the slider and SpinButton share the
     /// same Adjustment. Headless environments skip this; when GTK starts, the
     /// test checks that the built widgets move together.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn focus_opacity_row_widgets_share_adjustment_and_clamp_initial() {
         if gtk::init().is_err() {

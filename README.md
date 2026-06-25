@@ -95,10 +95,10 @@ flowmux/
 
 ```bash
 sudo apt install \
-    build-essential pkg-config \
+    build-essential pkg-config git \
     libgtk-4-dev libadwaita-1-dev \
-    libwebkitgtk-6.0-dev libssl-dev \
-    libssh2-1-dev libdbus-1-dev
+    libwebkitgtk-6.0-dev libvte-2.91-gtk4-dev \
+    libssl-dev libssh2-1-dev libdbus-1-dev libsecret-1-dev
 # For the patched VTE build (see "Patched VTE" below) — meson/ninja plus the
 # VTE source-build dependencies not already pulled in by libgtk-4-dev:
 sudo apt install \
@@ -146,7 +146,23 @@ For development:
 ```bash
 cargo run -p flowmux           # debug GUI
 cargo check --workspace        # type-check everything
+scripts/check-ubuntu-compat.sh # Docker smoke check for 22.04/24.04/26.04
 ```
+
+## macOS local install
+
+The macOS build uses Homebrew GTK/libadwaita/VTE libraries and installs a
+regular app bundle plus CLI binaries:
+
+```bash
+brew install pkg-config gtk4 libadwaita vte3
+scripts/install-macos.sh --check
+scripts/install-macos.sh
+open "$HOME/Applications/FlowMux.app"
+```
+
+The script installs `FlowMux.app` under `~/Applications` and copies `flowmux`
+and `flowmuxctl` to `~/.local/bin`.
 
 ### Patched VTE (drag-selection in agent TUIs)
 
@@ -163,6 +179,7 @@ step (needs the `meson`/`ninja`/`liblz4-dev`/… packages listed in the
 prerequisites):
 
 ```bash
+scripts/install-host.sh --check # verify host prerequisites first
 scripts/install-host.sh        # builds patched VTE → builds flowmux → installs
 ```
 
@@ -205,6 +222,29 @@ flatpak run com.flowmux.App
 Blank browser tabs (`EGL_BAD_PARAMETER`) mean the host GL stack is too old for
 the sandbox Mesa — disable WebKit's GPU path:
 `flatpak override --user --env=FLOWMUX_WEBKIT_HW_ACCEL=never com.flowmux.App`.
+
+## WSL / WSLg
+
+Ubuntu 24.04 and 26.04 on WSLg follow the native host path above:
+install the build prerequisites, run `scripts/install-host.sh`, then start
+`flowmux` from the Linux side so GTK connects to WSLg's Wayland display. The
+runtime detects WSL and enables the terminal key/resize workarounds that differ
+from a regular GNOME session. Ubuntu 22.04 on WSL should use the Flatpak path
+from the Jammy section because the native GTK/libadwaita/VTE floor is too old.
+
+To verify a real WSLg session end to end on 24.04 or 26.04:
+
+```bash
+scripts/check-wslg-runtime.sh
+```
+
+That script installs the native host build if needed, launches the GUI through
+WSLg, creates a workspace, and verifies `send-keys` / `read-screen` against the
+live terminal pane. It uses a temporary `FLOWMUX_RUNTIME_DIR` for the smoke
+run while leaving WSLg's `XDG_RUNTIME_DIR` alone, so it will not steal the
+socket from an existing flowmux session or hide the Wayland socket. Use
+`--no-install` to test an already-installed binary, or `--keep-open` to leave
+the smoke GUI running and print the matching env for manual CLI checks.
 
 ## License
 
