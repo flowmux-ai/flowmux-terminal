@@ -411,6 +411,14 @@ paned > separator {{
 .flowmux-file-browser-header {{
     padding: 8px 8px 6px 10px;
     border-bottom: 1px solid {border};
+    box-shadow: inset 0 2px 0 transparent;
+}}
+.flowmux-file-browser.focused .flowmux-file-browser-header {{
+    border-bottom: 1px solid {focus};
+    box-shadow: inset 0 2px 0 {focus};
+}}
+.flowmux-file-browser.focused .flowmux-file-browser-header .heading {{
+    color: {focus};
 }}
 .flowmux-file-browser-list {{
     background: transparent;

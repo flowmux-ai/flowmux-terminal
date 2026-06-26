@@ -1543,9 +1543,17 @@ impl WindowController {
     }
 
     async fn focus_direction_from_command(&self, from: Option<PaneId>, dir: FocusDir) {
-        if self.file_browser_active.get()
+        // While the file browser holds keyboard focus, its own Capture-phase key
+        // controller (file_browser.rs `handle_key`) intercepts plain Alt+arrow and
+        // routes it through `FileBrowserFocusOut`. So this command path is only
+        // reached when a *pane* — or nothing — is focused. Treat it as a focus-OUT
+        // strictly when no pane is focused (e.g. a side-panel click left the browser
+        // as the visible focus target). When a pane is focused, fall through: the old
+        // `from == source_pane` arm fired a no-op focus-out that swallowed the first
+        // Alt+arrow, so moving INTO the browser took two presses.
+        if from.is_none()
+            && self.file_browser_active.get()
             && self.file_browser_source_pane.get().is_some()
-            && (from.is_none() || from == self.file_browser_source_pane.get())
         {
             self.focus_out_of_file_browser(dir);
             return;
@@ -5897,19 +5905,9 @@ mod tests {
 
         controller.file_browser.widget().set_visible(true);
         controller.file_browser_source_pane.set(Some(pane));
-        controller.file_browser_active.set(true);
-        controller.focused_pane.set(None);
 
-        controller
-            .dispatch(GtkCommand::FocusDirection {
-                from: Some(pane),
-                dir: FocusDir::Left,
-            })
-            .await;
-
-        assert_eq!(controller.focused_pane.get(), Some(pane));
-        assert!(!controller.file_browser_active.get());
-
+        // No pane focused (e.g. after a side-panel click): the global FocusDirection
+        // command is the only way out of the browser, so it must focus-out.
         controller.file_browser_active.set(true);
         controller.focused_pane.set(None);
         controller
@@ -5921,6 +5919,37 @@ mod tests {
 
         assert_eq!(controller.focused_pane.get(), Some(pane));
         assert!(!controller.file_browser_active.get());
+    }
+
+    /// Regression: with a pane focused and the browser merely open, the first
+    /// Alt+Right must move INTO the browser. The old guard ran a no-op focus-out
+    /// when `from == source_pane`, which swallowed the first press (double-press bug).
+    #[cfg(not(target_os = "macos"))]
+    #[gtk::test]
+    async fn file_browser_alt_right_enters_browser_on_first_press() {
+        let (controller, _ws_id, pane) =
+            build_single_workspace_controller("com.flowmux.App.UiTest.FileBrowserAltRightIn").await;
+
+        controller.window.set_default_size(900, 600);
+        controller.window.present();
+        glib::timeout_future(std::time::Duration::from_millis(50)).await;
+
+        controller.file_browser.widget().set_visible(true);
+        controller.file_browser_source_pane.set(Some(pane));
+        controller.file_browser_active.set(true);
+        controller.focused_pane.set(Some(pane));
+
+        controller
+            .dispatch(GtkCommand::FocusDirection {
+                from: Some(pane),
+                dir: FocusDir::Right,
+            })
+            .await;
+
+        // Entered the browser: focus_file_browser keeps active true. The buggy
+        // focus-out path would have cleared it on this first press.
+        assert!(controller.file_browser_active.get());
+        assert_eq!(controller.file_browser_source_pane.get(), Some(pane));
     }
 
     #[cfg(not(target_os = "macos"))]
