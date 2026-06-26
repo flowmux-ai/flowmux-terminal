@@ -28,6 +28,7 @@ pub struct FileBrowserPanel {
     path_clipboard_writer: Rc<RefCell<Box<dyn Fn(&str)>>>,
     on_focus_out: Rc<RefCell<Option<Box<dyn Fn(FocusDir)>>>>,
     on_escape: Rc<RefCell<Option<Box<dyn Fn()>>>>,
+    on_focus_changed: Rc<RefCell<Option<Box<dyn Fn(bool)>>>>,
     #[cfg(all(test, not(target_os = "macos")))]
     rebuild_count: Rc<std::cell::Cell<usize>>,
 }
@@ -173,6 +174,7 @@ impl FileBrowserPanel {
             }))),
             on_focus_out: Rc::new(RefCell::new(None)),
             on_escape: Rc::new(RefCell::new(None)),
+            on_focus_changed: Rc::new(RefCell::new(None)),
             #[cfg(all(test, not(target_os = "macos")))]
             rebuild_count: Rc::new(std::cell::Cell::new(0)),
         };
@@ -198,6 +200,13 @@ impl FileBrowserPanel {
 
     pub fn connect_escape<F: Fn() + 'static>(&self, f: F) {
         *self.on_escape.borrow_mut() = Some(Box::new(f));
+    }
+
+    /// Notified with `true` when keyboard focus enters the file browser (or any
+    /// descendant) and `false` when it leaves. Drives the controller's notion of
+    /// whether the browser actually holds focus, which disambiguates Alt+arrow.
+    pub fn connect_focus_changed<F: Fn(bool) + 'static>(&self, f: F) {
+        *self.on_focus_changed.borrow_mut() = Some(Box::new(f));
     }
 
     #[cfg(all(test, not(target_os = "macos")))]
@@ -321,9 +330,21 @@ impl FileBrowserPanel {
     fn install_focus_style(&self) {
         let focus = gtk::EventControllerFocus::new();
         let root = self.root.clone();
-        focus.connect_enter(move |_| root.add_css_class("focused"));
+        let on_changed = self.on_focus_changed.clone();
+        focus.connect_enter(move |_| {
+            root.add_css_class("focused");
+            if let Some(cb) = on_changed.borrow().as_ref() {
+                cb(true);
+            }
+        });
         let root = self.root.clone();
-        focus.connect_leave(move |_| root.remove_css_class("focused"));
+        let on_changed = self.on_focus_changed.clone();
+        focus.connect_leave(move |_| {
+            root.remove_css_class("focused");
+            if let Some(cb) = on_changed.borrow().as_ref() {
+                cb(false);
+            }
+        });
         self.root.add_controller(focus);
     }
 

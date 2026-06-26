@@ -508,6 +508,13 @@ impl WindowController {
             file_browser_active_for_close.set(false);
             file_browser_for_close.hide();
         });
+        let file_browser_active_for_focus = file_browser_active.clone();
+        file_browser.connect_focus_changed(move |focused| {
+            // file_browser_active tracks whether the browser actually holds keyboard
+            // focus (not merely whether the panel is open), so Alt+arrow can tell
+            // "escape the browser" from "enter the browser".
+            file_browser_active_for_focus.set(focused);
+        });
         let file_browser_bridge = bridge.clone();
         file_browser.connect_focus_out(move |dir| {
             let bridge = file_browser_bridge.clone();
@@ -1478,13 +1485,13 @@ impl WindowController {
             if self.file_browser_source_pane.get() == Some(pane)
                 && self.file_browser.is_showing_root(&root)
             {
-                self.file_browser_active.set(true);
+                // Opening / refreshing the panel does not move keyboard focus into
+                // it — file_browser_active is driven by connect_focus_changed.
                 return;
             }
 
             self.save_file_browser_state_for_source();
             self.file_browser_source_pane.set(Some(pane));
-            self.file_browser_active.set(true);
             let width = self.window.width();
             if width > 420 {
                 self.file_browser_split.set_position((width - 320).max(240));
@@ -1543,17 +1550,18 @@ impl WindowController {
     }
 
     async fn focus_direction_from_command(&self, from: Option<PaneId>, dir: FocusDir) {
-        // While the file browser holds keyboard focus, its own Capture-phase key
-        // controller (file_browser.rs `handle_key`) intercepts plain Alt+arrow and
-        // routes it through `FileBrowserFocusOut`. So this command path is only
-        // reached when a *pane* — or nothing — is focused. Treat it as a focus-OUT
-        // strictly when no pane is focused (e.g. a side-panel click left the browser
-        // as the visible focus target). When a pane is focused, fall through: the old
-        // `from == source_pane` arm fired a no-op focus-out that swallowed the first
-        // Alt+arrow, so moving INTO the browser took two presses.
-        if from.is_none()
-            && self.file_browser_active.get()
+        // file_browser_active now means the browser actually holds keyboard focus
+        // (driven by connect_focus_changed), so it cleanly disambiguates the two
+        // jobs of this command:
+        //   * browser focused  -> Alt+arrow escapes OUT to a pane.
+        //   * a pane focused    -> Alt+arrow moves between panes / INTO the browser.
+        // `from` (from the keybinding's FocusedPane tracker) equals the source pane
+        // in BOTH cases because focusing the browser does not update that tracker, so
+        // gating on the focus flag is what makes the first Alt+arrow do the right
+        // thing instead of taking two presses.
+        if self.file_browser_active.get()
             && self.file_browser_source_pane.get().is_some()
+            && (from.is_none() || from == self.file_browser_source_pane.get())
         {
             self.focus_out_of_file_browser(dir);
             return;
@@ -5936,7 +5944,8 @@ mod tests {
 
         controller.file_browser.widget().set_visible(true);
         controller.file_browser_source_pane.set(Some(pane));
-        controller.file_browser_active.set(true);
+        // Panel open but the terminal pane holds focus: active is false.
+        controller.file_browser_active.set(false);
         controller.focused_pane.set(Some(pane));
 
         controller
@@ -5946,8 +5955,8 @@ mod tests {
             })
             .await;
 
-        // Entered the browser: focus_file_browser keeps active true. The buggy
-        // focus-out path would have cleared it on this first press.
+        // First Alt+Right enters the browser: focus_file_browser sets active true.
+        // The old buggy guard ran a no-op focus-out instead, needing a second press.
         assert!(controller.file_browser_active.get());
         assert_eq!(controller.file_browser_source_pane.get(), Some(pane));
     }
