@@ -994,7 +994,7 @@ dependencies = [
 
 [[package]]
 name = "flowmux"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -1033,7 +1033,7 @@ dependencies = [
 
 [[package]]
 name = "flowmux-browser"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "async-trait",
  "dirs",
@@ -1046,7 +1046,7 @@ dependencies = [
 
 [[package]]
 name = "flowmux-cli"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -1070,7 +1070,7 @@ dependencies = [
 
 [[package]]
 name = "flowmux-config"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1083,7 +1083,7 @@ dependencies = [
 
 [[package]]
 name = "flowmux-cookies"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1097,7 +1097,7 @@ dependencies = [
 
 [[package]]
 name = "flowmux-core"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "chrono",
  "serde",
@@ -1108,7 +1108,7 @@ dependencies = [
 
 [[package]]
 name = "flowmux-daemon"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1128,7 +1128,7 @@ dependencies = [
 
 [[package]]
 name = "flowmux-ipc"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1144,7 +1144,7 @@ dependencies = [
 
 [[package]]
 name = "flowmux-notify"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1159,7 +1159,7 @@ dependencies = [
 
 [[package]]
 name = "flowmux-procmon"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "anyhow",
  "libc",
@@ -1169,7 +1169,7 @@ dependencies = [
 
 [[package]]
 name = "flowmux-ssh"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1183,7 +1183,7 @@ dependencies = [
 
 [[package]]
 name = "flowmux-state"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1199,7 +1199,7 @@ dependencies = [
 
 [[package]]
 name = "flowmux-terminal"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "cc",
  "flowmux-core",
@@ -1209,7 +1209,7 @@ dependencies = [
 
 [[package]]
 name = "flowmux-vcs"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "anyhow",
  "flowmux-core",
