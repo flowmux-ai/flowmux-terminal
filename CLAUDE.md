@@ -57,9 +57,10 @@ more, and `flowmux-terminal` is in `default-members`, so even a bare
 the Zig requirement). `read-screen` reads the viewport straight from the
 libghostty grid, so it needs no extra feature.
 
-CJK note: the libghostty renderer substitutes a CJK monospace face
-("Noto Sans Mono CJK KR") when the configured font is the generic `monospace`,
-so Hangul/CJK fills two cells naturally.
+CJK note: the libghostty renderer keeps the configured font family unchanged.
+Pango/fontconfig performs fallback for missing Hangul/CJK glyphs, and the
+renderer centers wide glyphs inside their two-cell box without changing the
+Latin font metrics.
 
 The Flatpak build (Ubuntu 22.04 path) is described in `README.md`
 under "Ubuntu 22.04 (jammy) support". `flowmux doctor` / `flowmux fix`

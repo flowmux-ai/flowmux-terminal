@@ -21,7 +21,7 @@
 
 use crate::bridge::{Bridge, FocusDir, GtkCommand, WsNav};
 use crate::ui::pane_terminal::PaneTerminal;
-use crate::ui::pane_terminal::ALT_ENTER_BYTES;
+use crate::ui::pane_terminal::INSERT_NEWLINE_BYTES;
 use crate::ui::window::ClipboardToast;
 use adw::prelude::*;
 use flowmux_config::keybindings::{ActionId, KeybindingOverrides};
@@ -312,6 +312,24 @@ pub fn install_actions(
             .build()
     };
 
+    // Toggle the right-side file browser for the focused pane. `None` lets the
+    // window dispatcher resolve the focused pane (same path as the side-panel
+    // footer button).
+    let toggle_file_browser = {
+        let bridge = bridge.clone();
+        gtk::gio::ActionEntry::builder("toggle-file-browser")
+            .activate(move |_, _, _| {
+                let bridge = bridge.clone();
+                glib::MainContext::default().spawn_local(async move {
+                    let _ = bridge
+                        .tx
+                        .send(GtkCommand::ToggleFileBrowser { pane: None })
+                        .await;
+                });
+            })
+            .build()
+    };
+
     let [w1, w2, w3, w4, w5, w6, w7, w8] = ws_jumps;
     window.add_action_entries([
         split_right,
@@ -343,6 +361,7 @@ pub fn install_actions(
         paste,
         insert_newline,
         copy_pane_path,
+        toggle_file_browser,
     ]);
 }
 
@@ -620,12 +639,16 @@ fn make_copy_action(
             };
             // No selection means there is nothing to copy, and we want
             // to leave whatever is already on the clipboard untouched
-            // (e.g. text the user copied from another app).
+            // (e.g. text the user copied from another app). Only surface the
+            // "copied" toast when text was actually placed on the clipboard;
+            // `has_selection()` can be stale (output scrolled the selection
+            // away), so trusting it would show a toast for an empty copy.
             if !term.has_selection() {
                 return;
             }
-            term.copy_selection_to_clipboard();
-            clipboard_toast.show();
+            if term.copy_selection_to_clipboard() {
+                clipboard_toast.show();
+            }
         })
         .build()
 }
@@ -645,7 +668,7 @@ fn make_insert_newline_action(
             if !window_focus_is_terminal(&window, term) {
                 return;
             }
-            term.feed_after_preedit_commit(ALT_ENTER_BYTES);
+            term.feed_after_preedit_commit(INSERT_NEWLINE_BYTES);
         })
         .build()
 }

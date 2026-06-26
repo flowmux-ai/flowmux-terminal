@@ -13,6 +13,7 @@
 //! exposes no viewport-offset query) — wheel scrolling works regardless.
 
 use std::cell::{Cell, RefCell};
+use std::io;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -30,6 +31,10 @@ use crate::ui::pane_terminal::PaneCallbacks;
 
 const DEFAULT_FONT: &str = "Monospace 12";
 const SCROLLBACK: usize = 10_000;
+/// Shift+Enter inserts a literal newline in common shell line editors without
+/// submitting the command: Ctrl+V quotes the following Ctrl+J/LF. Quoting
+/// Enter/CR instead inserts a visible `^M`.
+pub const INSERT_NEWLINE_BYTES: &[u8] = b"\x16\n";
 /// Right-edge gutter reserved for the overlaid scrollbar (its 12px width plus a
 /// little slack). Terminal columns are computed against the width minus this so
 /// content never renders under the scrollbar — which made a long line at the
@@ -83,6 +88,8 @@ struct State {
     last_cwd: Option<PathBuf>,
 }
 
+type PendingInput = Rc<RefCell<Option<Vec<u8>>>>;
+
 impl State {
     /// Recompute cell metrics for the current (scaled) font.
     fn remeasure(&mut self) {
@@ -114,6 +121,8 @@ pub struct GhosttyPane {
     area: gtk::DrawingArea,
     state: Rc<RefCell<State>>,
     pid: Rc<Cell<Option<i32>>>,
+    im: gtk::IMMulticontext,
+    pending_after_preedit: PendingInput,
     /// Overlaid vertical scrollbar + its adjustment, shown only when scrollback
     /// exists. `syncing` suppresses the value-changed handler while we push the
     /// terminal's own scroll position into the adjustment.
@@ -134,7 +143,7 @@ impl GhosttyPane {
         extra_env: Vec<(String, String)>,
         callbacks: PaneCallbacks,
     ) -> Self {
-        let font = cjk_friendly_font(&pango::FontDescription::from_string(DEFAULT_FONT));
+        let font = pango::FontDescription::from_string(DEFAULT_FONT);
         let (cell_w, cell_h, ascent) = measure_cell(&font);
 
         // Initial geometry; the first allocation resizes to fit.
@@ -210,6 +219,9 @@ impl GhosttyPane {
         scrollbar.set_visible(false);
         container.add_overlay(&scrollbar);
 
+        let im = gtk::IMMulticontext::new();
+        let pending_after_preedit = Rc::new(RefCell::new(None));
+
         let pane = GhosttyPane {
             id,
             surface,
@@ -217,6 +229,8 @@ impl GhosttyPane {
             area: area.clone(),
             state: state.clone(),
             pid: pid.clone(),
+            im,
+            pending_after_preedit,
             scrollbar,
             adj,
             syncing: Rc::new(Cell::new(false)),
@@ -330,12 +344,13 @@ impl GhosttyPane {
 
     fn install_input(&self) {
         let key = gtk::EventControllerKey::new();
+        let im = self.im.clone();
+        let pending_after_preedit = self.pending_after_preedit.clone();
 
         // IME: route committed text (e.g. composed Hangul syllables) to the PTY
         // and show the in-progress preedit inline at the cursor. Setting the IM
         // context makes the controller filter text keys through the IME first,
         // so key-pressed below only fires for keys the IME did not consume.
-        let im = gtk::IMMulticontext::new();
         key.set_im_context(Some(&im));
 
         // Non-text keys (control combos, navigation, function, Enter/Tab/…) are
@@ -349,16 +364,31 @@ impl GhosttyPane {
             let adj = self.adj.clone();
             let scrollbar = self.scrollbar.clone();
             let syncing = self.syncing.clone();
+            let pending_after_preedit = pending_after_preedit.clone();
             key.connect_key_pressed(move |_kc, keyval, _code, gtk_mods| {
-                // Commit any in-progress IME text before this (non-consumed)
-                // key acts, so e.g. Shift+Enter newlines AFTER the composing
-                // syllable instead of stranding it after the newline. Scope the
-                // borrow so the synchronous commit signal can borrow_mut.
-                let composing = !state.borrow().preedit.is_empty();
-                if composing {
-                    im_for_key.reset();
+                if is_modifier_only_key(keyval) {
+                    return glib::Propagation::Proceed;
                 }
+
                 let mods = mods_from_state(gtk_mods);
+
+                if is_insert_newline_key(keyval, mods) {
+                    if queue_after_preedit_if_needed(
+                        &state,
+                        &pending_after_preedit,
+                        &im_for_key,
+                        INSERT_NEWLINE_BYTES,
+                    ) {
+                        return glib::Propagation::Stop;
+                    }
+                    let mut s = state.borrow_mut();
+                    let _ = s.pty.write(INSERT_NEWLINE_BYTES);
+                    s.vt.scroll_to_bottom();
+                    drop(s);
+                    area.queue_draw();
+                    sync_scrollbar_adj(&state, &adj, &scrollbar, &syncing);
+                    return glib::Propagation::Stop;
+                }
 
                 // Smart paging: PgUp/PgDn page through local scrollback when
                 // there is some (Shift always pages), matching the VTE path;
@@ -387,6 +417,16 @@ impl GhosttyPane {
                 let mut s = state.borrow_mut();
                 match s.vt.encode_key(named, cp, mods, false) {
                     Some(bytes) => {
+                        drop(s);
+                        if queue_after_preedit_if_needed(
+                            &state,
+                            &pending_after_preedit,
+                            &im_for_key,
+                            &bytes,
+                        ) {
+                            return glib::Propagation::Stop;
+                        }
+                        let mut s = state.borrow_mut();
                         let _ = s.pty.write(&bytes);
                         // Snap the viewport to the live row on input, so typing
                         // while scrolled up brings the view back (matches VTE's
@@ -407,10 +447,12 @@ impl GhosttyPane {
             let adj = self.adj.clone();
             let scrollbar = self.scrollbar.clone();
             let syncing = self.syncing.clone();
+            let pending_after_preedit = pending_after_preedit.clone();
             im.connect_commit(move |_im, text| {
                 let mut s = state.borrow_mut();
                 s.preedit.clear();
-                let _ = s.pty.write(text.as_bytes());
+                let bytes = commit_bytes_with_pending(text, &pending_after_preedit);
+                let _ = s.pty.write(&bytes);
                 s.vt.scroll_to_bottom();
                 drop(s);
                 area.queue_draw();
@@ -495,11 +537,15 @@ impl GhosttyPane {
             let state = self.state.clone();
             let area = self.area.clone();
             let on_open_url = callbacks.on_open_url.clone();
+            let on_focus = callbacks.on_focus.clone();
             let id = self.id;
             // Clones for the right-click context menu (cheap: refcounted handles).
             let pane_for_menu = self.clone();
             let cb_for_menu = callbacks.clone();
             click.connect_pressed(move |g, _n, x, y| {
+                area.grab_focus();
+                (on_focus.borrow_mut())(id);
+
                 let button = g.current_button();
                 let mods = mods_from_state(g.current_event_state());
                 let mut s = state.borrow_mut();
@@ -664,7 +710,7 @@ impl GhosttyPane {
         // set_font_scale (which borrows again) to avoid a RefCell double-borrow.
         let scale = {
             let mut s = self.state.borrow_mut();
-            s.font = cjk_friendly_font(desc);
+            s.font = desc.clone();
             s.font_scale
         };
         self.set_font_scale(scale);
@@ -698,22 +744,35 @@ impl GhosttyPane {
         self.state.borrow().has_sel
     }
 
-    pub fn copy_selection_to_clipboard(&self) {
+    /// Copy the live selection to the clipboard. Returns `true` only when
+    /// non-empty text was actually placed on the clipboard, so callers can
+    /// gate a "copied" toast on a real copy rather than the cached `has_sel`
+    /// flag — which drifts out of sync when output scrolls the viewport and
+    /// libghostty silently drops its viewport-anchored selection.
+    pub fn copy_selection_to_clipboard(&self) -> bool {
         let text = {
             let mut s = self.state.borrow_mut();
             if !s.has_sel {
-                return;
+                return false;
             }
             // Refresh the snapshot so selection_text reads current `selected`
             // flags, then extract the selected run.
             s.vt.update();
-            s.vt.selection_text()
-        };
-        if let Some(text) = text.filter(|t| !t.is_empty()) {
-            if let Some(display) = gdk::Display::default() {
-                display.clipboard().set_text(&text);
+            // The viewport-anchored selection may have been dropped by
+            // libghostty (e.g. new output scrolled it away); reflect that in
+            // our cached flag so a stale selection can't lie to callers.
+            let text = s.vt.selection_text().filter(|t| !t.is_empty());
+            if text.is_none() {
+                s.has_sel = false;
             }
-        }
+            text
+        };
+        let Some(text) = text else { return false };
+        let Some(display) = gdk::Display::default() else {
+            return false;
+        };
+        display.clipboard().set_text(&text);
+        true
     }
 
     pub fn paste_clipboard(&self) {
@@ -832,26 +891,38 @@ impl GhosttyPane {
         popover.popup();
     }
 
-    /// Inject bytes into the terminal display (not the child). Mirrors
-    /// `TerminalPane::feed` (used to surface inline messages).
-    pub fn feed(&self, bytes: &[u8]) {
-        self.state.borrow_mut().vt.write(bytes);
+    /// Send raw bytes to the child PTY (`flowmux send-keys` / `send-key`).
+    pub fn write_input(&self, mut bytes: &[u8]) -> io::Result<()> {
+        let mut s = self.state.borrow_mut();
+        while !bytes.is_empty() {
+            let n = s.pty.write(bytes)?;
+            if n == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "pty write returned 0",
+                ));
+            }
+            bytes = &bytes[n..];
+        }
+        s.vt.scroll_to_bottom();
+        drop(s);
         self.area.queue_draw();
+        sync_scrollbar_adj(&self.state, &self.adj, &self.scrollbar, &self.syncing);
+        Ok(())
     }
 
     pub fn feed_after_preedit_commit(&self, bytes: &'static [u8]) {
+        if queue_after_preedit_if_needed(&self.state, &self.pending_after_preedit, &self.im, bytes)
         {
-            let mut s = self.state.borrow_mut();
-            let _ = s.pty.write(bytes);
-            s.vt.scroll_to_bottom();
+            return;
         }
-        self.area.queue_draw();
-        sync_scrollbar_adj(&self.state, &self.adj, &self.scrollbar, &self.syncing);
+        let _ = self.write_input(bytes);
     }
 
     /// Visible screen text (all viewport rows joined), for `read-screen`.
     pub fn screen_text(&self) -> Option<String> {
-        let s = self.state.borrow();
+        let mut s = self.state.borrow_mut();
+        s.vt.update();
         let (_, rows) = s.vt.dims().unwrap_or((s.cols, s.rows));
         let mut out = String::new();
         for row in 0..rows {
@@ -931,26 +1002,6 @@ fn sync_scrollbar_adj(
 
 fn rgb(c: Rgb) -> (f64, f64, f64) {
     (c.r as f64 / 255.0, c.g as f64 / 255.0, c.b as f64 / 255.0)
-}
-
-/// Pick a CJK-capable monospace font when the configured font is the generic
-/// `monospace` default. Pango's automatic CJK fallback for a generic monospace
-/// request is a *proportional* CJK face (~1.5 cells), which leaves Hangul/CJK
-/// loosely spaced; a real CJK monospace face fills two cells naturally. A user
-/// who set an explicit font family is respected as-is.
-fn cjk_friendly_font(desc: &pango::FontDescription) -> pango::FontDescription {
-    let family = desc.family().map(|s| s.to_string()).unwrap_or_default();
-    let is_generic = family.is_empty()
-        || family.eq_ignore_ascii_case("monospace")
-        || family.eq_ignore_ascii_case("mono");
-    let mut out = desc.clone();
-    if is_generic {
-        // If this font is not installed, Pango falls back to the generic
-        // monospace, i.e. the previous behavior — so this only ever improves
-        // CJK rendering, never breaks Latin.
-        out.set_family("Noto Sans Mono CJK KR");
-    }
-    out
 }
 
 /// Map a surface pixel position to a viewport cell, clamped to the grid.
@@ -1041,6 +1092,69 @@ fn find_url_at(line: &str, col: usize) -> Option<String> {
     } else {
         None
     }
+}
+
+fn is_modifier_only_key(keyval: gdk::Key) -> bool {
+    use gdk::Key;
+    matches!(
+        keyval,
+        Key::Shift_L
+            | Key::Shift_R
+            | Key::Shift_Lock
+            | Key::Control_L
+            | Key::Control_R
+            | Key::Alt_L
+            | Key::Alt_R
+            | Key::Meta_L
+            | Key::Meta_R
+            | Key::Super_L
+            | Key::Super_R
+            | Key::Hyper_L
+            | Key::Hyper_R
+            | Key::Caps_Lock
+            | Key::Num_Lock
+            | Key::Scroll_Lock
+            | Key::ISO_Level3_Shift
+            | Key::ISO_Level5_Shift
+            | Key::Mode_switch
+    )
+}
+
+fn is_insert_newline_key(keyval: gdk::Key, mods: u8) -> bool {
+    use gdk::Key;
+    mods == flowmux_terminal::vt::MOD_SHIFT
+        && matches!(keyval, Key::Return | Key::KP_Enter | Key::ISO_Enter)
+}
+
+fn queue_after_preedit_if_needed(
+    state: &Rc<RefCell<State>>,
+    pending: &PendingInput,
+    im: &gtk::IMMulticontext,
+    bytes: &[u8],
+) -> bool {
+    if state.borrow().preedit.is_empty() {
+        return false;
+    }
+    queue_pending_input(pending, bytes);
+    im.reset();
+    true
+}
+
+fn queue_pending_input(pending: &PendingInput, bytes: &[u8]) {
+    let mut pending = pending.borrow_mut();
+    if let Some(existing) = pending.as_mut() {
+        existing.extend_from_slice(bytes);
+    } else {
+        *pending = Some(bytes.to_vec());
+    }
+}
+
+fn commit_bytes_with_pending(text: &str, pending: &PendingInput) -> Vec<u8> {
+    let mut bytes = Vec::from(text.as_bytes());
+    if let Some(pending) = pending.borrow_mut().take() {
+        bytes.extend_from_slice(&pending);
+    }
+    bytes
 }
 
 /// Tell the IME where the cursor is so the candidate window appears near the
@@ -1296,7 +1410,14 @@ fn map_keyval(keyval: gdk::Key) -> (i32, u32) {
 
 #[cfg(test)]
 mod tests {
-    use super::find_url_at;
+    use super::{
+        commit_bytes_with_pending, find_url_at, is_insert_newline_key, is_modifier_only_key,
+        queue_pending_input, PendingInput, INSERT_NEWLINE_BYTES,
+    };
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use gtk::gdk;
 
     #[test]
     fn finds_http_url_under_column() {
@@ -1330,5 +1451,58 @@ mod tests {
     fn no_url_on_plain_or_whitespace() {
         assert_eq!(find_url_at("just some words here", 5), None);
         assert_eq!(find_url_at("a  b", 1), None); // whitespace column
+    }
+
+    #[test]
+    fn modifier_key_does_not_force_ime_preedit_reset() {
+        assert!(is_modifier_only_key(gdk::Key::Shift_L));
+        assert!(is_modifier_only_key(gdk::Key::Shift_R));
+        assert!(is_modifier_only_key(gdk::Key::ISO_Level3_Shift));
+        assert!(!is_modifier_only_key(gdk::Key::T));
+        assert!(!is_modifier_only_key(gdk::Key::Return));
+    }
+
+    #[test]
+    fn shift_enter_is_terminal_insert_newline_shortcut() {
+        assert_eq!(INSERT_NEWLINE_BYTES, b"\x16\n");
+        assert!(is_insert_newline_key(
+            gdk::Key::Return,
+            flowmux_terminal::vt::MOD_SHIFT
+        ));
+        assert!(is_insert_newline_key(
+            gdk::Key::KP_Enter,
+            flowmux_terminal::vt::MOD_SHIFT
+        ));
+        assert!(is_insert_newline_key(
+            gdk::Key::ISO_Enter,
+            flowmux_terminal::vt::MOD_SHIFT
+        ));
+        assert!(!is_insert_newline_key(gdk::Key::Return, 0));
+        assert!(!is_insert_newline_key(
+            gdk::Key::Return,
+            flowmux_terminal::vt::MOD_SHIFT | flowmux_terminal::vt::MOD_CTRL
+        ));
+    }
+
+    #[test]
+    fn pending_input_is_written_after_ime_commit_text() {
+        let pending: PendingInput = Rc::new(RefCell::new(None));
+        queue_pending_input(&pending, INSERT_NEWLINE_BYTES);
+
+        let bytes = commit_bytes_with_pending("녕", &pending);
+
+        let mut expected = Vec::from("녕".as_bytes());
+        expected.extend_from_slice(INSERT_NEWLINE_BYTES);
+        assert_eq!(bytes, expected);
+        assert!(pending.borrow().is_none());
+    }
+
+    #[test]
+    fn pending_input_preserves_queue_order() {
+        let pending: PendingInput = Rc::new(RefCell::new(None));
+        queue_pending_input(&pending, b"a");
+        queue_pending_input(&pending, b"b");
+
+        assert_eq!(commit_bytes_with_pending("녕", &pending), "녕ab".as_bytes());
     }
 }

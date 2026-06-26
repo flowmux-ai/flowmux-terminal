@@ -69,6 +69,8 @@ pub enum ActionId {
     /// Copy the focused pane's current working directory to the system
     /// clipboard and surface a toast confirming what was copied.
     CopyPanePath,
+    /// Toggle the right-side file browser for the focused pane.
+    ToggleFileBrowser,
 }
 
 impl ActionId {
@@ -102,6 +104,7 @@ impl ActionId {
             Self::NewWindow => "new-window",
             Self::CommandPalette => "command-palette",
             Self::CopyPanePath => "copy-pane-path",
+            Self::ToggleFileBrowser => "toggle-file-browser",
         }
     }
 
@@ -136,6 +139,7 @@ impl ActionId {
             Self::NewWindow => "New window",
             Self::CommandPalette => "Command palette",
             Self::CopyPanePath => "Copy focused pane path",
+            Self::ToggleFileBrowser => "Toggle file browser",
         }
     }
 
@@ -173,6 +177,7 @@ impl ActionId {
             Self::NewWindow,
             Self::CommandPalette,
             Self::CopyPanePath,
+            Self::ToggleFileBrowser,
         ]
     }
 
@@ -232,6 +237,7 @@ const DEFAULTS: &[(ActionId, &[&str])] = &[
     (ActionId::NewWindow, &["<Ctrl><Shift>n"]),
     (ActionId::CommandPalette, &["<Ctrl><Shift>p"]),
     (ActionId::CopyPanePath, &["<Ctrl><Shift>k"]),
+    (ActionId::ToggleFileBrowser, &["<Ctrl><Alt>f"]),
 ];
 
 /// Built-in default accelerators. The first install path reads this and

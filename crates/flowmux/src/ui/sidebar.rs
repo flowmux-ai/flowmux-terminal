@@ -195,6 +195,28 @@ impl Sidebar {
         });
         footer.append(&options_btn);
 
+        // File browser toggle, right-aligned in the footer (opposite the
+        // Options button). Sends `None` so the window dispatcher targets the
+        // focused pane (the footer has no pane context). Same Ctrl+Alt+F path.
+        let file_browser_btn = gtk::Button::from_icon_name("folder-symbolic");
+        file_browser_btn.add_css_class("flat");
+        file_browser_btn.set_tooltip_text(Some("File browser (Ctrl+Alt+F)"));
+        file_browser_btn.set_focus_on_click(false);
+        file_browser_btn.add_css_class("flowmux-sidebar-options");
+        file_browser_btn.set_hexpand(true);
+        file_browser_btn.set_halign(gtk::Align::End);
+        let bridge_for_files = bridge.clone();
+        file_browser_btn.connect_clicked(move |_| {
+            let bridge = bridge_for_files.clone();
+            gtk::glib::MainContext::default().spawn_local(async move {
+                let _ = bridge
+                    .tx
+                    .send(GtkCommand::ToggleFileBrowser { pane: None })
+                    .await;
+            });
+        });
+        footer.append(&file_browser_btn);
+
         // ---- Outer vbox: toolbar + list + footer ----
         let root_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root_box.append(&toolbar);

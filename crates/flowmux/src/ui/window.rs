@@ -2138,8 +2138,15 @@ impl WindowController {
                         .await;
                 }
             }
-            GtkCommand::ShowFileBrowser { pane } => {
-                self.show_file_browser_for_pane(pane).await;
+            GtkCommand::ToggleFileBrowser { pane } => {
+                // `None` comes from the side-panel footer button / Ctrl+Alt+F,
+                // which have no pane context — target the focused pane.
+                // Already visible → close; otherwise open for that pane.
+                if self.file_browser.widget().is_visible() {
+                    self.close_file_browser_and_restore_focus();
+                } else if let Some(pane) = pane.or_else(|| self.focused_pane.get()) {
+                    self.show_file_browser_for_pane(pane).await;
+                }
             }
             GtkCommand::OpenUrlInBrowserTab { pane, url } => {
                 // Open a Ctrl-clicked terminal URL in a new browser tab in the
@@ -2762,10 +2769,7 @@ impl WindowController {
             GtkCommand::PaneSendKeys { pane, keys, ack } => {
                 let registry = self.pane_registry.borrow();
                 let res = match registry.active_terminal(pane) {
-                    Some(p) => {
-                        p.feed(keys.as_bytes());
-                        Ok(())
-                    }
+                    Some(p) => p.write_input(keys.as_bytes()).map_err(|e| e.to_string()),
                     None => Err(format!("pane not found: {pane}")),
                 };
                 let _ = ack.send(res);
@@ -4020,15 +4024,6 @@ fn make_callbacks(
                 let bridge = bridge.clone();
                 glib::MainContext::default().spawn_local(async move {
                     let _ = bridge.tx.send(GtkCommand::NewBrowserSurface { pane }).await;
-                });
-            }))
-        },
-        on_show_file_browser: {
-            let bridge = bridge.clone();
-            Rc::new(RefCell::new(move |pane| {
-                let bridge = bridge.clone();
-                glib::MainContext::default().spawn_local(async move {
-                    let _ = bridge.tx.send(GtkCommand::ShowFileBrowser { pane }).await;
                 });
             }))
         },

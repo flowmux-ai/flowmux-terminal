@@ -845,13 +845,8 @@ fn build_leaf_pane(
     }
     tools.append(&add_browser);
 
-    let file_browser = pane_tool_button("folder-symbolic", "File browser");
-    {
-        let cb = callbacks.on_show_file_browser.clone();
-        let pane_id = pane_id;
-        file_browser.connect_clicked(move |_| (cb.borrow_mut())(pane_id));
-    }
-    tools.append(&file_browser);
+    // The File browser toggle lives in the side-panel footer (next to the
+    // Options button), not in the per-pane tool row.
 
     stack.set_visible_child_name(&active.to_string());
     tabbar.append(&tabs);

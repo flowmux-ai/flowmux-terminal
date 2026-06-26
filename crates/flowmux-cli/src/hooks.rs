@@ -13,7 +13,6 @@
 //! so we resolve the workspace eagerly via the daemon (already done by
 //! `Request::Notify`) and otherwise do minimal work.
 
-use anyhow::Context;
 use flowmux_core::{AgentActivity, NotificationLevel, PaneId, SurfaceId};
 use flowmux_ipc::{
     client::Client,

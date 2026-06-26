@@ -18,9 +18,9 @@ use crate::ui::ghostty_pane::GhosttyPane;
 /// The terminal pane type used throughout the GUI.
 pub type PaneTerminal = GhosttyPane;
 
-/// Alt+Enter → `ESC CR`: insert a newline at the prompt without submitting.
-/// Sent after committing any in-progress IME text (see GhosttyPane input).
-pub const ALT_ENTER_BYTES: &[u8] = b"\x1b\r";
+/// Shift+Enter input sequence: insert a literal newline at the prompt without
+/// submitting, after committing any in-progress IME text.
+pub use crate::ui::ghostty_pane::INSERT_NEWLINE_BYTES;
 
 /// Per-pane callbacks the surface backends invoke to drive the window
 /// controller (focus, tab/pane menu actions, title changes, …). Shared by
@@ -41,7 +41,6 @@ pub struct PaneCallbacks {
     pub on_new_surface: Rc<RefCell<dyn FnMut(PaneId)>>,
     /// Pane-local new browser tab.
     pub on_new_browser_surface: Rc<RefCell<dyn FnMut(PaneId)>>,
-    pub on_show_file_browser: Rc<RefCell<dyn FnMut(PaneId)>>,
     /// Pane-local close tab.
     pub on_close_surface: Rc<RefCell<dyn FnMut(PaneId, SurfaceId)>>,
     /// Pane-local rename tab.
