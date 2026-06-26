@@ -208,15 +208,30 @@ pub mod named_key {
     }
 }
 
-/// Read a NUL-terminated string the shim writes into a caller buffer.
+thread_local! {
+    /// Reused scratch for [`read_c_string`]. title()/pwd() run on every PTY
+    /// read; a fresh 4 KiB `Vec` per call was pure allocator churn in the hot
+    /// path. The buffer is per-thread and only grows, never reallocated.
+    static CSTR_SCRATCH: std::cell::RefCell<Vec<c_char>> =
+        std::cell::RefCell::new(vec![0; 4096]);
+}
+
+/// Read a NUL-terminated string the shim writes into a caller buffer. Reuses a
+/// thread-local scratch buffer to avoid allocating on every call; only the
+/// returned `String` is freshly allocated.
 fn read_c_string(f: impl Fn(*mut c_char, usize) -> usize) -> Option<String> {
-    let mut buf = vec![0i8; 4096];
-    let n = f(buf.as_mut_ptr(), buf.len());
-    if n == 0 {
-        return None;
-    }
-    let bytes: Vec<u8> = buf[..n].iter().map(|&b| b as u8).collect();
-    Some(String::from_utf8_lossy(&bytes).into_owned())
+    CSTR_SCRATCH.with(|scratch| {
+        let mut buf = scratch.borrow_mut();
+        let cap = buf.len();
+        let n = f(buf.as_mut_ptr(), cap);
+        if n == 0 {
+            return None;
+        }
+        // The shim never writes past `cap`; reinterpret the written prefix as
+        // bytes (c_char may be i8) without the intermediate per-byte copy.
+        let bytes = unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, n) };
+        Some(String::from_utf8_lossy(bytes).into_owned())
+    })
 }
 
 /// A 24-bit RGB color resolved by libghostty (palette + style flattened).
@@ -279,6 +294,11 @@ pub struct Colors {
 /// from a single thread (the GTK main thread in the GUI).
 pub struct Vt {
     ctx: *mut FxvtCtx,
+    /// Reused raw-cell scratch for [`Vt::read_grid_into`]. The renderer calls it
+    /// every frame; keeping the buffer here avoids allocating and freeing a
+    /// full `cols*rows` grid on each draw. Interior mutability keeps the read
+    /// API `&self`.
+    raw_scratch: std::cell::RefCell<Vec<FxvtCell>>,
 }
 
 impl Vt {
@@ -288,7 +308,10 @@ impl Vt {
         if ctx.is_null() {
             None
         } else {
-            Some(Self { ctx })
+            Some(Self {
+                ctx,
+                raw_scratch: std::cell::RefCell::new(Vec::new()),
+            })
         }
     }
 
@@ -404,10 +427,27 @@ impl Vt {
     /// content). This is the renderer's hot path — far cheaper than calling
     /// [`Vt::cell`] per cell, which re-seeks the row iterator every time.
     pub fn read_grid(&self, cols: u16, rows: u16) -> Vec<Cell> {
+        let mut out = Vec::new();
+        self.read_grid_into(cols, rows, &mut out);
+        out
+    }
+
+    /// Like [`Vt::read_grid`] but reuses the caller's `out` `Vec` (and an
+    /// internal raw-cell scratch) instead of allocating fresh buffers. The
+    /// renderer calls this every frame, so reusing both buffers removes two
+    /// full-grid allocations per draw. `out` is cleared and refilled.
+    ///
+    /// The raw scratch must be zeroed each call: `fxvt_read_grid` only writes
+    /// the cells the row iterator yields, leaving trailing cells (short rows /
+    /// fewer rows than the viewport) untouched, and those must read back blank.
+    pub fn read_grid_into(&self, cols: u16, rows: u16, out: &mut Vec<Cell>) {
         let n = cols as usize * rows as usize;
-        let mut raw = vec![FxvtCell::zeroed(); n];
+        let mut raw = self.raw_scratch.borrow_mut();
+        raw.clear();
+        raw.resize(n, FxvtCell::zeroed());
         unsafe { fxvt_read_grid(self.ctx, raw.as_mut_ptr(), cols, rows) };
-        raw.iter().map(cell_from_raw).collect()
+        out.clear();
+        out.extend(raw.iter().map(cell_from_raw));
     }
 
     /// Set the active selection to the inclusive viewport range

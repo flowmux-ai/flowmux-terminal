@@ -25,7 +25,7 @@ use gtk::prelude::*;
 
 use flowmux_core::{PaneId, SurfaceId};
 use flowmux_terminal::pty::Pty;
-use flowmux_terminal::vt::{Colors, MouseAction, MouseButton, Rgb, Vt};
+use flowmux_terminal::vt::{Cell as VtCell, Colors, MouseAction, MouseButton, Rgb, Vt};
 
 use crate::ui::pane_terminal::PaneCallbacks;
 
@@ -101,6 +101,9 @@ struct State {
     blink_enabled: bool,
     blink_phase_on: bool,
     focused: bool,
+    /// Reused per-frame buffer for `Vt::read_grid_into`, so the draw callback
+    /// doesn't allocate a fresh `cols*rows` cell `Vec` on every repaint.
+    grid_scratch: Vec<VtCell>,
 }
 
 type PendingInput = Rc<RefCell<Option<Vec<u8>>>>;
@@ -149,6 +152,10 @@ pub struct GhosttyPane {
     /// the old source and installs a new one whenever the setting changes.
     blink_source: Rc<RefCell<Option<glib::SourceId>>>,
     blink_interval_ms: Rc<Cell<u32>>,
+    /// Last cwd reported by the 1-second poll fallback. The poll diffs against
+    /// this so unchanged panes never reach the daemon state mutex; only a real
+    /// `cd` (on OSC-7-naive shells) takes the lock + tree walk.
+    last_polled_cwd: Rc<RefCell<Option<PathBuf>>>,
 }
 
 impl GhosttyPane {
@@ -219,6 +226,7 @@ impl GhosttyPane {
             anchor: (0, 0),
             last_title: String::new(),
             last_cwd: None,
+            grid_scratch: Vec::new(),
         }));
 
         let area = gtk::DrawingArea::new();
@@ -262,6 +270,7 @@ impl GhosttyPane {
             blink_interval_ms: Rc::new(Cell::new(
                 flowmux_config::options::CURSOR_BLINK_INTERVAL_DEFAULT,
             )),
+            last_polled_cwd: Rc::new(RefCell::new(None)),
         };
 
         pane.install_draw();
@@ -822,6 +831,21 @@ impl GhosttyPane {
         std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
     }
 
+    /// Poll variant of [`current_dir`]: returns the cwd only when it changed
+    /// since the previous poll. Unchanged panes return `None`, so the 1-second
+    /// fallback never takes the daemon state mutex for an idle terminal — the
+    /// per-tick cost stays a single `/proc` readlink, not a global lock + tree
+    /// walk that scales with workspace/tab count.
+    pub fn poll_cwd_if_changed(&self) -> Option<PathBuf> {
+        let cwd = self.current_dir()?;
+        let mut last = self.last_polled_cwd.borrow_mut();
+        if last.as_ref() == Some(&cwd) {
+            return None;
+        }
+        *last = Some(cwd.clone());
+        Some(cwd)
+    }
+
     pub fn set_font_scale(&self, scale: f64) {
         let mut s = self.state.borrow_mut();
         s.font_scale = if scale > 0.0 { scale } else { 1.0 };
@@ -1358,6 +1382,10 @@ fn draw(state: &mut State, cr: &cairo::Context, w: i32, h: i32) {
 
     let layout = pangocairo::functions::create_layout(cr);
     layout.set_font_description(Some(&state.scaled_font()));
+    // Baseline of the primary monospace font. It does not vary across ASCII
+    // cells, so query it once here instead of per cell in the glyph pass below.
+    layout.set_text("M");
+    let primary_baseline = layout.baseline() as f64 / pango::SCALE as f64;
 
     let (cols, rows) = state.vt.dims().unwrap_or((state.cols, state.rows));
     let cw = state.cell_w;
@@ -1380,7 +1408,10 @@ fn draw(state: &mut State, cr: &cairo::Context, w: i32, h: i32) {
     // One render pass for the whole grid (O(cols*rows)); far cheaper than a
     // per-cell read, which re-seeks the row iterator every call (was
     // O(rows^2*cols) and made tall terminals jank under streaming output).
-    let grid = state.vt.read_grid(cols, rows);
+    // Read into the persistent scratch buffer so a repaint doesn't allocate a
+    // fresh cols*rows Vec each frame.
+    state.vt.read_grid_into(cols, rows, &mut state.grid_scratch);
+    let grid = &state.grid_scratch;
 
     for row in 0..rows {
         let y = row as f64 * ch;
@@ -1432,17 +1463,30 @@ fn draw(state: &mut State, cr: &cairo::Context, w: i32, h: i32) {
             let (fr, fgc, fb) = rgb(fg);
             if !cell.text.is_empty() {
                 layout.set_text(&cell.text);
-                // Baseline-align to `y + ascent` so fallback (CJK) glyphs line
-                // up with ASCII regardless of their font's own metrics.
-                let baseline = layout.baseline() as f64 / pango::SCALE as f64;
-                let glyph_w = layout.pixel_size().0 as f64;
-                // Center the glyph in its cell box without distorting its shape.
-                // ASCII matches the cell (offset ~0); a wide CJK glyph that the
-                // fallback font draws narrower than two cells gets balanced
-                // slack on both sides instead of all on the right.
-                let x_off = ((cell_px_w - glyph_w) / 2.0).max(0.0);
                 cr.set_source_rgb(fr, fgc, fb);
-                cr.move_to(x + x_off, y + ascent - baseline);
+                // Fast path for plain ASCII in the primary monospace font: the
+                // glyph fills exactly one cell and sits on the primary baseline,
+                // so skip the per-cell baseline()/pixel_size() calls — each
+                // forces a Pango layout-extents pass and they dominated the draw
+                // cost on text-heavy screens. Wide/fallback glyphs still get
+                // measured and centered below.
+                let ascii = !cell.wide
+                    && cell.text.len() == 1
+                    && cell.text.as_bytes()[0].is_ascii_graphic();
+                if ascii {
+                    cr.move_to(x, y + ascent - primary_baseline);
+                } else {
+                    // Baseline-align to `y + ascent` so fallback (CJK) glyphs
+                    // line up with ASCII regardless of their font's own metrics.
+                    let baseline = layout.baseline() as f64 / pango::SCALE as f64;
+                    let glyph_w = layout.pixel_size().0 as f64;
+                    // Center the glyph in its cell box without distorting its
+                    // shape. A wide CJK glyph the fallback font draws narrower
+                    // than two cells gets balanced slack on both sides instead
+                    // of all on the right.
+                    let x_off = ((cell_px_w - glyph_w) / 2.0).max(0.0);
+                    cr.move_to(x + x_off, y + ascent - baseline);
+                }
                 pangocairo::functions::show_layout(cr, &layout);
             }
             if cell.style.underline {

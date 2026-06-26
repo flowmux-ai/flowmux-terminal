@@ -156,7 +156,7 @@ impl PaneRegistry {
             .iter()
             .filter_map(|(surface, terminal)| {
                 terminal
-                    .current_dir()
+                    .poll_cwd_if_changed()
                     .map(|cwd| (terminal.id(), *surface, cwd))
             })
             .collect()
@@ -374,6 +374,27 @@ impl PaneRegistry {
         self.pane_tab_containers.remove(&pane);
         self.active_terminal_by_pane.remove(&pane);
         self.active_browser_by_pane.remove(&pane);
+        // pane_workspace is keyed by this same leaf PaneId; dropping it here
+        // keeps the map from growing without bound across split/close churn in
+        // a long-lived workspace (clear_workspace only fires on full teardown).
+        self.pane_workspace.remove(&pane);
+    }
+
+    /// Drop the split-index entries for a `gtk::Paned` that just collapsed on
+    /// the incremental close path. `split_paneds` / `split_workspace` are keyed
+    /// by the split node's id, which the caller no longer has once the store
+    /// tree collapsed, so match by the widget value instead. Without this the
+    /// two maps leak one entry per closed split until the workspace is cleared.
+    pub fn forget_split_paned(&mut self, paned: &gtk::Paned) {
+        let stale: Vec<PaneId> = self
+            .split_paneds
+            .iter()
+            .filter_map(|(id, p)| (p == paned).then_some(*id))
+            .collect();
+        for id in stale {
+            self.split_paneds.remove(&id);
+            self.split_workspace.remove(&id);
+        }
     }
 
     /// Detach only one surface tab/panel from the same pane's widget tree.

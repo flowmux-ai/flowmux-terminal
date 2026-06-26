@@ -799,8 +799,14 @@ impl WindowController {
 
         // Drop registry entries for the removed pane only — every
         // other pane's TerminalPane / BrowserPane stays alive in the
-        // registry and continues to render.
-        self.pane_registry.borrow_mut().forget_pane(removed);
+        // registry and continues to render. The collapsed `paned` is also
+        // gone now, so drop its split-index entries to avoid a slow leak
+        // across repeated split/close cycles.
+        {
+            let mut reg = self.pane_registry.borrow_mut();
+            reg.forget_pane(removed);
+            reg.forget_split_paned(&paned);
+        }
         if let Some(ws) = self.store.get_workspace(ws_id).await {
             self.refresh_workspace_solo(&ws);
         }
@@ -1694,8 +1700,9 @@ impl WindowController {
         let mut changed_workspaces: std::collections::HashSet<WorkspaceId> =
             std::collections::HashSet::new();
         for (pane, surface, cwd) in cwd_entries {
-            // set_surface_cwd returns Some only for cwd_changed || title_changed,
-            // so polling cost here is effectively paid only when cwd changes.
+            // terminal_cwds() already diffs against each pane's last polled cwd,
+            // so this list holds only panes whose cwd actually changed — idle
+            // terminals never reach the daemon state mutex below.
             // When the folder name changes, update the store and tab label immediately.
             if let Some(ws_id) = self.store.update_surface_cwd(pane, surface, cwd).await {
                 if let Some(title) = self.store.surface_title(pane, surface).await {
@@ -2008,7 +2015,8 @@ impl WindowController {
                         for terminal in registry.terminals.values() {
                             terminal.set_font(&font);
                             terminal.set_font_scale(opts.zoom_factor());
-                            terminal.set_cursor_blink(opts.cursor_blink, opts.cursor_blink_interval_ms);
+                            terminal
+                                .set_cursor_blink(opts.cursor_blink, opts.cursor_blink_interval_ms);
                         }
                         for browser in registry.browsers.values() {
                             browser.set_zoom_level(opts.zoom_factor());
