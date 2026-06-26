@@ -1696,6 +1696,10 @@ impl WindowController {
             for ws_id in changed_workspaces {
                 self.sync_workspace_label(ws_id).await;
             }
+            // OSC-7-less shells reach the file browser only through polling, so
+            // mirror the OSC 7 path (TerminalCwdChanged) and re-root the panel on
+            // the focused pane's new cwd.
+            self.refresh_file_browser_from_focus().await;
         }
     }
 
@@ -6151,6 +6155,53 @@ mod tests {
             .await;
         controller.show_file_browser_for_pane(pane).await;
         assert!(controller.file_browser.rebuild_count() > rebuild_count);
+    }
+
+    /// The file browser re-roots on the focused pane's new cwd. Both cwd-change
+    /// paths (OSC 7 TerminalCwdChanged and the poll fallback) funnel through
+    /// refresh_file_browser_from_focus, so exercising it directly covers both.
+    #[cfg(not(target_os = "macos"))]
+    #[gtk::test]
+    async fn file_browser_follows_focused_pane_cwd_change() {
+        let (controller, ws_id, pane) =
+            build_single_workspace_controller("com.flowmux.App.UiTest.FileBrowserFollowsCwd").await;
+        let ws = controller.store.get_workspace(ws_id).await.unwrap();
+        let surface = ws.surfaces[0].root_pane.active_surface_id(pane).unwrap();
+        let root = std::env::temp_dir().join("flowmux-file-browser-follows-cwd");
+        let next_root = std::env::temp_dir().join("flowmux-file-browser-follows-cwd-next");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&next_root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&next_root).unwrap();
+        std::fs::write(root.join("here.txt"), "here").unwrap();
+        std::fs::write(next_root.join("there.txt"), "there").unwrap();
+
+        controller
+            .store
+            .update_surface_cwd(pane, surface, root.clone())
+            .await;
+        // Drop the live terminal so the root resolves from the stored cwd.
+        controller
+            .pane_registry
+            .borrow_mut()
+            .terminals
+            .remove(&surface);
+
+        controller.window.set_default_size(900, 600);
+        controller.window.present();
+        glib::timeout_future(std::time::Duration::from_millis(50)).await;
+
+        controller.focused_pane.set(Some(pane));
+        controller.show_file_browser_for_pane(pane).await;
+        assert!(controller.file_browser.is_showing_root(&root));
+
+        // The focused pane cd's: a cwd-change refresh must move the panel with it.
+        controller
+            .store
+            .update_surface_cwd(pane, surface, next_root.clone())
+            .await;
+        controller.refresh_file_browser_from_focus().await;
+        assert!(controller.file_browser.is_showing_root(&next_root));
     }
 
     #[cfg(not(target_os = "macos"))]
