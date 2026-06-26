@@ -1482,11 +1482,18 @@ impl WindowController {
             .or_else(|| std::env::current_dir().ok());
 
         if let Some(root) = root {
-            if self.file_browser_source_pane.get() == Some(pane)
+            if self.file_browser.widget().is_visible()
+                && self.file_browser_source_pane.get() == Some(pane)
                 && self.file_browser.is_showing_root(&root)
             {
                 // Opening / refreshing the panel does not move keyboard focus into
                 // it — file_browser_active is driven by connect_focus_changed.
+                //
+                // The is_visible() guard matters: close_file_browser_and_restore_focus
+                // hides the panel but leaves file_browser_source_pane and the model
+                // root intact, so without it a reopen for the same pane would match
+                // this short-circuit and never call set_visible(true) — leaving the
+                // toggle permanently stuck closed.
                 return;
             }
 
