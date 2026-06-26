@@ -1529,6 +1529,17 @@ impl WindowController {
             return;
         };
 
+        // The browser is docked immediately to the right of its source pane, so
+        // Alt+Left should land on that adjacent pane — not skip past it to the
+        // source's own left neighbour. (You always pass through the adjacent pane
+        // to reach the browser, so the source pane is the one touching it.) Other
+        // directions still move relative to the source pane.
+        if dir == FocusDir::Left {
+            self.focused_pane.set(Some(from));
+            self.focus_pane(from);
+            return;
+        }
+
         let before = self.focused_pane.get();
         let moved = self.focus_in_direction(from, dir).is_some();
         if !moved || self.focused_pane.get() == before || self.focused_pane.get().is_none() {
@@ -5965,9 +5976,12 @@ mod tests {
         assert_eq!(controller.file_browser_source_pane.get(), Some(pane));
     }
 
+    /// With two side-by-side panes and the browser docked on the right, Alt+Left
+    /// out of the browser lands on the adjacent (source) pane — the one touching
+    /// the browser — not its far-side neighbour.
     #[cfg(not(target_os = "macos"))]
     #[gtk::test]
-    async fn file_browser_alt_left_moves_to_left_neighbor_without_second_press() {
+    async fn file_browser_alt_left_focuses_adjacent_source_pane() {
         let (controller, _ws_id, pane_a) =
             build_single_workspace_controller("com.flowmux.App.UiTest.FileBrowserAltLeft").await;
         let (split_ack, split_rx) = oneshot::channel();
@@ -5987,13 +6001,15 @@ mod tests {
         controller.window.present();
         glib::timeout_future(std::time::Duration::from_millis(50)).await;
 
+        // Browser opened from pane_b (the right pane, adjacent to the browser).
         controller.file_browser_source_pane.set(Some(pane_b));
         controller.file_browser_active.set(true);
         controller.focused_pane.set(Some(pane_b));
 
         controller.focus_out_of_file_browser(FocusDir::Left);
 
-        assert_eq!(controller.focused_pane.get(), Some(pane_a));
+        // Lands on the adjacent pane_b, not its left neighbour pane_a.
+        assert_eq!(controller.focused_pane.get(), Some(pane_b));
         assert!(!controller.file_browser_active.get());
     }
 
