@@ -79,6 +79,10 @@ struct State {
     /// Whether a left-button drag selection is in progress, and its anchor cell.
     selecting: bool,
     anchor: (u16, u16),
+    /// True for the press that produced a double/triple-click word/line
+    /// selection. Consumed by the matching release so it doesn't forward a
+    /// spurious mouse-release to an app that has reporting on.
+    discrete_select: bool,
     /// A primary press deferred while app mouse reporting is on: we don't yet
     /// know if it's a click (report to the app) or the start of a drag (local
     /// text selection). Holds the press `(x, y, mods)`. Resolved on the first
@@ -219,6 +223,7 @@ impl GhosttyPane {
             preedit: String::new(),
             pointer: (0.0, 0.0),
             selecting: false,
+            discrete_select: false,
             pending_app_press: None,
             blink_enabled: true,
             blink_phase_on: true,
@@ -601,15 +606,17 @@ impl GhosttyPane {
             // Clones for the right-click context menu (cheap: refcounted handles).
             let pane_for_menu = self.clone();
             let cb_for_menu = callbacks.clone();
-            click.connect_pressed(move |g, _n, x, y| {
+            click.connect_pressed(move |g, n, x, y| {
                 area.grab_focus();
                 (on_focus.borrow_mut())(id);
 
                 let button = g.current_button();
                 let mods = mods_from_state(g.current_event_state());
+                let shift_held = (mods & flowmux_terminal::vt::MOD_SHIFT) != 0;
                 let mut s = state.borrow_mut();
                 s.pointer = (x, y);
                 s.pending_app_press = None;
+                s.discrete_select = false;
 
                 // Ctrl + left click → open the URL under the pointer.
                 if button == gdk::BUTTON_PRIMARY && (mods & flowmux_terminal::vt::MOD_CTRL) != 0 {
@@ -624,6 +631,24 @@ impl GhosttyPane {
                     return;
                 }
 
+                // Middle click pastes the primary selection (X11 convention),
+                // unless the app has mouse reporting on without Shift — then the
+                // button is forwarded so the app sees it.
+                if button == gdk::BUTTON_MIDDLE {
+                    if s.vt.mouse_enabled() && !shift_held {
+                        let gb = ghostty_button(button);
+                        if let Some(bytes) = s.vt.encode_mouse(MouseAction::Press, gb, x, y, mods)
+                        {
+                            let _ = s.pty.write(&bytes);
+                        }
+                        return;
+                    }
+                    drop(s);
+                    pane_for_menu.paste_primary();
+                    g.set_state(gtk::EventSequenceState::Claimed);
+                    return;
+                }
+
                 // Right click always opens the terminal-body context menu,
                 // even when the app has mouse reporting on — the menu (Copy /
                 // Paste / …) is more useful there than forwarding the click.
@@ -631,6 +656,31 @@ impl GhosttyPane {
                 if button == gdk::BUTTON_SECONDARY {
                     drop(s);
                     pane_for_menu.show_context_menu(x, y, &cb_for_menu);
+                    g.set_state(gtk::EventSequenceState::Claimed);
+                    return;
+                }
+
+                // Double click selects the word under the pointer; triple (or
+                // more) selects the whole row. Works regardless of app mouse
+                // reporting — the selection is local and the result is copied to
+                // the primary selection so a middle click pastes it.
+                if button == gdk::BUTTON_PRIMARY && n >= 2 {
+                    s.vt.clear_selection();
+                    s.vt.update();
+                    let (cols, rows) = s.vt.dims().unwrap_or((s.cols, s.rows));
+                    let (col, row) = px_to_cell(x, y, s.cell_w, s.cell_h, cols, rows);
+                    let (start, end) = if n == 2 {
+                        word_span(&s.vt, row, col, cols)
+                    } else {
+                        (0, cols.saturating_sub(1))
+                    };
+                    s.has_sel = s.vt.set_selection((start, row), (end, row), false);
+                    s.anchor = (start, row);
+                    s.selecting = false;
+                    s.discrete_select = true;
+                    drop(s);
+                    pane_for_menu.copy_selection_to_primary();
+                    area.queue_draw();
                     g.set_state(gtk::EventSequenceState::Claimed);
                     return;
                 }
@@ -678,14 +728,31 @@ impl GhosttyPane {
         }
         {
             let state = self.state.clone();
+            let pane_for_release = self.clone();
             click.connect_released(move |g, _n, x, y| {
                 let button = g.current_button();
                 let mods = mods_from_state(g.current_event_state());
                 let mut s = state.borrow_mut();
                 let shift = (mods & flowmux_terminal::vt::MOD_SHIFT) != 0;
+                // A double/triple-click already resolved its selection in the
+                // press handler; swallow the matching release so no stray button
+                // event reaches an app with mouse reporting on.
+                if s.discrete_select {
+                    s.discrete_select = false;
+                    return;
+                }
                 if s.selecting {
                     s.selecting = false;
-                } else if let Some((px, py, pmods)) = s.pending_app_press.take() {
+                    let copy_primary = s.has_sel;
+                    drop(s);
+                    if copy_primary {
+                        // Mirror the drag result to the primary selection so a
+                        // middle click pastes it (X11 convention).
+                        pane_for_release.copy_selection_to_primary();
+                    }
+                    return;
+                }
+                if let Some((px, py, pmods)) = s.pending_app_press.take() {
                     // Deferred primary press never moved off its anchor cell →
                     // it was a click, not a drag. Forward press+release to the
                     // app now so single clicks still reach it.
@@ -911,6 +978,17 @@ impl GhosttyPane {
     /// flag — which drifts out of sync when output scrolls the viewport and
     /// libghostty silently drops its viewport-anchored selection.
     pub fn copy_selection_to_clipboard(&self) -> bool {
+        self.copy_selection(false)
+    }
+
+    /// Mirror the live selection to the primary selection (X11 middle-click
+    /// paste buffer). Best-effort and silent: failures just leave the primary
+    /// selection unchanged.
+    pub fn copy_selection_to_primary(&self) -> bool {
+        self.copy_selection(true)
+    }
+
+    fn copy_selection(&self, primary: bool) -> bool {
         let text = {
             let mut s = self.state.borrow_mut();
             if !s.has_sel {
@@ -932,18 +1010,35 @@ impl GhosttyPane {
         let Some(display) = gdk::Display::default() else {
             return false;
         };
-        display.clipboard().set_text(&text);
+        if primary {
+            display.primary_clipboard().set_text(&text);
+        } else {
+            display.clipboard().set_text(&text);
+        }
         true
     }
 
     pub fn paste_clipboard(&self) {
+        self.paste(false);
+    }
+
+    /// Paste the primary selection (X11 middle-click buffer) into the pane.
+    pub fn paste_primary(&self) {
+        self.paste(true);
+    }
+
+    fn paste(&self, primary: bool) {
         let state = self.state.clone();
         let area = self.area.clone();
         let adj = self.adj.clone();
         let scrollbar = self.scrollbar.clone();
         let syncing = self.syncing.clone();
         if let Some(display) = gdk::Display::default() {
-            let clipboard = display.clipboard();
+            let clipboard = if primary {
+                display.primary_clipboard()
+            } else {
+                display.clipboard()
+            };
             clipboard.read_text_async(gtk::gio::Cancellable::NONE, move |res| {
                 if let Ok(Some(text)) = res {
                     let mut s = state.borrow_mut();
@@ -1166,6 +1261,38 @@ fn rgb(c: Rgb) -> (f64, f64, f64) {
 }
 
 /// Map a surface pixel position to a viewport cell, clamped to the grid.
+/// Cell span of the "word" at `col` on `row`, for double-click selection.
+/// A word is a maximal run of cells with the same blank-ness as the clicked
+/// cell, so clicking text grabs the surrounding token (path, identifier, URL)
+/// and clicking whitespace grabs the surrounding gap. The trailing spacer of a
+/// double-width glyph counts as non-blank so wide characters stay whole.
+fn word_span(vt: &flowmux_terminal::vt::Vt, row: u16, col: u16, cols: u16) -> (u16, u16) {
+    let blank = |c: u16| -> bool {
+        match vt.cell(row, c) {
+            None => true,
+            Some(cell) => {
+                if cell.text.is_empty() {
+                    // Empty cell: a spacer trailing a wide glyph is part of that
+                    // glyph (not blank); a genuinely cleared cell is blank.
+                    !(c > 0 && vt.cell(row, c - 1).is_some_and(|p| p.wide))
+                } else {
+                    cell.text.chars().all(char::is_whitespace)
+                }
+            }
+        }
+    };
+    let target_blank = blank(col);
+    let mut start = col;
+    while start > 0 && blank(start - 1) == target_blank {
+        start -= 1;
+    }
+    let mut end = col;
+    while end + 1 < cols && blank(end + 1) == target_blank {
+        end += 1;
+    }
+    (start, end)
+}
+
 fn px_to_cell(x: f64, y: f64, cell_w: f64, cell_h: f64, cols: u16, rows: u16) -> (u16, u16) {
     let col = if cell_w > 0.0 {
         (x / cell_w).floor().max(0.0)
@@ -1715,7 +1842,7 @@ fn map_keyval(keyval: gdk::Key) -> (i32, u32) {
 mod tests {
     use super::{
         commit_bytes_with_pending, find_url_at, is_insert_newline_key, is_modifier_only_key,
-        queue_pending_input, PendingInput, INSERT_NEWLINE_BYTES,
+        queue_pending_input, word_span, PendingInput, INSERT_NEWLINE_BYTES,
     };
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -2006,6 +2133,20 @@ mod tests {
     fn no_url_on_plain_or_whitespace() {
         assert_eq!(find_url_at("just some words here", 5), None);
         assert_eq!(find_url_at("a  b", 1), None); // whitespace column
+    }
+
+    #[test]
+    fn word_span_grabs_token_and_whitespace_runs() {
+        let mut vt = flowmux_terminal::vt::Vt::new(20, 2, 0).expect("vt");
+        // Two tokens separated by two spaces: "foo.bar" then "qux".
+        vt.write(b"foo.bar  qux");
+        vt.update();
+        // Click inside the first token → the whole "foo.bar" run (cols 0..=6).
+        assert_eq!(word_span(&vt, 0, 2, 20), (0, 6));
+        // Click on the spaces → the contiguous blank run (cols 7..=8).
+        assert_eq!(word_span(&vt, 0, 7, 20), (7, 8));
+        // Click inside the second token → "qux" (cols 9..=11).
+        assert_eq!(word_span(&vt, 0, 10, 20), (9, 11));
     }
 
     #[test]
