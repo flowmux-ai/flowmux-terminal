@@ -58,16 +58,32 @@ impl FxvtCell {
     }
 }
 
-/// Decode a raw shim cell (as produced by `fxvt_cell`/`fxvt_read_grid`) into the
-/// safe [`Cell`] view.
-fn cell_from_raw(raw: &FxvtCell) -> Cell {
-    let mut text = String::new();
+/// A fresh blank cell (no text, no explicit bg). Used to grow the reusable grid
+/// buffer in [`Vt::read_grid_into`]; each slot is then overwritten in place by
+/// [`write_cell_from_raw`], which keeps the cell's `text` `String` allocation
+/// alive across frames.
+fn blank_cell() -> Cell {
+    Cell {
+        text: String::new(),
+        fg: Rgb { r: 0, g: 0, b: 0 },
+        bg: None,
+        style: CellStyle::default(),
+        selected: false,
+        wide: false,
+    }
+}
+
+/// Overwrite `dst` in place from a raw shim cell. Reuses `dst.text`'s heap
+/// buffer (clear + push) instead of allocating a fresh `String`, so a per-frame
+/// full-grid read does not churn thousands of allocations on a busy terminal.
+fn write_cell_from_raw(dst: &mut Cell, raw: &FxvtCell) {
+    dst.text.clear();
     for &cp in raw.codepoints.iter().take(raw.cp_len as usize) {
         if let Some(c) = char::from_u32(cp) {
-            text.push(c);
+            dst.text.push(c);
         }
     }
-    let style = CellStyle {
+    dst.style = CellStyle {
         bold: raw.flags & FXVT_FLAG_BOLD != 0,
         italic: raw.flags & FXVT_FLAG_ITALIC != 0,
         underline: raw.flags & FXVT_FLAG_UNDERLINE != 0,
@@ -76,22 +92,25 @@ fn cell_from_raw(raw: &FxvtCell) -> Cell {
         faint: raw.flags & FXVT_FLAG_FAINT != 0,
         blink: raw.flags & FXVT_FLAG_BLINK != 0,
     };
-    Cell {
-        text,
-        fg: Rgb {
-            r: raw.fg[0],
-            g: raw.fg[1],
-            b: raw.fg[2],
-        },
-        bg: (raw.has_bg != 0).then_some(Rgb {
-            r: raw.bg[0],
-            g: raw.bg[1],
-            b: raw.bg[2],
-        }),
-        style,
-        selected: raw.selected != 0,
-        wide: raw.wide != 0,
-    }
+    dst.fg = Rgb {
+        r: raw.fg[0],
+        g: raw.fg[1],
+        b: raw.fg[2],
+    };
+    dst.bg = (raw.has_bg != 0).then_some(Rgb {
+        r: raw.bg[0],
+        g: raw.bg[1],
+        b: raw.bg[2],
+    });
+    dst.selected = raw.selected != 0;
+    dst.wide = raw.wide != 0;
+}
+
+/// Decode a raw shim cell into a freshly-allocated [`Cell`] (single-cell path).
+fn cell_from_raw(raw: &FxvtCell) -> Cell {
+    let mut cell = blank_cell();
+    write_cell_from_raw(&mut cell, raw);
+    cell
 }
 
 extern "C" {
@@ -446,8 +465,16 @@ impl Vt {
         raw.clear();
         raw.resize(n, FxvtCell::zeroed());
         unsafe { fxvt_read_grid(self.ctx, raw.as_mut_ptr(), cols, rows) };
-        out.clear();
-        out.extend(raw.iter().map(cell_from_raw));
+        // Reuse `out`'s existing `Cell`s (and their `text` `String` buffers)
+        // when the grid size is unchanged — the common case frame to frame — so
+        // a repaint allocates nothing. Only a resize re-grows the buffer.
+        if out.len() != n {
+            out.clear();
+            out.resize_with(n, blank_cell);
+        }
+        for (dst, src) in out.iter_mut().zip(raw.iter()) {
+            write_cell_from_raw(dst, src);
+        }
     }
 
     /// Set the active selection to the inclusive viewport range

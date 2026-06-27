@@ -1358,6 +1358,50 @@ fn measure_cell(font: &pango::FontDescription) -> (f64, f64, f64) {
     (cell_w, cell_h, ascent)
 }
 
+/// The fill color a cell's background pass should paint, if any: the selection
+/// wash when selected, the foreground when inverse, otherwise the cell's own
+/// explicit background (`None` for the default background, already cleared).
+fn cell_bg_fill(cell: &VtCell, sel_bg: Rgb) -> Option<Rgb> {
+    if cell.selected {
+        Some(sel_bg)
+    } else if cell.style.inverse {
+        Some(cell.fg)
+    } else {
+        cell.bg
+    }
+}
+
+/// The foreground color a cell's glyph/decoration is drawn in, after resolving
+/// inverse video and a selection foreground override.
+fn cell_fg(cell: &VtCell, colors: &Colors, sel_fg: Option<Rgb>) -> Rgb {
+    let mut fg = if cell.style.inverse {
+        cell.bg.unwrap_or(colors.bg)
+    } else {
+        cell.fg
+    };
+    if cell.selected {
+        if let Some(sfg) = sel_fg {
+            fg = sfg;
+        }
+    }
+    fg
+}
+
+/// Whether `cell` is printable ASCII in the primary monospace font (one byte in
+/// `0x20..=0x7e`, not double-width). Such cells advance by exactly one cell and
+/// sit on the primary baseline, so a horizontal run of them with the same
+/// foreground can be shaped as a single Pango layout — the cheap path.
+fn is_ascii_run_cell(cell: &VtCell) -> bool {
+    if cell.wide || cell.text.len() != 1 {
+        return false;
+    }
+    matches!(cell.text.as_bytes()[0], 0x20..=0x7e)
+}
+
+/// Top-level draw callback: snapshot the grid and paint it straight onto `cr`
+/// (the DrawingArea's own surface — drawing to an offscreen image and blitting
+/// each frame was measurably slower under streaming output). The cursor and IME
+/// preedit are painted on top as an overlay.
 fn draw(state: &mut State, cr: &cairo::Context, w: i32, h: i32) {
     let _ = state.vt.update();
     let colors = state.vt.colors().unwrap_or(Colors {
@@ -1375,170 +1419,235 @@ fn draw(state: &mut State, cr: &cairo::Context, w: i32, h: i32) {
         cursor_has_value: false,
     });
 
+    let (cols, rows) = state.vt.dims().unwrap_or((state.cols, state.rows));
+    // Read into the persistent scratch buffer so a repaint doesn't allocate a
+    // fresh cols*rows Vec each frame (the cells themselves reuse their text
+    // buffers — see `Vt::read_grid_into`).
+    state.vt.read_grid_into(cols, rows, &mut state.grid_scratch);
+
+    paint_grid(
+        cr,
+        &state.scaled_font(),
+        w,
+        h,
+        cols,
+        rows,
+        &state.grid_scratch,
+        state.cell_w,
+        state.cell_h,
+        state.ascent,
+        &colors,
+        state.selection_bg,
+        state.selection_fg,
+    );
+
+    draw_overlay(state, cr, cols, rows, &colors);
+}
+
+/// Render the grid (backgrounds + glyphs + underline/strikethrough) straight
+/// into `cr`. No cursor or preedit — those are an overlay drawn separately. A
+/// free function (no `&State`) so it can be driven directly by the render
+/// benchmark in this module's tests.
+#[allow(clippy::too_many_arguments)]
+fn paint_grid(
+    cr: &cairo::Context,
+    font: &pango::FontDescription,
+    w: i32,
+    h: i32,
+    cols: u16,
+    rows: u16,
+    grid: &[VtCell],
+    cw: f64,
+    ch: f64,
+    ascent: f64,
+    colors: &Colors,
+    selection_bg: Option<Rgb>,
+    selection_fg: Option<Rgb>,
+) {
     let (br, bgc, bb) = rgb(colors.bg);
     cr.set_source_rgb(br, bgc, bb);
     cr.rectangle(0.0, 0.0, w as f64, h as f64);
     let _ = cr.fill();
 
     let layout = pangocairo::functions::create_layout(cr);
-    layout.set_font_description(Some(&state.scaled_font()));
+    layout.set_font_description(Some(font));
     // Baseline of the primary monospace font. It does not vary across ASCII
     // cells, so query it once here instead of per cell in the glyph pass below.
     layout.set_text("M");
     let primary_baseline = layout.baseline() as f64 / pango::SCALE as f64;
 
-    let (cols, rows) = state.vt.dims().unwrap_or((state.cols, state.rows));
-    let cw = state.cell_w;
-    let ch = state.cell_h;
-    let ascent = state.ascent;
-    // Selection wash + cursor color come from the theme (host-drawn to match
-    // VTE); fall back to a neutral blue-grey / the default fg when unset.
-    let sel_bg = state.selection_bg.unwrap_or(Rgb {
+    // Selection wash comes from the theme (host-drawn to match VTE); fall back
+    // to a neutral blue-grey / the default fg when unset.
+    let sel_bg = selection_bg.unwrap_or(Rgb {
         r: 51,
         g: 87,
         b: 140,
     });
-    let sel_fg = state.selection_fg;
-    let cursor_rgb = state.cursor_color.unwrap_or(if colors.cursor_has_value {
-        colors.cursor
-    } else {
-        colors.fg
-    });
+    let sel_fg = selection_fg;
 
-    // One render pass for the whole grid (O(cols*rows)); far cheaper than a
-    // per-cell read, which re-seeks the row iterator every call (was
-    // O(rows^2*cols) and made tall terminals jank under streaming output).
-    // Read into the persistent scratch buffer so a repaint doesn't allocate a
-    // fresh cols*rows Vec each frame.
-    state.vt.read_grid_into(cols, rows, &mut state.grid_scratch);
-    let grid = &state.grid_scratch;
+    // Scratch reused across rows/runs so the ASCII glyph-run pass allocates
+    // nothing per frame.
+    let mut run = String::new();
 
     for row in 0..rows {
         let y = row as f64 * ch;
-        // Render each row in two passes (all backgrounds, then all glyphs) so a
-        // wide glyph's right half is not erased by the next spacer cell's
-        // background fill — the cause of "left-half-only" Hangul on a colored
-        // background.
+        // Render each row in passes (all backgrounds, then glyphs, then
+        // decorations) so a wide glyph's right half is not erased by the next
+        // spacer cell's background fill — the cause of "left-half-only" Hangul
+        // on a colored background.
         let row_start = row as usize * cols as usize;
         let cells = &grid[row_start..row_start + cols as usize];
 
-        // Pass 1: backgrounds + selection wash.
-        for (col, cell) in cells.iter().enumerate() {
-            let x = col as f64 * cw;
-            let cell_px_w = if cell.wide { cw * 2.0 } else { cw };
-            if cell.selected {
-                let (r, g, bl) = rgb(sel_bg);
-                cr.set_source_rgb(r, g, bl);
-                cr.rectangle(x, y, cell_px_w, ch);
+        // Pass 1: backgrounds + selection wash. Coalesce horizontal runs of the
+        // same fill color into one rectangle to cut the cairo path-op count.
+        // Wide (double-width) lead cells keep their own 2-cell rectangle.
+        let mut col = 0usize;
+        while col < cells.len() {
+            let cell = &cells[col];
+            let Some(color) = cell_bg_fill(cell, sel_bg) else {
+                col += 1;
+                continue;
+            };
+            let (r, g, bl) = rgb(color);
+            cr.set_source_rgb(r, g, bl);
+            if cell.wide {
+                cr.rectangle(col as f64 * cw, y, cw * 2.0, ch);
                 let _ = cr.fill();
+                col += 1;
             } else {
-                let bg = if cell.style.inverse {
-                    Some(cell.fg)
-                } else {
-                    cell.bg
-                };
-                if let Some(b) = bg {
-                    let (r, g, bl) = rgb(b);
-                    cr.set_source_rgb(r, g, bl);
-                    cr.rectangle(x, y, cell_px_w, ch);
-                    let _ = cr.fill();
+                let start = col;
+                let mut end = col + 1;
+                while end < cells.len() {
+                    let c2 = &cells[end];
+                    if c2.wide || cell_bg_fill(c2, sel_bg) != Some(color) {
+                        break;
+                    }
+                    end += 1;
                 }
+                cr.rectangle(start as f64 * cw, y, (end - start) as f64 * cw, ch);
+                let _ = cr.fill();
+                col = end;
             }
         }
 
-        // Pass 2: glyphs + underline/strikethrough, on top of all backgrounds.
-        for (col, cell) in cells.iter().enumerate() {
-            let x = col as f64 * cw;
+        // Pass 2: glyphs. Coalesce horizontal runs of same-foreground printable
+        // ASCII into one `set_text`/`show_layout`; the monospace advance makes a
+        // run pixel-identical to per-cell drawing while skipping a Pango shaping
+        // pass per cell. Wide/fallback glyphs are still measured and centered.
+        let mut col = 0usize;
+        while col < cells.len() {
+            let cell = &cells[col];
             let cell_px_w = if cell.wide { cw * 2.0 } else { cw };
-            let mut fg = if cell.style.inverse {
-                cell.bg.unwrap_or(colors.bg)
-            } else {
-                cell.fg
-            };
-            if cell.selected {
-                if let Some(sfg) = sel_fg {
-                    fg = sfg;
-                }
-            }
+            let fg = cell_fg(cell, colors, sel_fg);
             let (fr, fgc, fb) = rgb(fg);
-            if !cell.text.is_empty() {
-                layout.set_text(&cell.text);
+
+            if is_ascii_run_cell(cell) {
+                run.clear();
+                run.push(cell.text.as_bytes()[0] as char);
+                let start = col;
+                let mut end = col + 1;
+                while end < cells.len() {
+                    let c2 = &cells[end];
+                    if !is_ascii_run_cell(c2) || cell_fg(c2, colors, sel_fg) != fg {
+                        break;
+                    }
+                    run.push(c2.text.as_bytes()[0] as char);
+                    end += 1;
+                }
+                layout.set_text(&run);
                 cr.set_source_rgb(fr, fgc, fb);
-                // Fast path for plain ASCII in the primary monospace font: the
-                // glyph fills exactly one cell and sits on the primary baseline,
-                // so skip the per-cell baseline()/pixel_size() calls — each
-                // forces a Pango layout-extents pass and they dominated the draw
-                // cost on text-heavy screens. Wide/fallback glyphs still get
-                // measured and centered below.
-                let ascii = !cell.wide
-                    && cell.text.len() == 1
-                    && cell.text.as_bytes()[0].is_ascii_graphic();
-                if ascii {
-                    cr.move_to(x, y + ascent - primary_baseline);
-                } else {
+                cr.move_to(start as f64 * cw, y + ascent - primary_baseline);
+                pangocairo::functions::show_layout(cr, &layout);
+                col = end;
+            } else {
+                if !cell.text.is_empty() {
+                    let x = col as f64 * cw;
+                    layout.set_text(&cell.text);
+                    cr.set_source_rgb(fr, fgc, fb);
                     // Baseline-align to `y + ascent` so fallback (CJK) glyphs
-                    // line up with ASCII regardless of their font's own metrics.
+                    // line up with ASCII regardless of their font's own metrics,
+                    // and center the glyph in its cell box without distorting it.
                     let baseline = layout.baseline() as f64 / pango::SCALE as f64;
                     let glyph_w = layout.pixel_size().0 as f64;
-                    // Center the glyph in its cell box without distorting its
-                    // shape. A wide CJK glyph the fallback font draws narrower
-                    // than two cells gets balanced slack on both sides instead
-                    // of all on the right.
                     let x_off = ((cell_px_w - glyph_w) / 2.0).max(0.0);
                     cr.move_to(x + x_off, y + ascent - baseline);
+                    pangocairo::functions::show_layout(cr, &layout);
                 }
-                pangocairo::functions::show_layout(cr, &layout);
+                col += 1;
             }
+        }
+
+        // Pass 3: underline/strikethrough, on top of the glyphs.
+        for (col, cell) in cells.iter().enumerate() {
+            if !cell.style.underline && !cell.style.strikethrough {
+                continue;
+            }
+            let x = col as f64 * cw;
+            let cell_px_w = if cell.wide { cw * 2.0 } else { cw };
+            let (fr, fgc, fb) = rgb(cell_fg(cell, colors, sel_fg));
+            cr.set_source_rgb(fr, fgc, fb);
             if cell.style.underline {
-                cr.set_source_rgb(fr, fgc, fb);
                 cr.rectangle(x, y + ascent + 2.0, cell_px_w, 1.0);
                 let _ = cr.fill();
             }
             if cell.style.strikethrough {
-                cr.set_source_rgb(fr, fgc, fb);
                 cr.rectangle(x, y + ch * 0.5, cell_px_w, 1.0);
                 let _ = cr.fill();
             }
         }
     }
+}
 
+/// Draw the cursor and any inline IME preedit on top of the (cached) grid.
+fn draw_overlay(state: &State, cr: &cairo::Context, cols: u16, rows: u16, colors: &Colors) {
+    let cw = state.cell_w;
+    let ch = state.cell_h;
+    let ascent = state.ascent;
+    let cursor_rgb = state.cursor_color.unwrap_or(if colors.cursor_has_value {
+        colors.cursor
+    } else {
+        colors.fg
+    });
     // Hide the cursor on the "off" half of a blink, but only while this pane is
     // focused and blinking is enabled — an unfocused or steady cursor always
     // draws. Applies to the IME-preedit cursor too, so composing Hangul/CJK
     // still blinks.
     let blink_hidden = state.blink_enabled && state.focused && !state.blink_phase_on;
-    if let Some(cursor) = state.vt.cursor() {
-        let cx = cursor.x as f64 * cw;
-        let cy = cursor.y as f64 * ch;
-        if !state.preedit.is_empty() {
-            // Inline IME preedit (composing Hangul/CJK): paint the composing
-            // text at the cursor with an underline, then the block cursor right
-            // after it — matching the VTE path's inline preedit.
-            layout.set_text(&state.preedit);
-            let pw = layout.pixel_size().0 as f64;
-            let baseline = layout.baseline() as f64 / pango::SCALE as f64;
-            let (br2, bg2, bb2) = rgb(colors.bg);
-            cr.set_source_rgb(br2, bg2, bb2);
-            cr.rectangle(cx, cy, pw, ch);
-            let _ = cr.fill();
-            let (fr, fgc, fb) = rgb(colors.fg);
-            cr.set_source_rgb(fr, fgc, fb);
-            cr.move_to(cx, cy + ascent - baseline);
-            pangocairo::functions::show_layout(cr, &layout);
-            cr.rectangle(cx, cy + ascent + 2.0, pw, 1.0);
-            let _ = cr.fill();
-            if cursor.visible && !blink_hidden {
-                let (r, g, b) = rgb(cursor_rgb);
-                cr.set_source_rgba(r, g, b, 0.6);
-                cr.rectangle(cx + pw, cy, cw, ch);
-                let _ = cr.fill();
-            }
-        } else if cursor.visible && !blink_hidden && cursor.x < cols && cursor.y < rows {
+    let Some(cursor) = state.vt.cursor() else {
+        return;
+    };
+    let cx = cursor.x as f64 * cw;
+    let cy = cursor.y as f64 * ch;
+    if !state.preedit.is_empty() {
+        // Inline IME preedit (composing Hangul/CJK): paint the composing text at
+        // the cursor with an underline, then the block cursor right after it —
+        // matching the VTE path's inline preedit.
+        let layout = pangocairo::functions::create_layout(cr);
+        layout.set_font_description(Some(&state.scaled_font()));
+        layout.set_text(&state.preedit);
+        let pw = layout.pixel_size().0 as f64;
+        let baseline = layout.baseline() as f64 / pango::SCALE as f64;
+        let (br2, bg2, bb2) = rgb(colors.bg);
+        cr.set_source_rgb(br2, bg2, bb2);
+        cr.rectangle(cx, cy, pw, ch);
+        let _ = cr.fill();
+        let (fr, fgc, fb) = rgb(colors.fg);
+        cr.set_source_rgb(fr, fgc, fb);
+        cr.move_to(cx, cy + ascent - baseline);
+        pangocairo::functions::show_layout(cr, &layout);
+        cr.rectangle(cx, cy + ascent + 2.0, pw, 1.0);
+        let _ = cr.fill();
+        if cursor.visible && !blink_hidden {
             let (r, g, b) = rgb(cursor_rgb);
             cr.set_source_rgba(r, g, b, 0.6);
-            cr.rectangle(cx, cy, cw, ch);
+            cr.rectangle(cx + pw, cy, cw, ch);
             let _ = cr.fill();
         }
+    } else if cursor.visible && !blink_hidden && cursor.x < cols && cursor.y < rows {
+        let (r, g, b) = rgb(cursor_rgb);
+        cr.set_source_rgba(r, g, b, 0.6);
+        cr.rectangle(cx, cy, cw, ch);
+        let _ = cr.fill();
     }
 }
 
@@ -1604,6 +1713,167 @@ mod tests {
     use std::rc::Rc;
 
     use gtk::gdk;
+
+    // ---- Render-path microbenchmark (run manually) -------------------------
+    //
+    //   cargo test -p flowmux --bin flowmux render_throughput_bench \
+    //       -- --ignored --nocapture
+    //
+    // Times `paint_grid` over representative grids, comparing three strategies:
+    //   direct      — paint straight onto a persistent surface (the shipped path)
+    //   off_fresh   — alloc a new offscreen ImageSurface every frame + blit
+    //                 (the regressed path: a per-frame multi-MB malloc)
+    //   off_reused  — reuse one offscreen ImageSurface + blit every frame
+    // The gap between `direct` and `off_*` is the cost the offscreen cache added.
+
+    fn bench_grid(cols: usize, rows: usize, kind: &str) -> Vec<super::VtCell> {
+        use flowmux_terminal::vt::{Cell, CellStyle, Rgb};
+        let mut g = Vec::with_capacity(cols * rows);
+        for i in 0..cols * rows {
+            let mut cell = Cell {
+                text: String::new(),
+                fg: Rgb {
+                    r: 200,
+                    g: 200,
+                    b: 200,
+                },
+                bg: None,
+                style: CellStyle::default(),
+                selected: false,
+                wide: false,
+            };
+            match kind {
+                // Dense printable ASCII (code / `cat` of a source file).
+                "ascii_dense" => {
+                    cell.text
+                        .push((0x21 + (i * 7 + (i / cols) * 13) % 0x5e) as u8 as char);
+                }
+                // ASCII with ~20% spaces (prose / command output).
+                "ascii_words" => {
+                    let c = if (i * 31) % 10 < 2 {
+                        b' '
+                    } else {
+                        b'a' + ((i * 7) % 26) as u8
+                    };
+                    cell.text.push(c as char);
+                }
+                // Per-cell background color (htop / colored TUIs).
+                "colored" => {
+                    cell.text.push((b'a' + ((i * 7) % 26) as u8) as char);
+                    cell.bg = Some(Rgb {
+                        r: ((i * 5) % 256) as u8,
+                        g: ((i * 9) % 256) as u8,
+                        b: ((i * 13) % 256) as u8,
+                    });
+                }
+                // Wide Hangul: lead wide cell + blank spacer.
+                "cjk" => {
+                    if i % 2 == 0 {
+                        cell.text.push('한');
+                        cell.wide = true;
+                    }
+                }
+                // Mostly blank, short prompt on the first row (idle shell).
+                _ => {
+                    if i < 12 {
+                        cell.text.push((b'$' + (i % 3) as u8) as char);
+                    }
+                }
+            }
+            g.push(cell);
+        }
+        g
+    }
+
+    #[derive(Clone, Copy)]
+    enum Mode {
+        Direct,
+        OffFresh,
+        OffReused,
+    }
+
+    fn time_mode(grid: &[super::VtCell], cols: u16, rows: u16, mode: Mode, loops: u32) -> f64 {
+        use flowmux_terminal::vt::{Colors, Rgb};
+        use gtk::cairo::{Context, Format, ImageSurface};
+        use std::time::Instant;
+
+        let font = gtk::pango::FontDescription::from_string(super::DEFAULT_FONT);
+        let (cw, ch, ascent) = super::measure_cell(&font);
+        let w = (cols as f64 * cw).ceil() as i32;
+        let h = (rows as f64 * ch).ceil() as i32;
+        let colors = Colors {
+            fg: Rgb {
+                r: 220,
+                g: 220,
+                b: 220,
+            },
+            bg: Rgb { r: 0, g: 0, b: 0 },
+            cursor: Rgb {
+                r: 220,
+                g: 220,
+                b: 220,
+            },
+            cursor_has_value: false,
+        };
+        let screen = ImageSurface::create(Format::ARgb32, w, h).unwrap();
+        let scr = Context::new(&screen).unwrap();
+        let reused = ImageSurface::create(Format::ARgb32, w, h).unwrap();
+
+        let start = Instant::now();
+        for _ in 0..loops {
+            match mode {
+                Mode::Direct => {
+                    super::paint_grid(
+                        &scr, &font, w, h, cols, rows, grid, cw, ch, ascent, &colors, None, None,
+                    );
+                }
+                Mode::OffFresh => {
+                    let s = ImageSurface::create(Format::ARgb32, w, h).unwrap();
+                    {
+                        let c = Context::new(&s).unwrap();
+                        super::paint_grid(
+                            &c, &font, w, h, cols, rows, grid, cw, ch, ascent, &colors, None, None,
+                        );
+                    }
+                    scr.set_source_surface(&s, 0.0, 0.0).unwrap();
+                    scr.paint().unwrap();
+                }
+                Mode::OffReused => {
+                    {
+                        let c = Context::new(&reused).unwrap();
+                        super::paint_grid(
+                            &c, &font, w, h, cols, rows, grid, cw, ch, ascent, &colors, None, None,
+                        );
+                    }
+                    scr.set_source_surface(&reused, 0.0, 0.0).unwrap();
+                    scr.paint().unwrap();
+                }
+            }
+        }
+        start.elapsed().as_secs_f64() * 1000.0 / loops as f64
+    }
+
+    #[test]
+    #[ignore = "manual render benchmark; run with --ignored --nocapture"]
+    fn render_throughput_bench() {
+        let (cols, rows) = (200u16, 50u16);
+        let loops = 100u32;
+        let kinds = ["ascii_dense", "ascii_words", "colored", "cjk", "sparse"];
+        println!("\ngrid {cols}x{rows}, {loops} frames/measure — ms/frame (lower=better)");
+        println!(
+            "{:<13} {:>10} {:>10} {:>10}",
+            "scenario", "direct", "off_fresh", "off_reuse"
+        );
+        for kind in kinds {
+            let grid = bench_grid(cols as usize, rows as usize, kind);
+            // Warm up font/glyph caches so the first measure is not penalized.
+            let _ = time_mode(&grid, cols, rows, Mode::Direct, 5);
+            let d = time_mode(&grid, cols, rows, Mode::Direct, loops);
+            let f = time_mode(&grid, cols, rows, Mode::OffFresh, loops);
+            let r = time_mode(&grid, cols, rows, Mode::OffReused, loops);
+            println!("{kind:<13} {d:>10.3} {f:>10.3} {r:>10.3}");
+        }
+    }
 
     #[test]
     fn finds_http_url_under_column() {
