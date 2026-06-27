@@ -1577,7 +1577,15 @@ fn paint_grid(
             }
         }
 
-        // Pass 3: underline/strikethrough, on top of the glyphs.
+        // Pass 3: underline/strikethrough, on top of the glyphs. Skip the whole
+        // traversal on rows with no decorations (the overwhelming majority,
+        // including all-CJK rows) so the pass costs nothing there.
+        if !cells
+            .iter()
+            .any(|c| c.style.underline || c.style.strikethrough)
+        {
+            continue;
+        }
         for (col, cell) in cells.iter().enumerate() {
             if !cell.style.underline && !cell.style.strikethrough {
                 continue;
@@ -1788,8 +1796,90 @@ mod tests {
     #[derive(Clone, Copy)]
     enum Mode {
         Direct,
+        PerCell,
         OffFresh,
         OffReused,
+    }
+
+    /// The pre-0.5.5 per-cell glyph/background path (no run coalescing), used as
+    /// the "before" baseline in the benchmark. Mirrors the shipped logic at
+    /// 0.5.3/0.5.4: a `set_text`/`show_layout` per non-empty cell and a
+    /// `rectangle`/`fill` per colored cell, with the ASCII baseline fast path.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_grid_percell(
+        cr: &gtk::cairo::Context,
+        font: &gtk::pango::FontDescription,
+        w: i32,
+        h: i32,
+        cols: u16,
+        rows: u16,
+        grid: &[super::VtCell],
+        cw: f64,
+        ch: f64,
+        ascent: f64,
+        colors: &flowmux_terminal::vt::Colors,
+        selection_bg: Option<flowmux_terminal::vt::Rgb>,
+        selection_fg: Option<flowmux_terminal::vt::Rgb>,
+    ) {
+        use flowmux_terminal::vt::Rgb;
+        let (br, bgc, bb) = super::rgb(colors.bg);
+        cr.set_source_rgb(br, bgc, bb);
+        cr.rectangle(0.0, 0.0, w as f64, h as f64);
+        let _ = cr.fill();
+        let layout = pangocairo::functions::create_layout(cr);
+        layout.set_font_description(Some(font));
+        layout.set_text("M");
+        let primary_baseline = layout.baseline() as f64 / gtk::pango::SCALE as f64;
+        let sel_bg = selection_bg.unwrap_or(Rgb {
+            r: 51,
+            g: 87,
+            b: 140,
+        });
+        for row in 0..rows {
+            let y = row as f64 * ch;
+            let row_start = row as usize * cols as usize;
+            let cells = &grid[row_start..row_start + cols as usize];
+            for (col, cell) in cells.iter().enumerate() {
+                let cell_px_w = if cell.wide { cw * 2.0 } else { cw };
+                if let Some(c) = super::cell_bg_fill(cell, sel_bg) {
+                    let (r, g, bl) = super::rgb(c);
+                    cr.set_source_rgb(r, g, bl);
+                    cr.rectangle(col as f64 * cw, y, cell_px_w, ch);
+                    let _ = cr.fill();
+                }
+            }
+            for (col, cell) in cells.iter().enumerate() {
+                let x = col as f64 * cw;
+                let cell_px_w = if cell.wide { cw * 2.0 } else { cw };
+                let (fr, fgc, fb) = super::rgb(super::cell_fg(cell, colors, selection_fg));
+                if !cell.text.is_empty() {
+                    layout.set_text(&cell.text);
+                    cr.set_source_rgb(fr, fgc, fb);
+                    let ascii = !cell.wide
+                        && cell.text.len() == 1
+                        && cell.text.as_bytes()[0].is_ascii_graphic();
+                    if ascii {
+                        cr.move_to(x, y + ascent - primary_baseline);
+                    } else {
+                        let baseline = layout.baseline() as f64 / gtk::pango::SCALE as f64;
+                        let glyph_w = layout.pixel_size().0 as f64;
+                        let x_off = ((cell_px_w - glyph_w) / 2.0).max(0.0);
+                        cr.move_to(x + x_off, y + ascent - baseline);
+                    }
+                    pangocairo::functions::show_layout(cr, &layout);
+                }
+                if cell.style.underline {
+                    cr.set_source_rgb(fr, fgc, fb);
+                    cr.rectangle(x, y + ascent + 2.0, cell_px_w, 1.0);
+                    let _ = cr.fill();
+                }
+                if cell.style.strikethrough {
+                    cr.set_source_rgb(fr, fgc, fb);
+                    cr.rectangle(x, y + ch * 0.5, cell_px_w, 1.0);
+                    let _ = cr.fill();
+                }
+            }
+        }
     }
 
     fn time_mode(grid: &[super::VtCell], cols: u16, rows: u16, mode: Mode, loops: u32) -> f64 {
@@ -1827,6 +1917,11 @@ mod tests {
                         &scr, &font, w, h, cols, rows, grid, cw, ch, ascent, &colors, None, None,
                     );
                 }
+                Mode::PerCell => {
+                    paint_grid_percell(
+                        &scr, &font, w, h, cols, rows, grid, cw, ch, ascent, &colors, None, None,
+                    );
+                }
                 Mode::OffFresh => {
                     let s = ImageSurface::create(Format::ARgb32, w, h).unwrap();
                     {
@@ -1861,17 +1956,21 @@ mod tests {
         let kinds = ["ascii_dense", "ascii_words", "colored", "cjk", "sparse"];
         println!("\ngrid {cols}x{rows}, {loops} frames/measure — ms/frame (lower=better)");
         println!(
-            "{:<13} {:>10} {:>10} {:>10}",
-            "scenario", "direct", "off_fresh", "off_reuse"
+            "{:<13} {:>10} {:>10} {:>10} {:>10} {:>9}",
+            "scenario", "per_cell", "direct", "off_fresh", "off_reuse", "gain%"
         );
+        // per_cell = pre-0.5.5 baseline; direct = shipped 0.5.5; off_fresh = the
+        // 0.5.4 offscreen-cache regression; gain% = per_cell→direct improvement.
         for kind in kinds {
             let grid = bench_grid(cols as usize, rows as usize, kind);
             // Warm up font/glyph caches so the first measure is not penalized.
             let _ = time_mode(&grid, cols, rows, Mode::Direct, 5);
+            let p = time_mode(&grid, cols, rows, Mode::PerCell, loops);
             let d = time_mode(&grid, cols, rows, Mode::Direct, loops);
             let f = time_mode(&grid, cols, rows, Mode::OffFresh, loops);
             let r = time_mode(&grid, cols, rows, Mode::OffReused, loops);
-            println!("{kind:<13} {d:>10.3} {f:>10.3} {r:>10.3}");
+            let gain = (p - d) / p * 100.0;
+            println!("{kind:<13} {p:>10.3} {d:>10.3} {f:>10.3} {r:>10.3} {gain:>8.1}%");
         }
     }
 
