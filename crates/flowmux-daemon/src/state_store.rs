@@ -42,6 +42,69 @@ pub enum CloseOutcome {
     WorkspaceRemoved { workspace: WorkspaceId },
 }
 
+/// Result of relocating a tab via [`StateStore::move_surface_to_pane`] /
+/// [`StateStore::move_surface_to_workspace`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MoveSurfaceOutcome {
+    /// Workspace the tab now lives in.
+    pub dst_workspace: WorkspaceId,
+    /// Workspace the tab came from.
+    pub src_workspace: WorkspaceId,
+    /// The source leaf emptied and was collapsed, so its pane no longer exists.
+    pub src_pane_removed: bool,
+    /// Collapsing the source removed its workspace entirely.
+    pub src_workspace_removed: bool,
+}
+
+/// Remove the leaf pane `target` from an already-locked [`State`], collapsing
+/// the enclosing split / surface / workspace as needed. Mirrors the body of
+/// [`StateStore::close_pane`] but operates on a held lock so it can be reused
+/// by the tab-move path. Returns `None` if `target` is not found.
+fn remove_pane_leaf_locked(s: &mut State, target: PaneId) -> Option<CloseOutcome> {
+    for ws_idx in 0..s.workspaces.len() {
+        let mut surface_to_drop = None;
+        for surf_idx in 0..s.workspaces[ws_idx].surfaces.len() {
+            let surface = &mut s.workspaces[ws_idx].surfaces[surf_idx];
+            let root = std::mem::replace(
+                &mut surface.root_pane,
+                Pane::Leaf {
+                    id: PaneId::new(),
+                    content: PaneContent::tabbed_terminal("Terminal", None),
+                },
+            );
+            match root.remove_leaf(target) {
+                RemoveOutcome::EntirelyRemoved => {
+                    surface_to_drop = Some(surf_idx);
+                    break;
+                }
+                RemoveOutcome::Replaced(new_root) => {
+                    surface.root_pane = new_root;
+                    return Some(CloseOutcome::PaneRemoved {
+                        workspace: s.workspaces[ws_idx].id,
+                    });
+                }
+                RemoveOutcome::NotFound(unchanged) => {
+                    surface.root_pane = unchanged;
+                }
+            }
+        }
+        if let Some(idx) = surface_to_drop {
+            s.workspaces[ws_idx].surfaces.remove(idx);
+            let ws_id = s.workspaces[ws_idx].id;
+            if s.workspaces[ws_idx].surfaces.is_empty() {
+                s.workspaces.remove(ws_idx);
+                s.workspace_order.retain(|id| *id != ws_id);
+                if s.active_workspace == Some(ws_id) {
+                    s.active_workspace = s.workspace_order.first().copied();
+                }
+                return Some(CloseOutcome::WorkspaceRemoved { workspace: ws_id });
+            }
+            return Some(CloseOutcome::SurfaceRemoved { workspace: ws_id });
+        }
+    }
+    None
+}
+
 #[derive(Clone)]
 pub struct StateStore {
     inner: Arc<Mutex<State>>,
@@ -268,53 +331,128 @@ impl StateStore {
     /// Returns `None` if the pane wasn't found.
     pub async fn close_pane(&self, target: PaneId) -> Option<CloseOutcome> {
         let mut s = self.inner.lock().await;
-        for ws_idx in 0..s.workspaces.len() {
-            let mut surface_to_drop = None;
-            for surf_idx in 0..s.workspaces[ws_idx].surfaces.len() {
-                let surface = &mut s.workspaces[ws_idx].surfaces[surf_idx];
-                let root = std::mem::replace(
-                    &mut surface.root_pane,
-                    Pane::Leaf {
-                        id: PaneId::new(),
-                        content: PaneContent::tabbed_terminal("Terminal", None),
-                    },
-                );
-                match root.remove_leaf(target) {
-                    RemoveOutcome::EntirelyRemoved => {
-                        surface_to_drop = Some(surf_idx);
-                        break;
-                    }
-                    RemoveOutcome::Replaced(new_root) => {
-                        surface.root_pane = new_root;
-                        let ws_id = s.workspaces[ws_idx].id;
-                        drop(s);
-                        self.mark_dirty();
-                        return Some(CloseOutcome::PaneRemoved { workspace: ws_id });
-                    }
-                    RemoveOutcome::NotFound(unchanged) => {
-                        surface.root_pane = unchanged;
-                    }
+        let outcome = remove_pane_leaf_locked(&mut s, target);
+        drop(s);
+        if outcome.is_some() {
+            self.mark_dirty();
+        }
+        outcome
+    }
+
+    /// Return the workspace that owns leaf pane `target`, if any.
+    pub async fn workspace_of_pane(&self, target: PaneId) -> Option<WorkspaceId> {
+        let s = self.inner.lock().await;
+        s.workspaces
+            .iter()
+            .find(|ws| {
+                ws.surfaces
+                    .iter()
+                    .any(|sf| sf.root_pane.find_leaf_content(target).is_some())
+            })
+            .map(|ws| ws.id)
+    }
+
+    /// Relocate the tab `surface_id` out of leaf `src_pane` and into leaf
+    /// `dst_pane` at `target_index` (clamped to the end). Works whether the
+    /// destination is in the same workspace or a different one. If the source
+    /// leaf empties it is collapsed like a pane close. Returns `None` if the
+    /// surface or destination pane cannot be found (the state is left
+    /// unchanged in that case).
+    pub async fn move_surface_to_pane(
+        &self,
+        src_pane: PaneId,
+        surface_id: SurfaceId,
+        dst_pane: PaneId,
+        target_index: usize,
+    ) -> Option<MoveSurfaceOutcome> {
+        let mut s = self.inner.lock().await;
+
+        // Destination must exist before we disturb the source, so a missing
+        // target is a clean no-op rather than a lost tab.
+        let dst_exists = s.workspaces.iter().any(|ws| {
+            ws.surfaces
+                .iter()
+                .any(|sf| sf.root_pane.find_leaf_content(dst_pane).is_some())
+        });
+        if !dst_exists {
+            return None;
+        }
+
+        // Take from the source.
+        let mut taken = None;
+        let mut src_workspace = None;
+        let mut src_leaf_empty = false;
+        'take: for ws in s.workspaces.iter_mut() {
+            for sf in ws.surfaces.iter_mut() {
+                if let Some((surface, empty)) =
+                    sf.root_pane.take_surface_from_leaf(src_pane, surface_id)
+                {
+                    taken = Some(surface);
+                    src_workspace = Some(ws.id);
+                    src_leaf_empty = empty;
+                    break 'take;
                 }
-            }
-            if let Some(idx) = surface_to_drop {
-                s.workspaces[ws_idx].surfaces.remove(idx);
-                let ws_id = s.workspaces[ws_idx].id;
-                if s.workspaces[ws_idx].surfaces.is_empty() {
-                    s.workspaces.remove(ws_idx);
-                    s.workspace_order.retain(|id| *id != ws_id);
-                    if s.active_workspace == Some(ws_id) {
-                        s.active_workspace = s.workspace_order.first().copied();
-                    }
-                    drop(s);
-                    self.mark_dirty();
-                    return Some(CloseOutcome::WorkspaceRemoved { workspace: ws_id });
-                }
-                drop(s);
-                self.mark_dirty();
-                return Some(CloseOutcome::SurfaceRemoved { workspace: ws_id });
             }
         }
-        None
+        let taken = taken?;
+        let src_workspace = src_workspace?;
+
+        // Insert into the destination.
+        let mut dst_workspace = None;
+        let mut pending = Some(taken);
+        'insert: for ws in s.workspaces.iter_mut() {
+            for sf in ws.surfaces.iter_mut() {
+                if sf.root_pane.find_leaf_content(dst_pane).is_some() {
+                    let surface = pending.take().expect("surface pending insert");
+                    sf.root_pane
+                        .insert_surface_into_leaf(dst_pane, surface, target_index);
+                    dst_workspace = Some(ws.id);
+                    break 'insert;
+                }
+            }
+        }
+        let dst_workspace = dst_workspace.expect("destination existed before take");
+
+        // Collapse the source leaf if it emptied.
+        let mut src_pane_removed = false;
+        let mut src_workspace_removed = false;
+        if src_leaf_empty {
+            match remove_pane_leaf_locked(&mut s, src_pane) {
+                Some(CloseOutcome::WorkspaceRemoved { .. }) => {
+                    src_pane_removed = true;
+                    src_workspace_removed = true;
+                }
+                Some(_) => src_pane_removed = true,
+                None => {}
+            }
+        }
+
+        drop(s);
+        self.mark_dirty();
+        Some(MoveSurfaceOutcome {
+            dst_workspace,
+            src_workspace,
+            src_pane_removed,
+            src_workspace_removed,
+        })
+    }
+
+    /// Convenience wrapper: move a tab to the **last** position of the first
+    /// pane of `dst_workspace`. Used by the right-click "Move" menu and by a
+    /// drop directly onto a workspace in the side panel.
+    pub async fn move_surface_to_workspace(
+        &self,
+        src_pane: PaneId,
+        surface_id: SurfaceId,
+        dst_workspace: WorkspaceId,
+    ) -> Option<MoveSurfaceOutcome> {
+        let dst_pane = {
+            let s = self.inner.lock().await;
+            let ws = s.workspaces.iter().find(|w| w.id == dst_workspace)?;
+            ws.surfaces.first()?.root_pane.first_leaf_id()?
+        };
+        self.move_surface_to_pane(src_pane, surface_id, dst_pane, usize::MAX)
+            .await
     }
 
     /// Mark `id` as the focused workspace so the next launch starts
@@ -3250,5 +3388,169 @@ mod tests {
             .unwrap();
 
         assert!(store.find_right_sibling_browser_leaf(term).await.is_none());
+    }
+
+    // ---- move_surface_to_pane / move_surface_to_workspace ----
+
+    async fn pane_tab_ids(store: &StateStore, ws: WorkspaceId, pane: PaneId) -> Vec<SurfaceId> {
+        let w = store.get_workspace(ws).await.unwrap();
+        for surface in &w.surfaces {
+            if let Some(PaneContent::Tabs { surfaces, .. }) =
+                surface.root_pane.find_leaf_content(pane)
+            {
+                return surfaces.iter().map(|s| s.id).collect();
+            }
+        }
+        Vec::new()
+    }
+
+    #[tokio::test]
+    async fn move_surface_to_pane_appends_to_other_pane_in_same_workspace() {
+        let store = StateStore::new_lazy(State::default());
+        let ws = store
+            .create_workspace(Some("w".into()), std::path::PathBuf::from("/tmp/w"))
+            .await;
+        let src = first_pane(&store.get_workspace(ws).await.unwrap());
+        let (_, dst) = store
+            .split_pane(src, SplitDirection::Vertical)
+            .await
+            .unwrap();
+        // src now has 2 tabs.
+        let (_, moved) = store.add_terminal_surface_to_pane(src, None).await.unwrap();
+
+        let out = store
+            .move_surface_to_pane(src, moved, dst, usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(out.dst_workspace, ws);
+        assert_eq!(out.src_workspace, ws);
+        assert!(!out.src_pane_removed);
+        assert!(!out.src_workspace_removed);
+
+        let src_tabs = pane_tab_ids(&store, ws, src).await;
+        let dst_tabs = pane_tab_ids(&store, ws, dst).await;
+        assert!(!src_tabs.contains(&moved));
+        assert_eq!(dst_tabs.last().copied(), Some(moved));
+        assert_eq!(dst_tabs.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn move_surface_to_pane_inserts_at_index() {
+        let store = StateStore::new_lazy(State::default());
+        let ws = store
+            .create_workspace(Some("w".into()), std::path::PathBuf::from("/tmp/w"))
+            .await;
+        let src = first_pane(&store.get_workspace(ws).await.unwrap());
+        let (_, dst) = store
+            .split_pane(src, SplitDirection::Vertical)
+            .await
+            .unwrap();
+        // dst gets a second tab so it has [d0, d1].
+        store.add_terminal_surface_to_pane(dst, None).await.unwrap();
+        let dst_before = pane_tab_ids(&store, ws, dst).await;
+        let (_, moved) = store.add_terminal_surface_to_pane(src, None).await.unwrap();
+
+        store
+            .move_surface_to_pane(src, moved, dst, 1)
+            .await
+            .unwrap();
+
+        let dst_after = pane_tab_ids(&store, ws, dst).await;
+        assert_eq!(dst_after, vec![dst_before[0], moved, dst_before[1]]);
+    }
+
+    #[tokio::test]
+    async fn move_surface_collapses_emptied_source_pane_but_keeps_workspace() {
+        let store = StateStore::new_lazy(State::default());
+        let ws = store
+            .create_workspace(Some("w".into()), std::path::PathBuf::from("/tmp/w"))
+            .await;
+        let keep = first_pane(&store.get_workspace(ws).await.unwrap());
+        let (_, src) = store
+            .split_pane(keep, SplitDirection::Vertical)
+            .await
+            .unwrap();
+        let only = store.get_workspace(ws).await.unwrap().surfaces[0]
+            .root_pane
+            .active_surface_id(src)
+            .unwrap();
+
+        let out = store
+            .move_surface_to_pane(src, only, keep, usize::MAX)
+            .await
+            .unwrap();
+        assert!(out.src_pane_removed);
+        assert!(!out.src_workspace_removed);
+
+        let ws_after = store.get_workspace(ws).await.unwrap();
+        // src pane is gone; keep pane absorbed the surface (2 tabs).
+        assert_eq!(pane_tab_ids(&store, ws, keep).await.len(), 2);
+        assert_eq!(ws_after.surfaces[0].root_pane.first_leaf_id(), Some(keep));
+    }
+
+    #[tokio::test]
+    async fn move_surface_to_workspace_appends_and_removes_empty_source_workspace() {
+        let store = StateStore::new_lazy(State::default());
+        let ws1 = store
+            .create_workspace(Some("one".into()), std::path::PathBuf::from("/tmp/one"))
+            .await;
+        let ws2 = store
+            .create_workspace(Some("two".into()), std::path::PathBuf::from("/tmp/two"))
+            .await;
+        let src = first_pane(&store.get_workspace(ws1).await.unwrap());
+        let moved = store.get_workspace(ws1).await.unwrap().surfaces[0]
+            .root_pane
+            .active_surface_id(src)
+            .unwrap();
+        let dst = first_pane(&store.get_workspace(ws2).await.unwrap());
+
+        let out = store
+            .move_surface_to_workspace(src, moved, ws2)
+            .await
+            .unwrap();
+        assert_eq!(out.dst_workspace, ws2);
+        assert_eq!(out.src_workspace, ws1);
+        assert!(out.src_workspace_removed);
+
+        assert!(store.get_workspace(ws1).await.is_none());
+        let dst_tabs = pane_tab_ids(&store, ws2, dst).await;
+        assert_eq!(dst_tabs.len(), 2);
+        assert_eq!(dst_tabs.last().copied(), Some(moved));
+    }
+
+    #[tokio::test]
+    async fn move_surface_missing_surface_returns_none() {
+        let store = StateStore::new_lazy(State::default());
+        let ws = store
+            .create_workspace(Some("w".into()), std::path::PathBuf::from("/tmp/w"))
+            .await;
+        let src = first_pane(&store.get_workspace(ws).await.unwrap());
+        let (_, dst) = store
+            .split_pane(src, SplitDirection::Vertical)
+            .await
+            .unwrap();
+        assert!(store
+            .move_surface_to_pane(src, SurfaceId::new(), dst, 0)
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn move_surface_to_missing_dest_keeps_surface() {
+        let store = StateStore::new_lazy(State::default());
+        let ws = store
+            .create_workspace(Some("w".into()), std::path::PathBuf::from("/tmp/w"))
+            .await;
+        let src = first_pane(&store.get_workspace(ws).await.unwrap());
+        let moved = store.get_workspace(ws).await.unwrap().surfaces[0]
+            .root_pane
+            .active_surface_id(src)
+            .unwrap();
+        assert!(store
+            .move_surface_to_pane(src, moved, PaneId::new(), 0)
+            .await
+            .is_none());
+        // Surface still present in the source pane.
+        assert!(pane_tab_ids(&store, ws, src).await.contains(&moved));
     }
 }

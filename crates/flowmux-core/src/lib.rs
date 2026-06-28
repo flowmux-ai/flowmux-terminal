@@ -604,6 +604,85 @@ impl Pane {
         }
     }
 
+    /// Remove `surface_id` from leaf `target` and return the removed
+    /// [`PaneSurface`] together with a flag that is `true` when the leaf has no
+    /// tabs left afterwards. Mirrors [`Self::close_surface_in_leaf`]'s
+    /// active-id fix-up but hands the surface back instead of dropping it — used
+    /// by the tab-move feature to relocate a tab while preserving its state.
+    /// Returns `None` if the pane or surface is not found.
+    pub fn take_surface_from_leaf(
+        &mut self,
+        target: PaneId,
+        surface_id: SurfaceId,
+    ) -> Option<(PaneSurface, bool)> {
+        match self {
+            Pane::Leaf { id, content } if *id == target => match content {
+                PaneContent::Tabs { active, surfaces } => {
+                    let idx = surfaces.iter().position(|s| s.id == surface_id)?;
+                    let taken = surfaces.remove(idx);
+                    let empty = surfaces.is_empty();
+                    if !empty
+                        && (*active == surface_id || !surfaces.iter().any(|s| s.id == *active))
+                    {
+                        *active = surfaces[idx.saturating_sub(1).min(surfaces.len() - 1)].id;
+                    }
+                    Some((taken, empty))
+                }
+                PaneContent::Terminal { .. } | PaneContent::Browser { .. } => None,
+            },
+            Pane::Leaf { .. } => None,
+            Pane::Split { first, second, .. } => first
+                .take_surface_from_leaf(target, surface_id)
+                .or_else(|| second.take_surface_from_leaf(target, surface_id)),
+        }
+    }
+
+    /// Insert `surface` into leaf `target` at `index` (clamped to the tab
+    /// count) and make it the active tab. Returns the inserted [`SurfaceId`],
+    /// or `None` if no matching tabs leaf exists. Companion to
+    /// [`Self::take_surface_from_leaf`] for relocating a tab.
+    pub fn insert_surface_into_leaf(
+        &mut self,
+        target: PaneId,
+        surface: PaneSurface,
+        index: usize,
+    ) -> Option<SurfaceId> {
+        self.insert_surface_into_leaf_inner(target, surface, index)
+            .ok()
+    }
+
+    // The `Err` payload hands ownership of the not-yet-inserted surface back up
+    // the recursion so it can be tried on the sibling subtree; boxing it keeps
+    // the `Result` small.
+    fn insert_surface_into_leaf_inner(
+        &mut self,
+        target: PaneId,
+        surface: PaneSurface,
+        index: usize,
+    ) -> Result<SurfaceId, Box<PaneSurface>> {
+        match self {
+            Pane::Leaf { id, content } if *id == target => match content {
+                PaneContent::Tabs { active, surfaces } => {
+                    let sid = surface.id;
+                    let at = index.min(surfaces.len());
+                    surfaces.insert(at, surface);
+                    *active = sid;
+                    Ok(sid)
+                }
+                PaneContent::Terminal { .. } | PaneContent::Browser { .. } => {
+                    Err(Box::new(surface))
+                }
+            },
+            Pane::Leaf { .. } => Err(Box::new(surface)),
+            Pane::Split { first, second, .. } => {
+                match first.insert_surface_into_leaf_inner(target, surface, index) {
+                    Ok(id) => Ok(id),
+                    Err(surface) => second.insert_surface_into_leaf_inner(target, *surface, index),
+                }
+            }
+        }
+    }
+
     pub fn active_surface_id(&self, target: PaneId) -> Option<SurfaceId> {
         match self {
             Pane::Leaf { id, content } if *id == target => content.active_surface().map(|s| s.id),
@@ -2953,5 +3032,137 @@ mod tests {
         let changed = normalize_unlocked_terminal_title(&mut surface);
         assert!(changed);
         assert_eq!(surface.title, FALLBACK_TERMINAL_TAB_TITLE);
+    }
+
+    // ---- tab move (take / insert) ----
+
+    fn leaf_with_tabs(pane_id: PaneId, titles: &[&str]) -> (Pane, Vec<SurfaceId>) {
+        let surfaces: Vec<PaneSurface> = titles
+            .iter()
+            .map(|t| PaneSurface::terminal(*t, None))
+            .collect();
+        let ids: Vec<SurfaceId> = surfaces.iter().map(|s| s.id).collect();
+        let active = ids[0];
+        (
+            Pane::Leaf {
+                id: pane_id,
+                content: PaneContent::Tabs { active, surfaces },
+            },
+            ids,
+        )
+    }
+
+    fn leaf_tab_ids(pane: &Pane, target: PaneId) -> Vec<SurfaceId> {
+        match pane.find_leaf_content(target) {
+            Some(PaneContent::Tabs { surfaces, .. }) => surfaces.iter().map(|s| s.id).collect(),
+            _ => panic!("expected tabs leaf"),
+        }
+    }
+
+    #[test]
+    fn take_surface_removes_middle_tab_and_keeps_leaf() {
+        let pane = PaneId::new();
+        let (mut p, ids) = leaf_with_tabs(pane, &["a", "b", "c"]);
+        let (taken, empty) = p.take_surface_from_leaf(pane, ids[1]).expect("taken");
+        assert_eq!(taken.id, ids[1]);
+        assert!(!empty);
+        assert_eq!(leaf_tab_ids(&p, pane), vec![ids[0], ids[2]]);
+    }
+
+    #[test]
+    fn take_surface_reports_empty_when_last_tab_removed() {
+        let pane = PaneId::new();
+        let (mut p, ids) = leaf_with_tabs(pane, &["only"]);
+        let (taken, empty) = p.take_surface_from_leaf(pane, ids[0]).expect("taken");
+        assert_eq!(taken.id, ids[0]);
+        assert!(empty);
+    }
+
+    #[test]
+    fn take_surface_reactivates_neighbor_when_active_removed() {
+        let pane = PaneId::new();
+        let (mut p, ids) = leaf_with_tabs(pane, &["a", "b", "c"]);
+        // active is ids[0]; remove it
+        let (_taken, empty) = p.take_surface_from_leaf(pane, ids[0]).expect("taken");
+        assert!(!empty);
+        match p.find_leaf_content(pane) {
+            Some(PaneContent::Tabs { active, surfaces }) => {
+                assert!(surfaces.iter().any(|s| s.id == active));
+                assert_ne!(active, ids[0]);
+            }
+            _ => panic!("expected tabs"),
+        }
+    }
+
+    #[test]
+    fn take_surface_not_found_returns_none() {
+        let pane = PaneId::new();
+        let (mut p, _ids) = leaf_with_tabs(pane, &["a"]);
+        assert!(p.take_surface_from_leaf(pane, SurfaceId::new()).is_none());
+    }
+
+    #[test]
+    fn insert_surface_at_index_sets_active() {
+        let pane = PaneId::new();
+        let (mut p, ids) = leaf_with_tabs(pane, &["a", "b", "c"]);
+        let moved = PaneSurface::terminal("moved", None);
+        let moved_id = moved.id;
+        let got = p
+            .insert_surface_into_leaf(pane, moved, 1)
+            .expect("inserted");
+        assert_eq!(got, moved_id);
+        assert_eq!(
+            leaf_tab_ids(&p, pane),
+            vec![ids[0], moved_id, ids[1], ids[2]]
+        );
+        match p.find_leaf_content(pane) {
+            Some(PaneContent::Tabs { active, .. }) => assert_eq!(active, moved_id),
+            _ => panic!("expected tabs"),
+        }
+    }
+
+    #[test]
+    fn insert_surface_clamps_index_to_end() {
+        let pane = PaneId::new();
+        let (mut p, ids) = leaf_with_tabs(pane, &["a", "b"]);
+        let moved = PaneSurface::terminal("moved", None);
+        let moved_id = moved.id;
+        p.insert_surface_into_leaf(pane, moved, 999)
+            .expect("inserted");
+        assert_eq!(leaf_tab_ids(&p, pane), vec![ids[0], ids[1], moved_id]);
+    }
+
+    #[test]
+    fn insert_surface_into_missing_leaf_returns_none() {
+        let pane = PaneId::new();
+        let (mut p, _ids) = leaf_with_tabs(pane, &["a"]);
+        let moved = PaneSurface::terminal("moved", None);
+        assert!(p
+            .insert_surface_into_leaf(PaneId::new(), moved, 0)
+            .is_none());
+    }
+
+    #[test]
+    fn take_then_insert_moves_between_leaves_in_split() {
+        let l1 = PaneId::new();
+        let l2 = PaneId::new();
+        let (left, left_ids) = leaf_with_tabs(l1, &["a", "b"]);
+        let (right, _right_ids) = leaf_with_tabs(l2, &["x"]);
+        let mut p = Pane::Split {
+            id: PaneId::new(),
+            direction: SplitDirection::Vertical,
+            ratio: 0.5,
+            first: Box::new(left),
+            second: Box::new(right),
+        };
+        let (taken, empty) = p.take_surface_from_leaf(l1, left_ids[1]).expect("taken");
+        assert!(!empty);
+        let moved_id = taken.id;
+        p.insert_surface_into_leaf(l2, taken, usize::MAX)
+            .expect("inserted");
+        assert_eq!(leaf_tab_ids(&p, l1), vec![left_ids[0]]);
+        let right_ids = leaf_tab_ids(&p, l2);
+        assert_eq!(right_ids.last().copied(), Some(moved_id));
+        assert_eq!(right_ids.len(), 2);
     }
 }

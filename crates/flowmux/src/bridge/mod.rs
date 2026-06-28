@@ -263,6 +263,26 @@ pub enum GtkCommand {
     /// existing GTK widget is moved, so the running terminal/browser state is
     /// preserved and the source pane loses that tab.
     TearOffSurface { pane: PaneId, surface: SurfaceId },
+    /// Move a pane-local surface tab into another pane (possibly in another
+    /// workspace) by drag and drop. The existing GTK widget is moved, so the
+    /// running terminal/browser state is preserved. `target_index` is the final
+    /// position in the destination pane, clamped to the end.
+    MoveSurfaceToPane {
+        src_pane: PaneId,
+        surface: SurfaceId,
+        dst_pane: PaneId,
+        target_index: usize,
+        ack: oneshot::Sender<Result<(), String>>,
+    },
+    /// Move a pane-local surface tab to the last position of the first pane of
+    /// `dst_workspace`. Backs the right-click "Move" menu and a drop directly
+    /// onto a workspace row in the side panel.
+    MoveSurfaceToWorkspace {
+        src_pane: PaneId,
+        surface: SurfaceId,
+        dst_workspace: WorkspaceId,
+        ack: oneshot::Sender<Result<(), String>>,
+    },
     /// terminal pane reported a cwd change for a terminal surface.
     TerminalCwdChanged {
         pane: PaneId,

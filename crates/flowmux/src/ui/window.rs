@@ -15,8 +15,8 @@ use crate::ui::file_browser::{FileBrowserPaneState, FileBrowserPanel};
 use crate::ui::pane_terminal::PaneCallbacks;
 use crate::ui::sidebar::Sidebar;
 use crate::ui::workspace_view::{
-    attach_surface_to_pane, build_surface, solo_workspace_pane, split_pane_incremental,
-    IncrementalSplitOutcome, PaneRegistry, TornOffSurface,
+    attach_surface_to_pane, build_surface, build_surface_tab_widget, solo_workspace_pane,
+    split_pane_incremental, IncrementalSplitOutcome, MovingSurface, PaneRegistry, TornOffSurface,
 };
 use adw::prelude::*;
 use flowmux_config::cmux_json::{CmuxJson, CommandTarget, CustomCommand};
@@ -474,6 +474,7 @@ impl WindowController {
             bridge.clone(),
             options.clone(),
             pane_registry.clone(),
+            sidebar.workspace_titles(),
         );
 
         // gtk::Paned lets the user drag the divider between the
@@ -1315,6 +1316,172 @@ impl WindowController {
                 self.focus_after_close(workspace, pane).await;
             }
         }
+    }
+
+    /// Move a live surface tab into another pane (`dst_pane`), preserving its
+    /// terminal/browser state by re-parenting the existing widget rather than
+    /// rebuilding it. `target_index` is the final position in the destination
+    /// pane (clamped to the end). Backs cross-pane and cross-workspace
+    /// drag-and-drop.
+    async fn move_surface(
+        &self,
+        src_pane: PaneId,
+        surface: SurfaceId,
+        dst_pane: PaneId,
+        target_index: usize,
+    ) -> Result<(), String> {
+        if src_pane == dst_pane {
+            // A drop onto the tab's own pane (e.g. pane-body drop) is just a
+            // reorder; do that instead of a no-op move.
+            if self
+                .store
+                .reorder_surface_in_pane(src_pane, surface, target_index)
+                .await
+                .is_some()
+            {
+                self.pane_registry.borrow_mut().reorder_surface_widget(
+                    src_pane,
+                    surface,
+                    target_index,
+                );
+            }
+            return Ok(());
+        }
+
+        if !self.pane_registry.borrow().has_pane(dst_pane) {
+            return Err("destination pane is not rendered".to_string());
+        }
+
+        let moving = self
+            .pane_registry
+            .borrow_mut()
+            .detach_surface_for_move(src_pane, surface);
+        let Some(moving) = moving else {
+            return Err("source surface is not rendered".to_string());
+        };
+
+        let outcome = match self
+            .store
+            .move_surface_to_pane(src_pane, surface, dst_pane, target_index)
+            .await
+        {
+            Some(outcome) => outcome,
+            None => {
+                // Model rejected the move; restore the widget to its source.
+                self.reattach_surface(src_pane, surface, moving).await;
+                return Err("destination pane no longer exists".to_string());
+            }
+        };
+
+        let mounted = self
+            .mount_moved_surface(
+                dst_pane,
+                outcome.dst_workspace,
+                surface,
+                moving,
+                target_index,
+            )
+            .await;
+        if !mounted {
+            return Err("failed to mount moved surface".to_string());
+        }
+
+        if outcome.src_workspace_removed {
+            self.drop_workspace(outcome.src_workspace);
+            self.activate_active_or_show_empty().await;
+        } else if outcome.src_pane_removed {
+            self.apply_close_pane_incremental_or_rerender(outcome.src_workspace, src_pane)
+                .await;
+        }
+
+        if let Some(ws) = self.store.get_workspace(outcome.dst_workspace).await {
+            self.refresh_workspace_solo(&ws);
+        }
+        self.sync_workspace_label(outcome.dst_workspace).await;
+        if outcome.src_workspace != outcome.dst_workspace && !outcome.src_workspace_removed {
+            self.sync_workspace_label(outcome.src_workspace).await;
+        }
+        self.refresh_window_title().await;
+        self.focus_pane(dst_pane);
+        Ok(())
+    }
+
+    /// Move a live surface tab to the last position of the first pane of
+    /// `dst_workspace`, then bring that workspace to the front. Backs the
+    /// right-click "Move" submenu and a drop directly onto a side-panel row.
+    async fn move_surface_to_workspace(
+        &self,
+        src_pane: PaneId,
+        surface: SurfaceId,
+        dst_workspace: WorkspaceId,
+    ) -> Result<(), String> {
+        let dst_pane = self
+            .store
+            .get_workspace(dst_workspace)
+            .await
+            .and_then(|ws| {
+                ws.surfaces
+                    .first()
+                    .and_then(|s| s.root_pane.first_leaf_id())
+            })
+            .ok_or_else(|| "destination workspace has no pane".to_string())?;
+        let res = self
+            .move_surface(src_pane, surface, dst_pane, usize::MAX)
+            .await;
+        if res.is_ok() {
+            self.activate_workspace(dst_workspace).await;
+        }
+        res
+    }
+
+    /// Build a tab widget for `surface` in `dst_pane` and mount the detached
+    /// live widget there, aligning the tab order with the model index.
+    async fn mount_moved_surface(
+        &self,
+        dst_pane: PaneId,
+        dst_workspace: WorkspaceId,
+        surface: SurfaceId,
+        moving: MovingSurface,
+        target_index: usize,
+    ) -> bool {
+        let surface_model = self
+            .store
+            .get_workspace(dst_workspace)
+            .await
+            .and_then(|ws| {
+                ws.surfaces
+                    .iter()
+                    .find_map(|s| s.root_pane.find_surface(dst_pane, surface))
+            });
+        let Some(surface_model) = surface_model else {
+            return false;
+        };
+        let (tab, label) =
+            build_surface_tab_widget(dst_pane, &surface_model, true, &self.callbacks);
+        let ok = self.pane_registry.borrow_mut().attach_moved_surface(
+            dst_pane,
+            dst_workspace,
+            moving,
+            tab.upcast(),
+            label,
+        );
+        if ok {
+            self.pane_registry
+                .borrow_mut()
+                .reorder_surface_widget(dst_pane, surface, target_index);
+        }
+        ok
+    }
+
+    /// Best-effort restore of a detached surface back into its source pane when
+    /// a move is rejected by the store.
+    async fn reattach_surface(&self, src_pane: PaneId, surface: SurfaceId, moving: MovingSurface) {
+        let Some(ws_id) = self.store.workspace_of_pane(src_pane).await else {
+            return;
+        };
+        let _ = self
+            .mount_moved_surface(src_pane, ws_id, surface, moving, usize::MAX)
+            .await;
     }
 
     /// Shared pane registry — exposed so the keybindings module can
@@ -2367,6 +2534,29 @@ impl WindowController {
             }
             GtkCommand::TearOffSurface { pane, surface } => {
                 self.tear_off_surface(pane, surface).await;
+            }
+            GtkCommand::MoveSurfaceToPane {
+                src_pane,
+                surface,
+                dst_pane,
+                target_index,
+                ack,
+            } => {
+                let res = self
+                    .move_surface(src_pane, surface, dst_pane, target_index)
+                    .await;
+                let _ = ack.send(res);
+            }
+            GtkCommand::MoveSurfaceToWorkspace {
+                src_pane,
+                surface,
+                dst_workspace,
+                ack,
+            } => {
+                let res = self
+                    .move_surface_to_workspace(src_pane, surface, dst_workspace)
+                    .await;
+                let _ = ack.send(res);
             }
             GtkCommand::TerminalCwdChanged { pane, surface, cwd } => {
                 let ws_id = self.update_terminal_cwd(pane, surface, cwd).await;
@@ -3446,6 +3636,26 @@ impl WindowController {
         self.refresh_launcher_badge();
         self.store.set_active_workspace(Some(id)).await;
         if let Some(ws) = self.store.get_workspace(id).await {
+            // Selecting a workspace lands on the last tab of its first pane.
+            if let Some(leaf) = ws
+                .surfaces
+                .first()
+                .and_then(|s| s.root_pane.first_leaf_id())
+            {
+                let last =
+                    ws.surfaces
+                        .first()
+                        .and_then(|s| match s.root_pane.find_leaf_content(leaf) {
+                            Some(flowmux_core::PaneContent::Tabs { surfaces, .. }) => {
+                                surfaces.last().map(|surface| surface.id)
+                            }
+                            _ => None,
+                        });
+                if let Some(last) = last {
+                    self.store.set_active_surface(leaf, last).await;
+                    self.pane_registry.borrow_mut().activate_surface(leaf, last);
+                }
+            }
             self.focus_first_leaf_of(&ws);
         }
     }
@@ -3979,6 +4189,7 @@ fn make_callbacks(
     bridge: Bridge,
     options: Rc<RefCell<flowmux_config::options::Options>>,
     pane_registry: Rc<RefCell<PaneRegistry>>,
+    workspace_titles: Rc<RefCell<Vec<(WorkspaceId, String)>>>,
 ) -> PaneCallbacks {
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -4158,6 +4369,51 @@ fn make_callbacks(
                         .await;
                 });
             }))
+        },
+        on_move_surface_to_pane: {
+            let bridge = bridge.clone();
+            Rc::new(RefCell::new(
+                move |src_pane, surface, dst_pane, target_index| {
+                    let bridge = bridge.clone();
+                    glib::MainContext::default().spawn_local(async move {
+                        let (ack_tx, ack_rx) = oneshot::channel();
+                        let _ = bridge
+                            .tx
+                            .send(GtkCommand::MoveSurfaceToPane {
+                                src_pane,
+                                surface,
+                                dst_pane,
+                                target_index,
+                                ack: ack_tx,
+                            })
+                            .await;
+                        let _ = ack_rx.await;
+                    });
+                },
+            ))
+        },
+        on_move_surface_to_workspace: {
+            let bridge = bridge.clone();
+            Rc::new(RefCell::new(move |src_pane, surface, dst_workspace| {
+                let bridge = bridge.clone();
+                glib::MainContext::default().spawn_local(async move {
+                    let (ack_tx, ack_rx) = oneshot::channel();
+                    let _ = bridge
+                        .tx
+                        .send(GtkCommand::MoveSurfaceToWorkspace {
+                            src_pane,
+                            surface,
+                            dst_workspace,
+                            ack: ack_tx,
+                        })
+                        .await;
+                    let _ = ack_rx.await;
+                });
+            }))
+        },
+        list_workspaces: {
+            let workspace_titles = workspace_titles.clone();
+            Rc::new(move || workspace_titles.borrow().clone())
         },
         tab_drag_drop_seen: Rc::new(Cell::new(false)),
         on_terminal_cwd_changed: {
@@ -8926,5 +9182,153 @@ mod tests {
             controller.dispatch(GtkCommand::RefreshLauncherBadge).await;
         }
         assert_eq!(controller.notifications.unread_count(), 0);
+    }
+
+    fn leaf_surface_ids(ws: &Workspace, pane: PaneId) -> Vec<SurfaceId> {
+        ws.surfaces
+            .iter()
+            .find_map(|s| match s.root_pane.find_leaf_content(pane) {
+                Some(flowmux_core::PaneContent::Tabs { surfaces, .. }) => {
+                    Some(surfaces.iter().map(|x| x.id).collect())
+                }
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    /// Moving a tab to another pane re-homes the *same* live terminal widget
+    /// (state preserved) and updates the model on both ends.
+    #[gtk::test]
+    async fn move_surface_to_pane_preserves_live_widget() {
+        adw::init().expect("libadwaita should initialize in GTK test");
+        let root = std::env::temp_dir().join("flowmux-ui-move-pane");
+        std::fs::create_dir_all(&root).unwrap();
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("ui".into()), root.clone())
+            .await;
+        let src = store.get_workspace(ws_id).await.unwrap().surfaces[0]
+            .root_pane
+            .first_leaf_id()
+            .unwrap();
+        let (_, dst) = store
+            .split_pane(src, flowmux_core::SplitDirection::Vertical)
+            .await
+            .unwrap();
+        // Add a second tab to src so moving it away does not collapse src.
+        let (_, moved) = store.add_terminal_surface_to_pane(src, None).await.unwrap();
+        let ws = store.get_workspace(ws_id).await.unwrap();
+
+        let (bridge, _rx) = Bridge::new();
+        let app = adw::Application::builder()
+            .application_id("com.flowmux.App.UiTest.MovePane")
+            .build();
+        app.register(None::<&gtk::gio::Cancellable>).unwrap();
+        let controller = WindowController::new(
+            &app,
+            store.clone(),
+            Arc::new(ResolvedTheme::load()),
+            bridge,
+            gtk::CssProvider::new(),
+            None,
+        );
+        controller.render_workspace(&ws);
+
+        let before = controller
+            .pane_registry
+            .borrow()
+            .terminals
+            .get(&moved)
+            .map(|t| t.root_widget());
+        assert!(before.is_some(), "moved surface should be a live terminal");
+
+        let (ack_tx, ack_rx) = oneshot::channel();
+        controller
+            .dispatch(GtkCommand::MoveSurfaceToPane {
+                src_pane: src,
+                surface: moved,
+                dst_pane: dst,
+                target_index: usize::MAX,
+                ack: ack_tx,
+            })
+            .await;
+        ack_rx.await.unwrap().expect("move should succeed");
+
+        let ws2 = store.get_workspace(ws_id).await.unwrap();
+        assert!(!leaf_surface_ids(&ws2, src).contains(&moved));
+        assert_eq!(leaf_surface_ids(&ws2, dst).last().copied(), Some(moved));
+
+        // Same GhosttyPane widget instance => terminal state was not rebuilt.
+        let after = controller
+            .pane_registry
+            .borrow()
+            .terminals
+            .get(&moved)
+            .map(|t| t.root_widget());
+        assert_eq!(before, after, "moved terminal must be the same live widget");
+    }
+
+    /// Moving the only tab out of a pane collapses that pane but keeps the
+    /// workspace, and the moved widget survives.
+    #[gtk::test]
+    async fn move_last_tab_collapses_source_pane() {
+        adw::init().expect("libadwaita should initialize in GTK test");
+        let root = std::env::temp_dir().join("flowmux-ui-move-collapse");
+        std::fs::create_dir_all(&root).unwrap();
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("ui".into()), root.clone())
+            .await;
+        let keep = store.get_workspace(ws_id).await.unwrap().surfaces[0]
+            .root_pane
+            .first_leaf_id()
+            .unwrap();
+        let (_, src) = store
+            .split_pane(keep, flowmux_core::SplitDirection::Vertical)
+            .await
+            .unwrap();
+        let moved = store.get_workspace(ws_id).await.unwrap().surfaces[0]
+            .root_pane
+            .active_surface_id(src)
+            .unwrap();
+        let ws = store.get_workspace(ws_id).await.unwrap();
+
+        let (bridge, _rx) = Bridge::new();
+        let app = adw::Application::builder()
+            .application_id("com.flowmux.App.UiTest.MoveCollapse")
+            .build();
+        app.register(None::<&gtk::gio::Cancellable>).unwrap();
+        let controller = WindowController::new(
+            &app,
+            store.clone(),
+            Arc::new(ResolvedTheme::load()),
+            bridge,
+            gtk::CssProvider::new(),
+            None,
+        );
+        controller.render_workspace(&ws);
+
+        let (ack_tx, ack_rx) = oneshot::channel();
+        controller
+            .dispatch(GtkCommand::MoveSurfaceToPane {
+                src_pane: src,
+                surface: moved,
+                dst_pane: keep,
+                target_index: usize::MAX,
+                ack: ack_tx,
+            })
+            .await;
+        ack_rx.await.unwrap().expect("move should succeed");
+
+        let ws2 = store.get_workspace(ws_id).await.unwrap();
+        // src pane is gone; workspace remains with keep holding both tabs.
+        assert!(store.get_workspace(ws_id).await.is_some());
+        assert_eq!(ws2.surfaces[0].root_pane.first_leaf_id(), Some(keep));
+        assert_eq!(leaf_surface_ids(&ws2, keep).len(), 2);
+        assert!(controller
+            .pane_registry
+            .borrow()
+            .terminals
+            .contains_key(&moved));
     }
 }

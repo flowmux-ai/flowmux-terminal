@@ -20,8 +20,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const TAB_DND_MIME: &str = "application/x-flowmux-tab";
-const TAB_DND_PAYLOAD_MAX: usize = 128;
+pub(crate) const TAB_DND_MIME: &str = "application/x-flowmux-tab";
+pub(crate) const TAB_DND_PAYLOAD_MAX: usize = 128;
 
 /// Return the leaf pane id when the workspace is "solo" — the first
 /// (rendered) surface's root is a single leaf holding a single tab.
@@ -322,6 +322,11 @@ impl PaneRegistry {
 
     /// Toggle the `has-multi-tabs` class on a pane's tab row so the active
     /// tab grows a 2px top stripe only when the pane has ≥2 tabs.
+    /// Whether `pane` is currently rendered (its surface stack exists).
+    pub fn has_pane(&self, pane: PaneId) -> bool {
+        self.surface_stacks.contains_key(&pane)
+    }
+
     pub fn refresh_tab_multi_class(&self, pane: PaneId) {
         let Some(tabs_box) = self.pane_tab_containers.get(&pane) else {
             return;
@@ -509,6 +514,116 @@ impl PaneRegistry {
             focus,
         })
     }
+
+    /// Detach a surface from `pane` for an **in-app move**, keeping the live
+    /// backend handle (terminal PTY / browser WebView) intact so it can be
+    /// re-homed into another pane without restarting. Unlike
+    /// [`Self::take_surface_for_tearoff`], which drops the registry handle (a
+    /// torn-off window only needs the widget), this returns the handle inside
+    /// [`MovingSurface`] so [`Self::attach_moved_surface`] can re-register it.
+    /// Returns `None` if the surface is not rendered in `pane`.
+    pub fn detach_surface_for_move(
+        &mut self,
+        pane: PaneId,
+        surface: SurfaceId,
+    ) -> Option<MovingSurface> {
+        let stack = self.surface_stacks.get(&pane)?.clone();
+        let content = stack.child_by_name(&surface.to_string())?;
+
+        // Pull the live handle out first; bail (leaving the widget tree
+        // untouched) if neither map owns this surface.
+        let handle = if let Some(terminal) = self.terminals.remove(&surface) {
+            MovingHandle::Terminal(terminal)
+        } else if let Some(browser) = self.browsers.remove(&surface) {
+            MovingHandle::Browser(browser)
+        } else {
+            return None;
+        };
+
+        if let Some(tabs) = self.surface_tabs.get_mut(&pane) {
+            if let Some(idx) = tabs.iter().position(|(id, _)| *id == surface) {
+                let (_, tab_widget) = tabs.remove(idx);
+                if let Some(parent) = tab_widget.parent() {
+                    if let Some(b) = parent.downcast_ref::<gtk::Box>() {
+                        b.remove(&tab_widget);
+                    } else {
+                        tab_widget.unparent();
+                    }
+                }
+            }
+        }
+        stack.remove(&content);
+        self.surface_tab_labels.remove(&surface);
+        self.surface_workspace.remove(&surface);
+        if self.active_terminal_by_pane.get(&pane) == Some(&surface) {
+            self.active_terminal_by_pane.remove(&pane);
+        }
+        if self.active_browser_by_pane.get(&pane) == Some(&surface) {
+            self.active_browser_by_pane.remove(&pane);
+        }
+        self.refresh_tab_multi_class(pane);
+
+        Some(MovingSurface {
+            surface,
+            content,
+            handle,
+        })
+    }
+
+    /// Mount a [`MovingSurface`] (produced by [`Self::detach_surface_for_move`])
+    /// into `dst_pane`, appending its tab to the bar and re-registering the live
+    /// handle under `dst_workspace`. The moved tab becomes active. Returns
+    /// `false` if `dst_pane` is not currently rendered (caller should ensure the
+    /// destination workspace is built first).
+    pub fn attach_moved_surface(
+        &mut self,
+        dst_pane: PaneId,
+        dst_workspace: WorkspaceId,
+        moving: MovingSurface,
+        tab: gtk::Widget,
+        label: gtk::Label,
+    ) -> bool {
+        let Some(stack) = self.surface_stacks.get(&dst_pane).cloned() else {
+            return false;
+        };
+        let Some(tabs_box) = self.pane_tab_containers.get(&dst_pane).cloned() else {
+            return false;
+        };
+        let surface = moving.surface;
+        stack.add_named(&moving.content, Some(&surface.to_string()));
+        tabs_box.append(&tab);
+        match moving.handle {
+            MovingHandle::Terminal(terminal) => {
+                self.terminals.insert(surface, terminal);
+            }
+            MovingHandle::Browser(browser) => {
+                self.browsers.insert(surface, browser);
+            }
+        }
+        self.surface_tab_labels.insert(surface, label);
+        self.surface_workspace.insert(surface, dst_workspace);
+        self.surface_tabs
+            .entry(dst_pane)
+            .or_default()
+            .push((surface, tab));
+        self.activate_surface(dst_pane, surface);
+        self.refresh_tab_multi_class(dst_pane);
+        true
+    }
+}
+
+/// A surface detached for an in-app move: the live content widget plus the
+/// backend handle that keeps its PTY / WebView running.
+pub struct MovingSurface {
+    pub surface: SurfaceId,
+    pub content: gtk::Widget,
+    pub handle: MovingHandle,
+}
+
+/// The live backend handle carried by a [`MovingSurface`].
+pub enum MovingHandle {
+    Terminal(PaneTerminal),
+    Browser(BrowserPane),
 }
 
 /// Apply a `gtk::Paned` ratio immediately after its first allocation.
@@ -876,6 +991,9 @@ fn build_leaf_pane(
     root.append(&tabbar);
     root.append(&stack);
     frame.set_child(Some(&root));
+    // Dropping a tab on the pane body (anywhere but a specific tab) appends it
+    // to the end of this pane.
+    attach_pane_body_dnd(&frame, pane_id, callbacks);
 
     {
         let frame_widget = frame.clone().upcast::<gtk::Widget>();
@@ -914,7 +1032,7 @@ fn materialize_surfaces(
 /// / close handlers. Shared between the initial pane render and the
 /// incremental [`attach_surface_to_pane`] path so a click on either
 /// behaves identically.
-fn build_surface_tab_widget(
+pub(crate) fn build_surface_tab_widget(
     pane_id: PaneId,
     surface: &PaneSurface,
     active: bool,
@@ -978,6 +1096,8 @@ fn attach_tab_context_menu(
     let tab_for_click = tab.clone();
     let on_show = callbacks.on_show_surface_folder.clone();
     let on_copy = callbacks.on_copy_surface_text.clone();
+    let list_workspaces = callbacks.list_workspaces.clone();
+    let on_move_to_workspace = callbacks.on_move_surface_to_workspace.clone();
     let surface_id = surface.id;
     let is_terminal = matches!(surface.kind, SurfaceKind::Terminal { .. });
     click.connect_pressed(move |gesture, _n_press, x, y| {
@@ -1026,6 +1146,38 @@ fn attach_tab_context_menu(
             v.append(&copy_btn);
         }
 
+        // "Move" submenu: one entry per current workspace, queried live so it
+        // reflects the present workspace set and names at click time.
+        let workspaces = (list_workspaces)();
+        if !workspaces.is_empty() {
+            let move_btn = mk("Move");
+            let submenu = gtk::Popover::new();
+            submenu.set_has_arrow(false);
+            submenu.set_position(gtk::PositionType::Right);
+            submenu.set_parent(&move_btn);
+            let sub_v = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            sub_v.set_margin_top(4);
+            sub_v.set_margin_bottom(4);
+            for (ws_id, name) in workspaces {
+                let item = mk(&name);
+                let outer = popover.clone();
+                let sub = submenu.clone();
+                let cb = on_move_to_workspace.clone();
+                item.connect_clicked(move |_| {
+                    sub.popdown();
+                    outer.popdown();
+                    (cb.borrow_mut())(pane_id, surface_id, ws_id);
+                });
+                sub_v.append(&item);
+            }
+            submenu.set_child(Some(&sub_v));
+            let sub_for_btn = submenu.clone();
+            move_btn.connect_clicked(move |_| {
+                sub_for_btn.popup();
+            });
+            v.append(&move_btn);
+        }
+
         popover.set_child(Some(&v));
         popover.set_parent(&tab_for_click);
         popover.set_has_arrow(false);
@@ -1037,7 +1189,7 @@ fn attach_tab_context_menu(
     tab.add_controller(click);
 }
 
-fn parse_tab_dnd_payload(payload: &str) -> Result<(PaneId, SurfaceId), &'static str> {
+pub(crate) fn parse_tab_dnd_payload(payload: &str) -> Result<(PaneId, SurfaceId), &'static str> {
     let Some((src_pane_str, src_surface_str)) = payload.split_once('|') else {
         return Err("missing separator");
     };
@@ -1247,6 +1399,7 @@ fn attach_tab_dnd_handlers(
     let target_surface = surface_id;
     let tab_for_drop = tab.clone();
     let reorder_cb = callbacks.on_reorder_surface.clone();
+    let move_to_pane_cb = callbacks.on_move_surface_to_pane.clone();
     let position_of_surface_cb = callbacks.position_of_surface_in_pane.clone();
     let saw_target_for_drop = saw_tab_drop_target.clone();
     drop_target.connect_drop(move |_, drop, x, _y| {
@@ -1257,6 +1410,7 @@ fn attach_tab_dnd_handlers(
         let drop = drop.clone();
         let tab_for_drop = tab_for_drop.clone();
         let reorder_cb = reorder_cb.clone();
+        let move_to_pane_cb = move_to_pane_cb.clone();
         let position_of_surface_cb = position_of_surface_cb.clone();
         gtk::glib::MainContext::default().spawn_local(async move {
             let (stream, mime_type) = match drop
@@ -1299,13 +1453,8 @@ fn attach_tab_dnd_handlers(
                 drop.finish(gtk::gdk::DragAction::empty());
                 return;
             };
-            // Cross-pane moves are unsupported; reorder only over another tab in the same pane.
-            if src_pane != target_pane {
-                tracing::debug!(%src_pane, %target_pane, "tab drop: cross-pane drop ignored");
-                drop.finish(gtk::gdk::DragAction::empty());
-                return;
-            }
-            if src_surface == target_surface {
+            // Dropping a tab onto itself within the same pane is a no-op.
+            if src_pane == target_pane && src_surface == target_surface {
                 tracing::debug!(%src_surface, "tab drop: dropped onto self, ignoring");
                 drop.finish(gtk::gdk::DragAction::empty());
                 return;
@@ -1361,12 +1510,83 @@ fn attach_tab_dnd_handlers(
                 after,
                 "tab drop: dispatching reorder callback"
             );
-            (reorder_cb.borrow_mut())(target_pane, src_surface, final_index);
+            if src_pane == target_pane {
+                (reorder_cb.borrow_mut())(target_pane, src_surface, final_index);
+            } else {
+                (move_to_pane_cb.borrow_mut())(src_pane, src_surface, target_pane, final_index);
+            }
             drop.finish(gtk::gdk::DragAction::MOVE);
         });
         true
     });
     tab.add_controller(drop_target);
+}
+
+/// Make the body of a pane a drop target for tab drags: dropping a tab anywhere
+/// on the pane (outside of an individual tab, which has its own finer-grained
+/// target) appends it to the **end** of this pane. Same-pane drops fall through
+/// to a reorder-to-end on the controller side.
+fn attach_pane_body_dnd(
+    widget: &impl IsA<gtk::Widget>,
+    pane_id: PaneId,
+    callbacks: &PaneCallbacks,
+) {
+    let drop_target = gtk::DropTargetAsync::new(
+        Some(gtk::gdk::ContentFormats::new(&[TAB_DND_MIME])),
+        gtk::gdk::DragAction::MOVE,
+    );
+    drop_target.connect_accept(|target, drop| {
+        if drop.formats().contain_mime_type(TAB_DND_MIME) {
+            true
+        } else {
+            target.reject_drop(drop);
+            false
+        }
+    });
+    let move_to_pane_cb = callbacks.on_move_surface_to_pane.clone();
+    let target_pane = pane_id;
+    drop_target.connect_drop(move |_, drop, _x, _y| {
+        let drop = drop.clone();
+        let move_to_pane_cb = move_to_pane_cb.clone();
+        gtk::glib::MainContext::default().spawn_local(async move {
+            let (stream, mime_type) = match drop
+                .read_future(&[TAB_DND_MIME], gtk::glib::Priority::default())
+                .await
+            {
+                Ok(v) => v,
+                Err(_) => {
+                    drop.finish(gtk::gdk::DragAction::empty());
+                    return;
+                }
+            };
+            if mime_type.as_str() != TAB_DND_MIME {
+                drop.finish(gtk::gdk::DragAction::empty());
+                return;
+            }
+            let bytes = match stream
+                .read_bytes_future(TAB_DND_PAYLOAD_MAX, gtk::glib::Priority::default())
+                .await
+            {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    drop.finish(gtk::gdk::DragAction::empty());
+                    return;
+                }
+            };
+            let Ok(payload) = std::str::from_utf8(bytes.as_ref()) else {
+                drop.finish(gtk::gdk::DragAction::empty());
+                return;
+            };
+            let Ok((src_pane, src_surface)) = parse_tab_dnd_payload(payload) else {
+                drop.finish(gtk::gdk::DragAction::empty());
+                return;
+            };
+            (move_to_pane_cb.borrow_mut())(src_pane, src_surface, target_pane, usize::MAX);
+            drop.finish(gtk::gdk::DragAction::MOVE);
+        });
+        true
+    });
+    widget.add_controller(drop_target);
 }
 
 /// Attach a single new surface to an already-rendered pane: appends a

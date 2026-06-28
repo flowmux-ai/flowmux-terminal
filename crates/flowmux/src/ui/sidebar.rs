@@ -20,11 +20,13 @@
 
 use crate::bridge::{Bridge, GtkCommand};
 use crate::notifications::{NotificationEntry, NotificationStore};
+use crate::ui::workspace_view::{parse_tab_dnd_payload, TAB_DND_MIME, TAB_DND_PAYLOAD_MAX};
 use flowmux_core::{AgentActivity, NotificationLevel, PrState, Workspace, WorkspaceId};
 use gtk::prelude::*;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use tokio::sync::oneshot;
 
 type RowsCell = Rc<RefCell<Vec<(WorkspaceId, gtk::ListBoxRow)>>>;
 
@@ -50,6 +52,11 @@ pub struct Sidebar {
     /// updates this via [`Sidebar::upsert_with_subtitles`] after
     /// sync_workspace_label.
     subtitle_cache: Rc<RefCell<HashMap<WorkspaceId, Vec<String>>>>,
+    /// Live, ordered (id, name) snapshot mirroring the visible rows. Read
+    /// synchronously by the pane tab "Move" submenu so it reflects the current
+    /// workspace set and names at click time. Kept in sync by `upsert_inner`,
+    /// `reorder`, and `remove`.
+    titles: Rc<RefCell<Vec<(WorkspaceId, String)>>>,
 }
 
 impl Sidebar {
@@ -235,6 +242,7 @@ impl Sidebar {
             agent_running: Rc::new(RefCell::new(HashSet::new())),
             bridge,
             subtitle_cache: Rc::new(RefCell::new(HashMap::new())),
+            titles: Rc::new(RefCell::new(Vec::new())),
         }
     }
 
@@ -258,7 +266,21 @@ impl Sidebar {
         self.upsert_inner(ws, &trimmed);
     }
 
+    /// Live, ordered (id, name) snapshot of the side-panel workspaces. Read by
+    /// the pane tab "Move" submenu so it always reflects the current set.
+    pub fn workspace_titles(&self) -> Rc<RefCell<Vec<(WorkspaceId, String)>>> {
+        self.titles.clone()
+    }
+
     fn upsert_inner(&self, ws: &Workspace, subtitles: &[String]) {
+        {
+            let mut titles = self.titles.borrow_mut();
+            if let Some(entry) = titles.iter_mut().find(|(id, _)| *id == ws.id) {
+                entry.1 = ws.name.clone();
+            } else {
+                titles.push((ws.id, ws.name.clone()));
+            }
+        }
         let mut rows = self.rows.borrow_mut();
         if let Some((_, row)) = rows.iter().find(|(id, _)| *id == ws.id).cloned() {
             row.set_child(Some(&row_widget(
@@ -277,6 +299,7 @@ impl Sidebar {
             self.bridge.clone(),
         )));
         attach_dnd_handlers(&row, ws.id, self.bridge.clone(), self.rows.clone());
+        attach_tab_drop_to_row(&row, ws.id, self.bridge.clone());
         self.list.append(&row);
         rows.push((ws.id, row));
     }
@@ -305,6 +328,14 @@ impl Sidebar {
         self.list.remove(&row);
         self.list.insert(&row, target as i32);
         rows.insert(target, (rid, row));
+        {
+            let mut titles = self.titles.borrow_mut();
+            if let Some(cur) = titles.iter().position(|(tid, _)| *tid == id) {
+                let entry = titles.remove(cur);
+                let at = target.min(titles.len());
+                titles.insert(at, entry);
+            }
+        }
     }
 
     pub fn remove(&self, id: WorkspaceId) {
@@ -313,6 +344,7 @@ impl Sidebar {
             self.list.remove(&rows[idx].1);
             rows.swap_remove(idx);
         }
+        self.titles.borrow_mut().retain(|(tid, _)| *tid != id);
     }
 
     pub fn select_workspace(&self, id: WorkspaceId) {
@@ -770,6 +802,85 @@ fn attach_dnd_handlers(row: &gtk::ListBoxRow, id: WorkspaceId, bridge: Bridge, r
             {
                 tracing::warn!(error = %e, "sidebar reorder: bridge send failed");
             }
+        });
+        true
+    });
+    row.add_controller(drop_target);
+}
+
+/// Make a side-panel workspace row a drop target for **pane tab** drags.
+/// Hovering a tab over the row selects that workspace mid-drag (so the user can
+/// keep dragging into one of its panes), and releasing on the row moves the tab
+/// to the last position of the workspace's first pane.
+fn attach_tab_drop_to_row(row: &gtk::ListBoxRow, ws_id: WorkspaceId, bridge: Bridge) {
+    let drop_target = gtk::DropTargetAsync::new(
+        Some(gtk::gdk::ContentFormats::new(&[TAB_DND_MIME])),
+        gtk::gdk::DragAction::MOVE,
+    );
+    let bridge_accept = bridge.clone();
+    drop_target.connect_accept(move |target, drop| {
+        if drop.formats().contain_mime_type(TAB_DND_MIME) {
+            let bridge = bridge_accept.clone();
+            gtk::glib::MainContext::default().spawn_local(async move {
+                let _ = bridge
+                    .tx
+                    .send(GtkCommand::ActivateWorkspace { id: ws_id })
+                    .await;
+            });
+            true
+        } else {
+            target.reject_drop(drop);
+            false
+        }
+    });
+    let bridge_drop = bridge.clone();
+    drop_target.connect_drop(move |_, drop, _x, _y| {
+        let drop = drop.clone();
+        let bridge = bridge_drop.clone();
+        gtk::glib::MainContext::default().spawn_local(async move {
+            let (stream, mime_type) = match drop
+                .read_future(&[TAB_DND_MIME], gtk::glib::Priority::default())
+                .await
+            {
+                Ok(v) => v,
+                Err(_) => {
+                    drop.finish(gtk::gdk::DragAction::empty());
+                    return;
+                }
+            };
+            if mime_type.as_str() != TAB_DND_MIME {
+                drop.finish(gtk::gdk::DragAction::empty());
+                return;
+            }
+            let bytes = match stream
+                .read_bytes_future(TAB_DND_PAYLOAD_MAX, gtk::glib::Priority::default())
+                .await
+            {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    drop.finish(gtk::gdk::DragAction::empty());
+                    return;
+                }
+            };
+            let Ok(payload) = std::str::from_utf8(bytes.as_ref()) else {
+                drop.finish(gtk::gdk::DragAction::empty());
+                return;
+            };
+            let Ok((src_pane, surface)) = parse_tab_dnd_payload(payload) else {
+                drop.finish(gtk::gdk::DragAction::empty());
+                return;
+            };
+            let (ack_tx, _ack_rx) = oneshot::channel();
+            let _ = bridge
+                .tx
+                .send(GtkCommand::MoveSurfaceToWorkspace {
+                    src_pane,
+                    surface,
+                    dst_workspace: ws_id,
+                    ack: ack_tx,
+                })
+                .await;
+            drop.finish(gtk::gdk::DragAction::MOVE);
         });
         true
     });

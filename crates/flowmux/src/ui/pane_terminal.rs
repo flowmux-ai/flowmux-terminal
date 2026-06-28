@@ -11,7 +11,7 @@ use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use flowmux_core::{PaneId, SurfaceId};
+use flowmux_core::{PaneId, SurfaceId, WorkspaceId};
 
 use crate::ui::ghostty_pane::GhosttyPane;
 
@@ -61,6 +61,16 @@ pub struct PaneCallbacks {
     /// moves that live surface into a new top-level window and removes it from
     /// the source pane.
     pub on_tab_drag_to_new_window: Rc<RefCell<dyn FnMut(PaneId, SurfaceId)>>,
+    /// Move a tab into another pane (possibly in another workspace) by drag and
+    /// drop, preserving its live state. Args: source pane, surface, destination
+    /// pane, final 0-based index in the destination (clamped to the end).
+    pub on_move_surface_to_pane: Rc<RefCell<dyn FnMut(PaneId, SurfaceId, PaneId, usize)>>,
+    /// Move a tab to the last position of the first pane of `dst_workspace`.
+    /// Backs the right-click "Move" menu and drops onto a side-panel workspace.
+    pub on_move_surface_to_workspace: Rc<RefCell<dyn FnMut(PaneId, SurfaceId, WorkspaceId)>>,
+    /// Snapshot of the current workspaces (id + display name) at call time, used
+    /// to populate the right-click "Move" submenu so it reflects live state.
+    pub list_workspaces: Rc<dyn Fn() -> Vec<(WorkspaceId, String)>>,
     /// Shared across all surface tabs in one window for the duration of a drag.
     /// The source tab uses this to distinguish a true no-target drag from a
     /// rejected drop on a known tab (self/cross-pane/invalid payload).
