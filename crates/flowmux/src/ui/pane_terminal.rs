@@ -71,6 +71,9 @@ pub struct PaneCallbacks {
     /// Snapshot of the current workspaces (id + display name) at call time, used
     /// to populate the right-click "Move" submenu so it reflects live state.
     pub list_workspaces: Rc<dyn Fn() -> Vec<(WorkspaceId, String)>>,
+    /// The workspace a given pane currently lives in, queried synchronously so
+    /// the "Move" submenu can exclude the tab's own workspace at click time.
+    pub workspace_of_pane: Rc<dyn Fn(PaneId) -> Option<WorkspaceId>>,
     /// Shared across all surface tabs in one window for the duration of a drag.
     /// The source tab uses this to distinguish a true no-target drag from a
     /// rejected drop on a known tab (self/cross-pane/invalid payload).

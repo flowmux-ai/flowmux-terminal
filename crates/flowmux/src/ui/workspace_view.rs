@@ -1097,6 +1097,7 @@ fn attach_tab_context_menu(
     let on_show = callbacks.on_show_surface_folder.clone();
     let on_copy = callbacks.on_copy_surface_text.clone();
     let list_workspaces = callbacks.list_workspaces.clone();
+    let workspace_of_pane = callbacks.workspace_of_pane.clone();
     let on_move_to_workspace = callbacks.on_move_surface_to_workspace.clone();
     let surface_id = surface.id;
     let is_terminal = matches!(surface.kind, SurfaceKind::Terminal { .. });
@@ -1146,11 +1147,31 @@ fn attach_tab_context_menu(
             v.append(&copy_btn);
         }
 
-        // "Move" submenu: one entry per current workspace, queried live so it
-        // reflects the present workspace set and names at click time.
-        let workspaces = (list_workspaces)();
-        if !workspaces.is_empty() {
-            let move_btn = mk("Move");
+        // "Move" item: target workspaces queried live (so names/order reflect
+        // the click moment), excluding the tab's own workspace. Disabled when
+        // there is nowhere else to move to.
+        let current_ws = (workspace_of_pane)(pane_id);
+        let movable: Vec<(WorkspaceId, String)> = (list_workspaces)()
+            .into_iter()
+            .filter(|(id, _)| Some(*id) != current_ws)
+            .collect();
+
+        let move_btn = gtk::Button::new();
+        move_btn.add_css_class("flat");
+        let move_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let move_label = gtk::Label::new(Some("Move"));
+        move_label.set_xalign(0.0);
+        move_label.set_hexpand(true);
+        move_label.set_halign(gtk::Align::Fill);
+        move_row.append(&move_label);
+        if !movable.is_empty() {
+            // A right-pointing chevron signals the submenu.
+            move_row.append(&gtk::Image::from_icon_name("go-next-symbolic"));
+        }
+        move_btn.set_child(Some(&move_row));
+        move_btn.set_sensitive(!movable.is_empty());
+
+        if !movable.is_empty() {
             let submenu = gtk::Popover::new();
             submenu.set_has_arrow(false);
             submenu.set_position(gtk::PositionType::Right);
@@ -1158,8 +1179,9 @@ fn attach_tab_context_menu(
             let sub_v = gtk::Box::new(gtk::Orientation::Vertical, 0);
             sub_v.set_margin_top(4);
             sub_v.set_margin_bottom(4);
-            for (ws_id, name) in workspaces {
-                let item = mk(&name);
+            for (index, (ws_id, name)) in movable.into_iter().enumerate() {
+                // Numbered so the side-panel order is visible in the menu.
+                let item = mk(&format!("{}. {}", index + 1, name));
                 let outer = popover.clone();
                 let sub = submenu.clone();
                 let cb = on_move_to_workspace.clone();
@@ -1175,8 +1197,8 @@ fn attach_tab_context_menu(
             move_btn.connect_clicked(move |_| {
                 sub_for_btn.popup();
             });
-            v.append(&move_btn);
         }
+        v.append(&move_btn);
 
         popover.set_child(Some(&v));
         popover.set_parent(&tab_for_click);

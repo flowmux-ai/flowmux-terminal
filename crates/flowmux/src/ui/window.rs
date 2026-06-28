@@ -4415,6 +4415,10 @@ fn make_callbacks(
             let workspace_titles = workspace_titles.clone();
             Rc::new(move || workspace_titles.borrow().clone())
         },
+        workspace_of_pane: {
+            let pane_registry = pane_registry.clone();
+            Rc::new(move |pane| pane_registry.borrow().workspace_of_pane(pane))
+        },
         tab_drag_drop_seen: Rc::new(Cell::new(false)),
         on_terminal_cwd_changed: {
             let bridge = bridge.clone();
