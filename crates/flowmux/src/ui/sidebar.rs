@@ -274,11 +274,15 @@ impl Sidebar {
 
     fn upsert_inner(&self, ws: &Workspace, subtitles: &[String]) {
         {
+            // Use the displayed title (custom name, else folder-derived name) so
+            // the "Move" submenu matches what the side panel shows, including
+            // after a rename or a cwd change.
+            let title = ws.display_title().to_string();
             let mut titles = self.titles.borrow_mut();
             if let Some(entry) = titles.iter_mut().find(|(id, _)| *id == ws.id) {
-                entry.1 = ws.name.clone();
+                entry.1 = title;
             } else {
-                titles.push((ws.id, ws.name.clone()));
+                titles.push((ws.id, title));
             }
         }
         let mut rows = self.rows.borrow_mut();
@@ -1239,5 +1243,33 @@ mod tests {
         // Even with 4 lines, build_meta_column truncates to 3 via take(3).
         let four = vec!["a".into(), "b".into(), "c".into(), "d-overflow".into()];
         let _ = row_widget(&ws, &four, on_close, bridge);
+    }
+
+    #[gtk::test]
+    fn workspace_titles_track_display_title_through_rename() {
+        if gtk::init().is_err() {
+            return;
+        }
+        let bridge = crate::bridge::Bridge::new().0;
+        let sidebar = Sidebar::new(|_| {}, |_| {}, bridge, NotificationStore::new());
+        let titles = sidebar.workspace_titles();
+
+        let mut ws = ws_with_active_terminal_cwd(Some(PathBuf::from("/home/u/dev/projA")));
+        ws.name = "projA".into();
+        sidebar.upsert(&ws);
+        assert_eq!(
+            titles.borrow().iter().find(|(id, _)| *id == ws.id).map(|(_, n)| n.clone()),
+            Some("projA".to_string()),
+            "auto name shows when no custom title",
+        );
+
+        // A rename sets custom_title; the cache must follow display_title.
+        ws.custom_title = Some("MyName".into());
+        sidebar.upsert(&ws);
+        assert_eq!(
+            titles.borrow().iter().find(|(id, _)| *id == ws.id).map(|(_, n)| n.clone()),
+            Some("MyName".to_string()),
+            "custom title is reflected after rename",
+        );
     }
 }

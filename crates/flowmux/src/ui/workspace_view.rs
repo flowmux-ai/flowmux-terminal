@@ -1151,9 +1151,14 @@ fn attach_tab_context_menu(
         // the click moment), excluding the tab's own workspace. Disabled when
         // there is nowhere else to move to.
         let current_ws = (workspace_of_pane)(pane_id);
-        let movable: Vec<(WorkspaceId, String)> = (list_workspaces)()
+        // Keep each workspace's 1-based side-panel position as its number, then
+        // drop the tab's own workspace — so for 3 workspaces moving #2's tab the
+        // menu shows "1." and "3.", not a renumbered "1." "2.".
+        let movable: Vec<(usize, WorkspaceId, String)> = (list_workspaces)()
             .into_iter()
-            .filter(|(id, _)| Some(*id) != current_ws)
+            .enumerate()
+            .map(|(i, (id, name))| (i + 1, id, name))
+            .filter(|(_, id, _)| Some(*id) != current_ws)
             .collect();
 
         let move_btn = gtk::Button::new();
@@ -1179,9 +1184,9 @@ fn attach_tab_context_menu(
             let sub_v = gtk::Box::new(gtk::Orientation::Vertical, 0);
             sub_v.set_margin_top(4);
             sub_v.set_margin_bottom(4);
-            for (index, (ws_id, name)) in movable.into_iter().enumerate() {
-                // Numbered so the side-panel order is visible in the menu.
-                let item = mk(&format!("{}. {}", index + 1, name));
+            for (number, ws_id, name) in movable.into_iter() {
+                // Numbered by side-panel position so the order is visible.
+                let item = mk(&format!("{}. {}", number, name));
                 let outer = popover.clone();
                 let sub = submenu.clone();
                 let cb = on_move_to_workspace.clone();
