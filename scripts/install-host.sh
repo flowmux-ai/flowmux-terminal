@@ -14,11 +14,15 @@ cd "$REPO_ROOT"
 
 
 echo "==> building flowmux (release)"
-cargo build --release -p flowmux -p flowmux-cli
+cargo build --release -p flowmux -p flowmux-cli -p flowmux-md-viewer
 
 for dir in "$HOME/.local/bin" "$HOME/.cargo/bin"; do
     if [ -d "$dir" ]; then
-        install -m755 target/release/flowmux target/release/flowmuxctl "$dir/"
+        install -m755 \
+            target/release/flowmux \
+            target/release/flowmuxctl \
+            target/release/flowmux-md-viewer \
+            "$dir/"
         echo "==> installed to $dir"
     fi
 done

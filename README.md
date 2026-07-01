@@ -150,8 +150,8 @@ scripts/install-macos.sh
 open "$HOME/Applications/FlowMux.app"
 ```
 
-The script installs `FlowMux.app` under `~/Applications` and copies `flowmux`
-and `flowmuxctl` to `~/.local/bin`.
+The script installs `FlowMux.app` under `~/Applications` and copies `flowmux`,
+`flowmuxctl`, and `flowmux-md-viewer` to `~/.local/bin`.
 
 ### Install to the host
 
@@ -159,9 +159,10 @@ and `flowmuxctl` to `~/.local/bin`.
 scripts/install-host.sh        # release-builds flowmux → installs the binaries
 ```
 
-This installs `flowmux` and `flowmuxctl` binaries to `~/.local/bin` and
-`~/.cargo/bin`. It is a plain `cargo build --release` using the system VTE
-library; no Zig toolchain or vendored terminal backend is required.
+This installs `flowmux`, `flowmuxctl`, and `flowmux-md-viewer` binaries to
+`~/.local/bin` and `~/.cargo/bin`. It is a plain `cargo build --release` using
+the system VTE library; no Zig toolchain or vendored terminal backend is
+required.
 
 ## Verify & repair
 
