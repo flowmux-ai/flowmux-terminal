@@ -6,10 +6,10 @@
 # flowmux uses the system GTK4/libadwaita/WebKitGTK/VTE libraries. No vendored
 # terminal backend or extra compiler toolchain is built by this script.
 #
-# Usage: scripts/install-host.sh
+# Usage: ./install.sh
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_ROOT"
 
 

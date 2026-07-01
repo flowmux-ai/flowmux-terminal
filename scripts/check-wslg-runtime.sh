@@ -104,8 +104,8 @@ preflight_wslg
 cd "$REPO_ROOT"
 
 if [ "$INSTALL" = true ]; then
-    scripts/install-host.sh --check
-    scripts/install-host.sh
+    ./install.sh --check
+    ./install.sh
 elif [ ! -x "$FLOWMUX_BIN" ]; then
     echo "error: $FLOWMUX_BIN is not executable; rerun without --no-install" >&2
     exit 1

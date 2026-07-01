@@ -60,7 +60,7 @@ preflight_macos() {
     if [ "$(uname -s)" != "Darwin" ]; then
         cat >&2 <<'EOF'
 error: scripts/install-macos.sh is for macOS.
-On Linux or WSLg, use scripts/install-host.sh instead.
+On Linux or WSLg, use ./install.sh instead.
 EOF
         exit 1
     fi

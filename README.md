@@ -156,7 +156,7 @@ The script installs `FlowMux.app` under `~/Applications` and copies `flowmux`,
 ### Install to the host
 
 ```bash
-scripts/install-host.sh        # release-builds flowmux → installs the binaries
+./install.sh                   # release-builds flowmux → installs the binaries
 ```
 
 This installs `flowmux`, `flowmuxctl`, and `flowmux-md-viewer` binaries to
@@ -201,7 +201,7 @@ the sandbox Mesa — disable WebKit's GPU path:
 ## WSL / WSLg
 
 Ubuntu 24.04 and 26.04 on WSLg follow the native host path above:
-install the build prerequisites, run `scripts/install-host.sh`, then start
+install the build prerequisites, run `./install.sh`, then start
 `flowmux` from the Linux side so GTK connects to WSLg's Wayland display. The
 runtime detects WSL and enables the terminal key/resize workarounds that differ
 from a regular GNOME session. Ubuntu 22.04 on WSL should use the Flatpak path
