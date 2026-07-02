@@ -637,15 +637,12 @@ fn make_copy_action(
             let Some(term) = r.active_terminal(pane) else {
                 return;
             };
-            // No selection means there is nothing to copy, and we want
-            // to leave whatever is already on the clipboard untouched
-            // (e.g. text the user copied from another app). Only surface the
-            // "copied" toast when text was actually placed on the clipboard;
-            // `has_selection()` can be stale (output scrolled the selection
-            // away), so trusting it would show a toast for an empty copy.
-            if !term.has_selection() {
-                return;
-            }
+            // Only surface the "copied" toast when text was actually placed on
+            // the clipboard. `copy_selection_to_clipboard` copies the live VTE
+            // selection, or falls back to the last selection snapshot when the
+            // app repainted it away (agent TUIs), and returns false when there
+            // is nothing to copy — so the clipboard and toast are left untouched
+            // when no selection exists.
             if term.copy_selection_to_clipboard() {
                 clipboard_toast.show();
             }

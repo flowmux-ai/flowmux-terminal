@@ -43,6 +43,14 @@ pub struct GhosttyPane {
     /// Last cwd returned by [`Self::poll_cwd_if_changed`], so the poller only
     /// reports real changes.
     last_polled_cwd: Rc<RefCell<Option<PathBuf>>>,
+    /// Last non-empty text selection VTE reported. Agent TUIs (Claude Code,
+    /// Codex) repaint constantly; VTE clears the drag-selection on the next
+    /// output frame (`deselect_all` in `process_incoming`), so by the time the
+    /// user hits Copy `has_selection()` is already false and the live copy is a
+    /// no-op. We snapshot the selected text on every `selection-changed` and
+    /// copy from this cache when the live selection is gone. Cleared on the
+    /// next primary-button press so a fresh click starts clean.
+    last_selection: Rc<RefCell<Option<String>>>,
     /// Owns the forked child + PTY master. Kept alive for the pane's lifetime so
     /// the shell survives; its `Drop` hangs up and reaps the child on pane close.
     /// VTE renders/IOs a dup of the same master.
@@ -163,17 +171,23 @@ impl GhosttyPane {
         self.widget.set_font(Some(desc));
     }
 
-    pub fn has_selection(&self) -> bool {
-        self.widget.has_selection()
-    }
-
+    /// Copy the current selection to the clipboard, returning `true` when text
+    /// was actually placed there. Falls back to [`Self::last_selection`] when
+    /// VTE has already dropped the live selection after an app repaint, so Copy
+    /// still works inside agent TUIs that redraw between select and copy.
     pub fn copy_selection_to_clipboard(&self) -> bool {
         if self.widget.has_selection() {
             self.widget.copy_clipboard_format(vte::Format::Text);
-            true
-        } else {
-            false
+            return true;
         }
+        let cached = self.last_selection.borrow().clone();
+        if let Some(text) = cached {
+            if !text.is_empty() {
+                self.widget.clipboard().set_text(&text);
+                return true;
+            }
+        }
+        false
     }
 
     pub fn paste_clipboard(&self) {
@@ -247,6 +261,7 @@ impl GhosttyPane {
         callbacks: PaneCallbacks,
     ) -> Self {
         let pane_id = Rc::new(Cell::new(id));
+        let last_selection: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
         let term = vte::Terminal::new();
         term.set_hexpand(true);
         term.set_vexpand(true);
@@ -259,6 +274,24 @@ impl GhosttyPane {
         // (keyboard + IM commit), mirroring the explicit snap-to-bottom the
         // pure-Rust terminal backend does in `write_child` (commit 9e12edb).
         term.set_scroll_on_keystroke(true);
+
+        // Snapshot every non-empty selection. Agent TUIs repaint constantly and
+        // VTE drops the drag-selection on the next output frame, so this cache
+        // is what Copy reads once `has_selection()` has gone false. Empty
+        // notifications (the app-repaint deselect) intentionally do not clear
+        // the cache; a fresh primary press does (see install_url_link_handling).
+        {
+            let cache = last_selection.clone();
+            term.connect_selection_changed(move |t| {
+                if t.has_selection() {
+                    if let Some(text) = t.text_selected(vte::Format::Text) {
+                        if !text.is_empty() {
+                            *cache.borrow_mut() = Some(text.to_string());
+                        }
+                    }
+                }
+            });
+        }
 
         // Wrap the VTE in a `gtk::Overlay` so we can pin a vertical
         // `gtk::Scrollbar` to its right edge without going through a
@@ -395,6 +428,7 @@ impl GhosttyPane {
             callbacks.on_open_url.clone(),
             callbacks.on_open_image.clone(),
             callbacks.on_open_markdown.clone(),
+            last_selection.clone(),
         );
         install_ibus_nav_workaround(&term, smart_page_enabled);
 
@@ -432,6 +466,7 @@ impl GhosttyPane {
             let surface_for_menu = surface;
             let pane_id = pane_id.clone();
             let term_widget = term.clone();
+            let last_selection_for_menu = last_selection.clone();
             let click = gtk::GestureClick::new();
             click.set_button(gtk::gdk::BUTTON_SECONDARY);
             click.connect_pressed(move |gesture, _n_press, x, y| {
@@ -461,10 +496,19 @@ impl GhosttyPane {
                 let copy = mk("Copy");
                 let pop = popover.clone();
                 let term_for_copy = term_widget.clone();
+                let cache_for_copy = last_selection_for_menu.clone();
                 copy.connect_clicked(move |_| {
                     pop.popdown();
                     if term_for_copy.has_selection() {
                         term_for_copy.copy_clipboard_format(vte::Format::Text);
+                        return;
+                    }
+                    // Live selection already cleared by app repaint — copy the
+                    // last snapshot instead, matching the Copy keybinding.
+                    if let Some(text) = cache_for_copy.borrow().clone() {
+                        if !text.is_empty() {
+                            term_for_copy.clipboard().set_text(&text);
+                        }
                     }
                 });
                 v.append(&copy);
@@ -599,6 +643,7 @@ impl GhosttyPane {
             container,
             pid,
             last_polled_cwd: Rc::new(RefCell::new(None)),
+            last_selection,
             _pty: Rc::new(pty),
         }
     }
@@ -829,6 +874,7 @@ fn install_url_link_handling(
     on_open_url: Rc<RefCell<dyn FnMut(PaneId, String)>>,
     on_open_image: Rc<RefCell<dyn FnMut(PaneId, PathBuf)>>,
     on_open_markdown: Rc<RefCell<dyn FnMut(PaneId, PathBuf)>>,
+    last_selection: Rc<RefCell<Option<String>>>,
 ) {
     // 1) Compile and register the regex. If this fails, usually due to a PCRE2
     //    build issue, link recognition is disabled while the terminal itself
@@ -889,6 +935,11 @@ fn install_url_link_handling(
 
     let term_widget = term.clone();
     click.connect_pressed(move |gesture, _n_press, x, y| {
+        // A new primary press starts a fresh interaction: drop the stale
+        // selection snapshot so Copy never resurrects text from a selection the
+        // user has moved on from. A drag re-populates it via `selection-changed`.
+        *last_selection.borrow_mut() = None;
+
         let modifiers = gesture
             .current_event()
             .map(|e| e.modifier_state())
