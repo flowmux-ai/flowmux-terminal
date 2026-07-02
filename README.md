@@ -133,36 +133,20 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 ### ThorVG (image viewer — optional)
 
-The inline image viewer renders through **ThorVG**, which flowmux loads at
-runtime (`dlopen`). It is **optional**: flowmux builds, installs, and runs
-without it — only the image viewer is affected. If ThorVG is missing the viewer
-shows a "ThorVG is not installed" message; install the library and it starts
-working, no rebuild needed.
+The image viewer loads **ThorVG** at runtime (`dlopen`). It is **optional** —
+flowmux builds and runs without it; only the image viewer needs it, and shows a
+"ThorVG is not installed" message until it is present (no rebuild needed).
 
-ThorVG must be built with the **C API** (`-Dbindings=capi`) and **all loaders**
-(`-Dloaders=all`), otherwise JPEG/WebP previews won't work. If your platform
-packages a suitable ThorVG, install it directly:
+Ubuntu does not package ThorVG, so install it with the helper script (needs
+`meson` + `ninja-build`):
 
 ```bash
-sudo apt install libthorvg-dev            # Debian
-sudo dnf install thorvg thorvg-devel      # Fedora
-brew install thorvg                       # Homebrew (macOS / Linuxbrew)
-# Arch: AUR `thorvg`; also on vcpkg / Conan / MSYS2
+sudo scripts/install-thorvg.sh     # ThorVG v1.0.6 → /usr/local, then restart flowmux
 ```
 
-Ubuntu (through 24.04) does **not** package ThorVG in apt, so build and install
-it with the helper script (needs `meson` + `ninja-build`):
-
-```bash
-scripts/install-thorvg.sh          # builds ThorVG v1.0.6, installs to /usr/local (sudo)
-# or, without sudo, into a user prefix:
-PREFIX="$HOME/.local" scripts/install-thorvg.sh
-# then let the loader find it at runtime:
-export LD_LIBRARY_PATH="$HOME/.local/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH"
-```
-
-The script clones ThorVG into a temporary directory (nothing is vendored into
-this repo) and configures it with `meson setup -Dloaders=all -Dbindings=capi`.
+ThorVG must be built with the C API and all loaders; the script does that
+(`meson -Dbindings=capi -Dloaders=all`). Where a distro packages such a build
+you can use it instead — e.g. Debian `libthorvg-dev`, Fedora `thorvg`.
 
 ### Optional — full media playback in tab browser
 
