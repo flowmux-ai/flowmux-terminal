@@ -3,8 +3,10 @@
 #
 # Release-build flowmux and install the binaries to the host.
 #
-# flowmux uses the system GTK4/libadwaita/WebKitGTK/VTE libraries. No vendored
-# terminal backend or extra compiler toolchain is built by this script.
+# flowmux uses the system GTK4/libadwaita/WebKitGTK/VTE libraries. The only
+# vendored C/C++ source built here is the ThorVG image-viewer backend under
+# third_party/, compiled via cc with the system C++ compiler (build-essential);
+# no extra compiler toolchain is required.
 #
 # Usage: ./install.sh
 set -euo pipefail

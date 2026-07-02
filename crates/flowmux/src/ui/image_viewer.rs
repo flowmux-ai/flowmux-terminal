@@ -116,8 +116,15 @@ enum ViewerContent {
 
 fn load_viewer_content(path: &Path) -> Result<ViewerContent, String> {
     match image_kind(path) {
+        // ThorVG decodes png / jpg / webp natively; fall back to the
+        // `image` crate only if ThorVG's loader rejects the file.
+        ImageKind::NativeRaster => render_native(path)
+            .or_else(|_| render_raster(path))
+            .map(ViewerContent::Static),
+        // ThorVG has no loader for these (e.g. gif); decode with the
+        // `image` crate, then hand the pixels to ThorVG to render.
         ImageKind::Raster => render_raster(path).map(ViewerContent::Static),
-        ImageKind::Svg => render_svg(path).map(ViewerContent::Static),
+        ImageKind::Svg => render_native(path).map(ViewerContent::Static),
         ImageKind::Lottie => ThorvgAnimationRenderer::new(path)
             .map(|renderer| ViewerContent::Animated(Rc::new(RefCell::new(renderer)))),
     }
@@ -125,7 +132,10 @@ fn load_viewer_content(path: &Path) -> Result<ViewerContent, String> {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ImageKind {
+    /// Decoded by the `image` crate (formats ThorVG can't load, e.g. gif).
     Raster,
+    /// Decoded natively by ThorVG's built-in loaders.
+    NativeRaster,
     Svg,
     Lottie,
 }
@@ -139,6 +149,7 @@ fn image_kind(path: &Path) -> ImageKind {
     {
         Some("svg") => ImageKind::Svg,
         Some("json") | Some("lottie") => ImageKind::Lottie,
+        Some("png") | Some("jpg") | Some("jpeg") | Some("webp") => ImageKind::NativeRaster,
         _ => ImageKind::Raster,
     }
 }
@@ -210,11 +221,13 @@ fn render_raster(path: &Path) -> Result<RenderedFrame, String> {
     canvas.render()
 }
 
-fn render_svg(path: &Path) -> Result<RenderedFrame, String> {
+/// Load an image through ThorVG's native file loaders (svg, png, jpg, webp).
+/// ThorVG picks the loader from the file's extension and content.
+fn render_native(path: &Path) -> Result<RenderedFrame, String> {
     let path = path
         .to_str()
-        .ok_or_else(|| "SVG path is not valid UTF-8".to_string())?;
-    let path = CString::new(path).map_err(|_| "SVG path contains NUL byte".to_string())?;
+        .ok_or_else(|| "image path is not valid UTF-8".to_string())?;
+    let path = CString::new(path).map_err(|_| "image path contains NUL byte".to_string())?;
     let _engine = ThorvgEngine::init()?;
 
     let picture = unsafe { tvg::tvg_picture_new() };
@@ -223,7 +236,7 @@ fn render_svg(path: &Path) -> Result<RenderedFrame, String> {
     }
 
     let load = unsafe { tvg::tvg_picture_load(picture, path.as_ptr()) };
-    if let Err(err) = check(load, "load SVG") {
+    if let Err(err) = check(load, "load image") {
         unsafe {
             tvg::tvg_paint_rel(picture);
         }
@@ -248,7 +261,7 @@ fn render_svg(path: &Path) -> Result<RenderedFrame, String> {
 
     if let Err(err) = check(
         unsafe { tvg::tvg_picture_set_size(picture, width as f32, height as f32) },
-        "set SVG size",
+        "set image size",
     ) {
         unsafe {
             tvg::tvg_paint_rel(picture);
@@ -258,7 +271,7 @@ fn render_svg(path: &Path) -> Result<RenderedFrame, String> {
 
     if let Err(err) = check(
         unsafe { tvg::tvg_canvas_add(canvas.raw, picture) },
-        "add SVG",
+        "add image",
     ) {
         unsafe {
             tvg::tvg_paint_rel(picture);
@@ -652,7 +665,7 @@ mod tests {
     }
 
     #[test]
-    fn render_svg_draws_vector_through_thorvg() {
+    fn render_native_draws_vector_through_thorvg() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("vector.svg");
         std::fs::write(
@@ -661,10 +674,60 @@ mod tests {
     )
     .expect("write svg");
 
-        let frame = render_svg(&path).expect("render svg");
+        let frame = render_native(&path).expect("render svg");
 
         assert_eq!((frame.width, frame.height), (4, 2));
         assert_eq!(frame.buffer.len(), 8);
+        assert!(frame.buffer.iter().any(|pixel| (pixel >> 24) == 0xff));
+    }
+
+    #[test]
+    fn render_native_decodes_png_through_thorvg() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("pixel.png");
+        let image = image::RgbaImage::from_pixel(2, 1, image::Rgba([255, 0, 0, 255]));
+        image.save(&path).expect("write png");
+
+        // ThorVG's built-in png loader decodes the file directly.
+        let frame = render_native(&path).expect("render png natively");
+
+        assert_eq!((frame.width, frame.height), (2, 1));
+        assert_eq!(frame.buffer.len(), 2);
+        assert!(frame.buffer.iter().any(|pixel| (pixel >> 24) == 0xff));
+    }
+
+    #[test]
+    fn render_native_decodes_jpeg_through_thorvg() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("pixel.jpg");
+        // JPEG has no alpha channel, so encode from RGB.
+        let image = image::RgbImage::from_pixel(4, 4, image::Rgb([255, 0, 0]));
+        image
+            .save_with_format(&path, image::ImageFormat::Jpeg)
+            .expect("write jpeg");
+
+        // ThorVG's built-in jpg loader decodes the file directly.
+        let frame = render_native(&path).expect("render jpeg natively");
+
+        assert_eq!((frame.width, frame.height), (4, 4));
+        assert_eq!(frame.buffer.len(), 16);
+        assert!(frame.buffer.iter().any(|pixel| (pixel >> 24) == 0xff));
+    }
+
+    #[test]
+    fn render_native_decodes_webp_through_thorvg() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("pixel.webp");
+        let image = image::RgbaImage::from_pixel(4, 4, image::Rgba([255, 0, 0, 255]));
+        image
+            .save_with_format(&path, image::ImageFormat::WebP)
+            .expect("write webp");
+
+        // ThorVG's built-in webp loader decodes the file directly.
+        let frame = render_native(&path).expect("render webp natively");
+
+        assert_eq!((frame.width, frame.height), (4, 4));
+        assert_eq!(frame.buffer.len(), 16);
         assert!(frame.buffer.iter().any(|pixel| (pixel >> 24) == 0xff));
     }
 

@@ -53,10 +53,22 @@ text extraction API, enabled through the `v0_76` feature.
 CJK note: VTE owns terminal rendering and font fallback through the system
 GTK/Pango stack.
 
-The Flatpak build (Ubuntu 22.04 path) is described in `README.md`
-under "Ubuntu 22.04 (jammy) support". `flowmux doctor` / `flowmux fix`
-audit and repair the on-host pieces (agent hooks, SKILL files, socket,
-browser data dir).
+flowmux targets Ubuntu 24.04 and later (native GTK4/libadwaita/WebKitGTK).
+`flowmux doctor` / `flowmux fix` audit and repair the on-host pieces (agent
+hooks, SKILL files, socket, browser data dir).
+
+### Image viewer: vendored ThorVG
+
+The inline image viewer (`flowmux/src/ui/image_viewer.rs`) renders through
+[ThorVG](https://www.thorvg.org/) via the `thorvg-sys` FFI crate. The upstream
+crates.io release only compiles the png/svg/lottie loaders, so a patched fork
+is vendored at `third_party/thorvg-sys/` and wired in through
+`[patch.crates-io]` in the root `Cargo.toml`. The fork adds ThorVG's built-in
+`jpg` + `webp` loaders (self-contained; no system libjpeg/libwebp). PNG / JPEG
+/ WebP / SVG are decoded and rendered by ThorVG; Lottie plays frame by frame;
+GIF (no ThorVG loader) is decoded with the Rust `image` crate and handed to
+ThorVG to render. Vendoring compiles ThorVG's C++ via `cc`, so a C++ compiler
+(`build-essential`) is required — no other extra toolchain.
 
 ## Architecture
 

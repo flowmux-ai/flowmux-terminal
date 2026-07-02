@@ -37,3 +37,16 @@ Third-party components
 Runtime dependencies retain their own licenses; see
 THIRD_PARTY_LICENSES.md for the dependency license inventory generated
 from Cargo metadata.
+
+Vendored native source
+----------------------
+
+third_party/thorvg-sys/ vendors a patched fork of the thorvg-sys FFI
+crate, which bundles the ThorVG C++ library used by the image viewer.
+These components are compiled from source and statically linked into the
+flowmux binary; their upstream license texts are retained in-tree:
+
+    ThorVG            MIT           third_party/thorvg-sys/thorvg/LICENSE
+    ThorVG jpg loader MIT           third_party/thorvg-sys/thorvg/src/loaders/jpg/
+    WebP (libwebp)    BSD-3-Clause  third_party/thorvg-sys/thorvg/src/loaders/webp/LICENSE
+                      + patent grant  (Copyright 2012 Google Inc.)

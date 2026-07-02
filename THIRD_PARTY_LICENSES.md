@@ -8,6 +8,19 @@ This inventory covers Rust crates pulled into the Cargo workspace. System
 libraries used at runtime, such as GTK, libadwaita, WebKitGTK, D-Bus, and
 Secret Service implementations, retain their own distribution licenses.
 
+## Vendored native source (not covered by cargo-about)
+
+`third_party/thorvg-sys/` vendors a patched fork of the `thorvg-sys` FFI
+crate, which bundles the ThorVG C++ library compiled into the image viewer.
+`cargo about` only inspects Rust crate metadata, so the bundled C++ components
+are listed here manually; their full license texts live in-tree:
+
+| Component | License | In-tree license text |
+|---|---|---|
+| ThorVG | MIT | `third_party/thorvg-sys/thorvg/LICENSE` |
+| ThorVG jpg loader | MIT | headers under `third_party/thorvg-sys/thorvg/src/loaders/jpg/` |
+| WebP (libwebp), © 2012 Google Inc. | BSD-3-Clause + patent grant | `third_party/thorvg-sys/thorvg/src/loaders/webp/LICENSE` |
+
 ## License Overview
 
 - Apache License 2.0 (342)

@@ -78,3 +78,10 @@ flowmux-browser = { path = "crates/flowmux-browser" }
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+
+# Vendored fork of thorvg-sys: the crates.io release only compiles the
+# png/svg/lottie loaders, so we patch its build to also build ThorVG's
+# built-in jpg + webp loaders (self-contained; no system libjpeg/libwebp).
+# This lets the image viewer decode raster images natively through ThorVG.
+[patch.crates-io]
+thorvg-sys = { path = "third_party/thorvg-sys" }
