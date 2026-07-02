@@ -14,6 +14,7 @@
 
 flowmux is a Linux/GTK4 terminal for AI coding agents. The terminal pane uses
 the system VTE widget for terminal emulation, flowmux-owned PTYs, and GTK integration.
+Supported on Ubuntu 24.04 and later.
 
 > Unofficial GPL-3.0-or-later reimplementation inspired by [cmux](https://cmux.com/ko), a macOS/AppKit app. Not affiliated with cmux.
   
@@ -34,6 +35,33 @@ desktop notifications — routed to the workspace that fired them, suppressed
 while that surface is focused, and isolated per window.
 
 ![video2](resources/screenshot/claude_notification.gif)
+
+## Split panes
+
+Split a pane horizontally or vertically and drag the divider to resize. Mix
+terminal and browser tabs across panes, and navigate between them from the
+keyboard.
+
+![split](resources/screenshot/view_split.gif)
+
+## Image viewer
+
+Ctrl+click an image path in a terminal pane to preview it inline without
+leaving flowmux. Supports **PNG, JPEG, WebP, GIF, SVG, and Lottie**
+(`.lottie` / `.json`). Everything is drawn by
+[ThorVG](https://www.thorvg.org/): PNG / JPEG / WebP / SVG are decoded and
+rendered by ThorVG's own loaders, Lottie plays back frame by frame, and GIF
+(which ThorVG has no loader for) is decoded with the Rust `image` crate and
+then handed to ThorVG to render.
+
+![image viewer](resources/screenshot/image_viewer.gif)
+
+## Markdown viewer
+
+`flowmux-md-viewer` renders Markdown files in a WebKit view for a formatted,
+scrollable preview.
+
+![markdown viewer](resources/screenshot/md_viewer.gif)
 
 ## Features
 
@@ -83,6 +111,7 @@ flowmux/
 │   ├── flowmux-vcs/        Git/PR sidebar integration
 │   ├── flowmux-cli/        `flowmuxctl` helper for CLI subcommands
 │   └── flowmux/            GTK4 + libadwaita main app and public `flowmux` binary
+├── third_party/thorvg-sys/  Vendored ThorVG FFI fork (adds jpg/webp loaders)
 ├── packaging/{debian,flatpak}/  Distro packaging metadata
 ├── resources/             .desktop file, icons, screenshots, themes
 ├── LICENSE                GPL-3.0-or-later (verbatim from gnu.org)
@@ -101,6 +130,10 @@ sudo apt install \
 # rustup (Rust 1.93+) required.
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
+
+The image viewer builds a vendored ThorVG fork (`third_party/thorvg-sys/`) from
+C++ source via `cc`, so a C++ compiler is needed — `build-essential` above
+already provides it. No other extra toolchain is required.
 
 ### Optional — full media playback in tab browser
 
@@ -134,7 +167,7 @@ For development:
 ```bash
 cargo run -p flowmux           # debug GUI
 cargo check --workspace        # type-check everything
-scripts/check-ubuntu-compat.sh # Docker smoke check for 22.04/24.04/26.04
+scripts/check-ubuntu-compat.sh # Docker smoke check for 24.04/26.04
 ```
 
 ## macOS local install
@@ -162,7 +195,11 @@ The script installs `FlowMux.app` under `~/Applications` and copies `flowmux`,
 This installs `flowmux`, `flowmuxctl`, and `flowmux-md-viewer` binaries to
 `~/.local/bin` and `~/.cargo/bin`. It is a plain `cargo build --release` using
 the system VTE library; no Zig toolchain or vendored terminal backend is
-required.
+required. (The image viewer's vendored ThorVG backend is compiled from C++ via
+`cc`, using the system C++ compiler from `build-essential`.)
+
+After installing, fully restart any running flowmux GUI to pick up the new
+binary.
 
 ## Verify & repair
 
@@ -180,32 +217,13 @@ install/upgrade and after installing a new agent. `fix` is idempotent and
 never clobbers hand-edited entries lacking the flowmux marker. Add `--json` to
 either for machine-readable output.
 
-## Ubuntu 22.04 (jammy)
-
-22.04 lacks the GTK/WebKit versions for a native build, so ship via Flatpak
-(GNOME 48 runtime). Host tools stay visible through `flatpak-spawn --host`,
-and GStreamer plugins are bundled, so no extra host packages are needed.
-
-```bash
-sudo apt install flatpak flatpak-builder
-flatpak remote-add --if-not-exists --user flathub https://flathub.org/repo/flathub.flatpakrepo
-flatpak install -y --user flathub org.gnome.Platform//48 org.gnome.Sdk//48
-flatpak-builder --user --install --force-clean build-flatpak packaging/flatpak/com.flowmux.App.yml
-flatpak run com.flowmux.App
-```
-
-Blank browser tabs (`EGL_BAD_PARAMETER`) mean the host GL stack is too old for
-the sandbox Mesa — disable WebKit's GPU path:
-`flatpak override --user --env=FLOWMUX_WEBKIT_HW_ACCEL=never com.flowmux.App`.
-
 ## WSL / WSLg
 
 Ubuntu 24.04 and 26.04 on WSLg follow the native host path above:
 install the build prerequisites, run `./install.sh`, then start
 `flowmux` from the Linux side so GTK connects to WSLg's Wayland display. The
 runtime detects WSL and enables the terminal key/resize workarounds that differ
-from a regular GNOME session. Ubuntu 22.04 on WSL should use the Flatpak path
-from the Jammy section because the native GTK/libadwaita floor is too old.
+from a regular GNOME session.
 
 To verify a real WSLg session end to end on 24.04 or 26.04:
 
