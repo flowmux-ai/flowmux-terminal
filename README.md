@@ -140,15 +140,18 @@ be built with the **C API** (`-Dbindings=capi`) and **all loaders**
 (`-Dloaders=all`) — otherwise JPEG/WebP previews won't work and the build fails
 to link.
 
-If your distribution packages a recent ThorVG (Debian ships `libthorvg-dev`),
-install it directly — as long as it was built with the C API and loaders:
+If your platform packages a recent ThorVG, install it directly (as long as it
+ships the C API and loaders):
 
 ```bash
-sudo apt install libthorvg-dev    # Debian / where packaged
+sudo apt install libthorvg-dev            # Debian
+sudo dnf install thorvg thorvg-devel      # Fedora
+brew install thorvg                       # Homebrew (macOS / Linuxbrew)
+# Arch: AUR `thorvg`; also on vcpkg / Conan / MSYS2
 ```
 
-Ubuntu (through 24.04) does **not** package ThorVG, so build and install it with
-the helper script (needs `meson` + `ninja-build`):
+Ubuntu (through 24.04) does **not** package ThorVG in apt, so build and install
+it with the helper script (needs `meson` + `ninja-build`):
 
 ```bash
 scripts/install-thorvg.sh          # builds ThorVG v1.0.6, installs to /usr/local (sudo)
