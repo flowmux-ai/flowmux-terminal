@@ -6,6 +6,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use adw::prelude::*;
@@ -495,6 +496,14 @@ impl ThorvgCanvas {
 
 struct ThorvgEngine;
 
+// The ThorVG engine is a process-global, reference-counted resource. Serialize
+// init/term behind a mutex and only call the C init/term at the 0<->1 edges, so
+// concurrent callers (e.g. parallel tests) don't tear the engine down while
+// another is mid-render. The lock is held only across the count change, never
+// during rendering, so an active animation holding a `ThorvgEngine` can't
+// deadlock a second image open on the same thread.
+static ENGINE_REFCOUNT: Mutex<u32> = Mutex::new(0);
+
 impl ThorvgEngine {
     fn init() -> Result<Self, String> {
         if !tvg::available() {
@@ -505,15 +514,27 @@ impl ThorvgEngine {
                     .to_string(),
             );
         }
-        check(unsafe { tvg::tvg_engine_init(0) }, "initialize ThorVG")?;
+        let mut count = ENGINE_REFCOUNT
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *count == 0 {
+            check(unsafe { tvg::tvg_engine_init(0) }, "initialize ThorVG")?;
+        }
+        *count += 1;
         Ok(Self)
     }
 }
 
 impl Drop for ThorvgEngine {
     fn drop(&mut self) {
-        unsafe {
-            tvg::tvg_engine_term();
+        let mut count = ENGINE_REFCOUNT
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *count -= 1;
+        if *count == 0 {
+            unsafe {
+                tvg::tvg_engine_term();
+            }
         }
     }
 }
