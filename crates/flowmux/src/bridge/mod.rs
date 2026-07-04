@@ -9,7 +9,7 @@
 //! window controller.
 
 use flowmux_core::{
-    AgentActivity, NotificationId, NotificationLevel, PaneId, PaneSurface, PlacementStrategy,
+    AgentStatus, NotificationId, NotificationLevel, PaneId, PaneSurface, PlacementStrategy,
     SplitDirection, SurfaceId, WorkspaceId,
 };
 use flowmux_ipc::protocol::{BrowserWaitCondition, NotificationSummary};
@@ -529,9 +529,9 @@ pub enum GtkCommand {
     /// breathing opacity of the workspace's left color bar.
     /// `activity: None` clears the presence (session end / dead PID).
     /// Fire-and-forget — the sidebar render has no reply.
-    SetAgentActivity {
+    SetAgentStatus {
         workspace: WorkspaceId,
-        activity: Option<AgentActivity>,
+        status: Option<AgentStatus>,
     },
 }
 

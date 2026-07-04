@@ -8,7 +8,7 @@
 //! `oneshot` channel.
 
 use crate::bridge::{Bridge, BrowserActionResult, BrowserOp, GtkCommand};
-use flowmux_core::{AgentPresence, SplitDirection};
+use flowmux_core::{AgentStatusReport, SplitDirection};
 use flowmux_daemon::DaemonHandler;
 use flowmux_ipc::protocol::{Request, Response, RpcError};
 use flowmux_ipc::server::Handler;
@@ -677,30 +677,58 @@ impl Handler for GuiHandler {
                 Request::AgentActivityUpdate {
                     surface,
                     agent,
+                    status,
                     activity,
                     pid,
+                    source,
+                    seq,
+                    message,
+                    custom_status,
+                    session_id,
                     ..
                 } => match surface {
                     Some(surface) => {
-                        let presence = activity.map(|act| AgentPresence {
-                            name: agent,
-                            activity: act,
-                            pid,
-                        });
-                        if let Some(ws_id) = self
-                            .inner
-                            .store()
-                            .set_agent_activity(surface, presence)
-                            .await
-                        {
-                            let _ = self
-                                .bridge
-                                .tx
-                                .send(GtkCommand::SetAgentActivity {
-                                    workspace: ws_id,
-                                    activity,
-                                })
-                                .await;
+                        if status.is_none() && activity.is_none() {
+                            if let Some(ws_id) =
+                                self.inner.store().set_agent_activity(surface, None).await
+                            {
+                                let rollup = self.inner.store().workspace_agent_status(ws_id).await;
+                                let _ = self
+                                    .bridge
+                                    .tx
+                                    .send(GtkCommand::SetAgentStatus {
+                                        workspace: ws_id,
+                                        status: rollup,
+                                    })
+                                    .await;
+                            }
+                        } else {
+                            let report = AgentStatusReport {
+                                name: agent,
+                                status,
+                                activity,
+                                pid,
+                                source,
+                                seq,
+                                message,
+                                custom_status,
+                                session_id,
+                            };
+                            if let Some((ws_id, rollup)) = self
+                                .inner
+                                .store()
+                                .report_agent_status(surface, report)
+                                .await
+                            {
+                                let _ = self
+                                    .bridge
+                                    .tx
+                                    .send(GtkCommand::SetAgentStatus {
+                                        workspace: ws_id,
+                                        status: rollup,
+                                    })
+                                    .await;
+                            }
                         }
                         Response::Ok
                     }
@@ -935,7 +963,8 @@ fn shell_escape(arg: String) -> String {
 mod tests {
     use super::*;
     use flowmux_core::{
-        AgentActivity, NotificationLevel, PaneId, PlacementStrategy, SurfaceId, WorkspaceId,
+        AgentActivity, AgentStatus, NotificationLevel, PaneId, PlacementStrategy, SurfaceId,
+        WorkspaceId,
     };
     use flowmux_daemon::StateStore;
     use flowmux_state::State;
@@ -1373,8 +1402,14 @@ mod tests {
                     pane: Some(pane),
                     surface: Some(surface),
                     agent: "codex".into(),
+                    status: None,
                     activity: Some(AgentActivity::Running),
                     pid: Some(1234),
+                    source: None,
+                    seq: Some(10),
+                    message: None,
+                    custom_status: None,
+                    session_id: None,
                 })
                 .await,
             Response::Ok
@@ -1383,12 +1418,12 @@ mod tests {
         let command = rx
             .recv()
             .await
-            .expect("activity update should dispatch SetAgentActivity");
+            .expect("activity update should dispatch SetAgentStatus");
         assert!(matches!(
             command,
-            GtkCommand::SetAgentActivity {
+            GtkCommand::SetAgentStatus {
                 workspace,
-                activity: Some(AgentActivity::Running),
+                status: Some(AgentStatus::Working),
             } if workspace == expected_workspace
         ));
         assert_eq!(
@@ -1402,8 +1437,14 @@ mod tests {
                     pane: Some(pane),
                     surface: Some(surface),
                     agent: "codex".into(),
+                    status: None,
                     activity: None,
                     pid: Some(1234),
+                    source: None,
+                    seq: Some(11),
+                    message: None,
+                    custom_status: None,
+                    session_id: None,
                 })
                 .await,
             Response::Ok
@@ -1412,12 +1453,12 @@ mod tests {
         let command = rx
             .recv()
             .await
-            .expect("activity clear should dispatch SetAgentActivity");
+            .expect("activity clear should dispatch SetAgentStatus");
         assert!(matches!(
             command,
-            GtkCommand::SetAgentActivity {
+            GtkCommand::SetAgentStatus {
                 workspace,
-                activity: None,
+                status: None,
             } if workspace == expected_workspace
         ));
         assert!(

@@ -591,25 +591,8 @@ impl GhosttyPane {
         let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
         let cwd_str = cwd.as_ref().and_then(|p| p.to_str());
 
-        // Prepend the agent shim dir to PATH so `claude` / `codex`
-        // resolve to the PID-capturing wrappers `flowmux fix` installs.
-        // VTE merges these entries over the inherited environment, so a
-        // PATH entry overrides the inherited one — we rebuild it as
-        // shim-dir-first to preserve prepend semantics. Transparent for
-        // every other command.
         let mut extra_env = extra_env;
-        if let Some(shim) = flowmux_config::paths::agent_shim_dir() {
-            if shim.is_dir() {
-                let base = std::env::var("PATH").unwrap_or_default();
-                let shim = shim.to_string_lossy();
-                let value = if base.is_empty() {
-                    shim.into_owned()
-                } else {
-                    format!("{shim}:{base}")
-                };
-                extra_env.push(("PATH".to_string(), value));
-            }
-        }
+        prepare_terminal_child_env(&mut extra_env);
 
         let _ = cwd_str;
         // Spawn the child synchronously with a forkpty so the PID is available
@@ -1719,10 +1702,11 @@ fn install_ibus_nav_workaround(term: &vte::Terminal, smart_page_enabled: bool) {
 /// .zshrc so the user's PS1 + helpers are defined before the first prompt.
 /// Same convention xterm / alacritty / kitty use.
 ///
-/// **On macOS** — use the user's shell in fast-start mode where the shell
-/// supports it. The GUI process already supplies PATH and flowmux's pane env,
-/// while skipping zsh/bash startup files avoids command-lookup stalls seen
-/// under the GUI app + pty-tee launch path before the first prompt appears.
+/// **On macOS** — run the user's shell as a login shell too. Finder-launched
+/// apps do not inherit the user's terminal PATH or UTF-8 locale, so skipping
+/// shell startup files makes the first prompt plain and can leave Korean input
+/// decoded under a `C` locale. The PTY env still carries flowmux's pane vars and
+/// a small PATH/locale fallback for GUI launches.
 ///
 /// **Inside Flatpak** — wrap the host shell in an inline Python
 /// bridge. `flatpak-spawn --host` forwards stdin/stdout FDs to a host
@@ -1775,23 +1759,113 @@ fn default_shell_argv() -> Vec<String> {
         ]
     } else {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
-        if cfg!(target_os = "macos") {
-            macos_fast_shell_argv(shell)
-        } else {
-            vec![shell, "-l".into()]
+        vec![shell, "-l".into()]
+    }
+}
+
+fn prepare_terminal_child_env(extra_env: &mut Vec<(String, String)>) {
+    #[cfg(target_os = "macos")]
+    add_macos_gui_env_fallbacks(extra_env);
+    prepend_agent_shim_dir(extra_env);
+}
+
+#[cfg(target_os = "macos")]
+fn add_macos_gui_env_fallbacks(extra_env: &mut Vec<(String, String)>) {
+    if !inherited_locale_is_utf8() {
+        extra_env.push(("LANG".to_string(), "en_US.UTF-8".to_string()));
+        extra_env.push(("LC_CTYPE".to_string(), "en_US.UTF-8".to_string()));
+    }
+    if let Some(path) = macos_terminal_path_from(
+        std::env::var_os("HOME").map(PathBuf::from),
+        std::env::var("PATH").ok().as_deref(),
+    ) {
+        extra_env.push(("PATH".to_string(), path));
+    }
+}
+
+fn prepend_agent_shim_dir(extra_env: &mut Vec<(String, String)>) {
+    // Prepend the agent shim dir to PATH so `claude` / `codex`
+    // resolve to the PID-capturing wrappers `flowmux fix` installs.
+    // VTE merges these entries over the inherited environment, so a
+    // PATH entry overrides the inherited one; rebuild it as shim-dir-first
+    // using any PATH override already added above.
+    if let Some(shim) = flowmux_config::paths::agent_shim_dir() {
+        if shim.is_dir() {
+            let base = last_env_value(extra_env, "PATH")
+                .map(str::to_string)
+                .or_else(|| std::env::var("PATH").ok())
+                .unwrap_or_default();
+            extra_env.push(("PATH".to_string(), prepend_path_entry(&shim, &base)));
         }
     }
 }
 
-fn macos_fast_shell_argv(shell: String) -> Vec<String> {
-    match std::path::Path::new(&shell)
-        .file_name()
-        .and_then(|name| name.to_str())
-    {
-        Some("zsh") => vec![shell, "-f".into()],
-        Some("bash") => vec![shell, "--noprofile".into(), "--norc".into()],
-        _ => vec![shell],
+fn last_env_value<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    env.iter()
+        .rev()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.as_str())
+}
+
+fn prepend_path_entry(dir: &std::path::Path, base: &str) -> String {
+    let dir = dir.to_string_lossy();
+    if base.is_empty() {
+        dir.into_owned()
+    } else {
+        format!("{dir}:{base}")
     }
+}
+
+#[cfg(target_os = "macos")]
+fn inherited_locale_is_utf8() -> bool {
+    ["LC_ALL", "LC_CTYPE", "LANG"].iter().any(|key| {
+        std::env::var(key)
+            .ok()
+            .is_some_and(|value| locale_value_is_utf8(&value))
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn locale_value_is_utf8(value: &str) -> bool {
+    let value = value.trim();
+    value.eq_ignore_ascii_case("UTF-8")
+        || value.eq_ignore_ascii_case("UTF8")
+        || value.to_ascii_uppercase().ends_with(".UTF-8")
+        || value.to_ascii_uppercase().ends_with(".UTF8")
+}
+
+#[cfg(target_os = "macos")]
+fn macos_terminal_path_from(home: Option<PathBuf>, inherited: Option<&str>) -> Option<String> {
+    let mut entries: Vec<PathBuf> = Vec::new();
+    if let Some(home) = home {
+        entries.push(home.join(".local").join("bin"));
+        entries.push(home.join(".cargo").join("bin"));
+    }
+    for path in [
+        "/opt/homebrew/bin",
+        "/opt/homebrew/sbin",
+        "/usr/local/bin",
+        "/usr/local/sbin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    ] {
+        entries.push(PathBuf::from(path));
+    }
+    if let Some(inherited) = inherited {
+        entries.extend(std::env::split_paths(inherited));
+    }
+    dedup_path_entries(&mut entries);
+    std::env::join_paths(entries)
+        .ok()
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
+#[cfg(target_os = "macos")]
+fn dedup_path_entries(entries: &mut Vec<PathBuf>) {
+    let mut seen = std::collections::HashSet::new();
+    entries.retain(|path| seen.insert(path.clone()));
 }
 
 /// Detect whether the current process is running inside a Flatpak
@@ -2132,19 +2206,51 @@ mod tests {
     }
 
     #[test]
-    fn macos_fast_shell_argv_skips_known_startup_files() {
+    fn path_prepend_keeps_agent_shim_first() {
         assert_eq!(
-            macos_fast_shell_argv("/bin/zsh".into()),
-            vec!["/bin/zsh", "-f"]
+            prepend_path_entry(std::path::Path::new("/tmp/flowmux-shims"), "/usr/bin:/bin"),
+            "/tmp/flowmux-shims:/usr/bin:/bin"
         );
         assert_eq!(
-            macos_fast_shell_argv("/bin/bash".into()),
-            vec!["/bin/bash", "--noprofile", "--norc"]
+            prepend_path_entry(std::path::Path::new("/tmp/flowmux-shims"), ""),
+            "/tmp/flowmux-shims"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_terminal_path_adds_gui_fallbacks_before_inherited_path() {
+        let path = macos_terminal_path_from(
+            Some(PathBuf::from("/Users/example")),
+            Some("/custom/bin:/usr/bin"),
+        )
+        .expect("path");
+        let entries: Vec<_> = std::env::split_paths(&path).collect();
+
+        assert_eq!(entries[0], PathBuf::from("/Users/example/.local/bin"));
+        assert_eq!(entries[1], PathBuf::from("/Users/example/.cargo/bin"));
+        assert!(entries
+            .iter()
+            .any(|p| p == std::path::Path::new("/opt/homebrew/bin")));
+        assert!(entries
+            .iter()
+            .any(|p| p == std::path::Path::new("/custom/bin")));
         assert_eq!(
-            macos_fast_shell_argv("/opt/homebrew/bin/fish".into()),
-            vec!["/opt/homebrew/bin/fish"]
+            entries
+                .iter()
+                .filter(|p| *p == std::path::Path::new("/usr/bin"))
+                .count(),
+            1
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_locale_detection_accepts_common_utf8_spellings() {
+        assert!(locale_value_is_utf8("UTF-8"));
+        assert!(locale_value_is_utf8("en_US.UTF-8"));
+        assert!(locale_value_is_utf8("ko_KR.UTF8"));
+        assert!(!locale_value_is_utf8("C"));
     }
 
     #[test]

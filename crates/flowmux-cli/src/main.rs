@@ -1414,53 +1414,74 @@ async fn run_claude_hook_event(
     match event {
         ClaudeHookEvent::Stop => {
             let body = input.last_assistant_message.as_deref();
-            reqs.push(build_stop_notify("Claude", body, pane, surface));
-            reqs.push(build_activity_update(
+            reqs.push(build_activity_update_with_metadata(
                 "claude",
                 Some(Idle),
                 pid,
                 pane,
                 surface,
+                body,
+                None,
+                input.session_id.as_deref(),
             ));
+            reqs.push(build_stop_notify("Claude", body, pane, surface));
         }
         ClaudeHookEvent::Notification => {
             let msg = input.message.as_deref();
-            reqs.push(build_notification_notify("Claude", msg, pane, surface));
-            reqs.push(build_activity_update(
+            reqs.push(build_activity_update_with_metadata(
                 "claude",
                 Some(NeedsInput),
                 pid,
                 pane,
                 surface,
+                msg,
+                None,
+                input.session_id.as_deref(),
             ));
+            reqs.push(build_notification_notify("Claude", msg, pane, surface));
         }
         // SessionStart registers the agent's presence (and PID, for the
         // liveness sweep) without claiming it is working yet.
         ClaudeHookEvent::SessionStart => {
-            reqs.push(build_activity_update(
+            reqs.push(build_activity_update_with_metadata(
                 "claude",
                 Some(Idle),
                 pid,
                 pane,
                 surface,
+                None,
+                None,
+                input.session_id.as_deref(),
             ));
         }
         // A new prompt or an imminent tool call means the agent is
         // actively working this turn — and clears any "needs input".
         ClaudeHookEvent::PromptSubmit | ClaudeHookEvent::PreToolUse => {
-            reqs.push(build_activity_update(
+            reqs.push(build_activity_update_with_metadata(
                 "claude",
                 Some(Running),
                 pid,
                 pane,
                 surface,
+                None,
+                None,
+                input.session_id.as_deref(),
             ));
         }
         // Real teardown (covers Ctrl+C, where Stop never fires). The
         // daemon PID sweep is the backstop for a hard kill that skips
         // SessionEnd too.
         ClaudeHookEvent::SessionEnd => {
-            reqs.push(build_activity_update("claude", None, pid, pane, surface));
+            reqs.push(build_activity_update_with_metadata(
+                "claude",
+                None,
+                pid,
+                pane,
+                surface,
+                None,
+                None,
+                input.session_id.as_deref(),
+            ));
         }
     };
     if let Some(client) = hooks::connect_daemon(socket).await {
@@ -1502,20 +1523,32 @@ async fn run_generic_agent_hook_event(
         AgentHookEvent::Stop { args, .. } => {
             let input = read_codex_hook_input(args);
             let body = input.last_assistant_message.as_deref();
+            reqs.push(build_activity_update_with_metadata(
+                agent,
+                Some(Idle),
+                pid,
+                pane,
+                surface,
+                body,
+                None,
+                input.session_id.as_deref(),
+            ));
             reqs.push(build_stop_notify(agent, body, pane, surface));
-            reqs.push(build_activity_update(agent, Some(Idle), pid, pane, surface));
         }
         AgentHookEvent::Notification { args, .. } => {
             let input = read_codex_hook_input(args);
             let msg = input.message.as_deref();
-            reqs.push(build_notification_notify(agent, msg, pane, surface));
-            reqs.push(build_activity_update(
+            reqs.push(build_activity_update_with_metadata(
                 agent,
                 Some(NeedsInput),
                 pid,
                 pane,
                 surface,
+                msg,
+                None,
+                input.session_id.as_deref(),
             ));
+            reqs.push(build_notification_notify(agent, msg, pane, surface));
         }
         // Codex / OpenCode register presence on session start (no
         // wrapper PID for these, so the daemon clears them via Stop→Idle
@@ -1776,10 +1809,15 @@ fn render_tree(workspaces: &[flowmux_ipc::protocol::TreeWorkspace]) -> String {
             let _ = writeln!(out, "  pane {}", pane.id);
             for tab in &pane.tabs {
                 let marker = if tab.active { '*' } else { ' ' };
+                let agent = tab
+                    .agent
+                    .as_ref()
+                    .map(|agent| format!(" agent={} status={}", agent.name, agent.status.as_str()))
+                    .unwrap_or_default();
                 let _ = writeln!(
                     out,
-                    "    {marker} [{}] {} \"{}\"",
-                    tab.kind, tab.id, tab.title
+                    "    {marker} [{}] {} \"{}\"{}",
+                    tab.kind, tab.id, tab.title, agent
                 );
             }
         }
@@ -2305,7 +2343,8 @@ mod tests {
 
     #[test]
     fn render_tree_marks_active_tab_and_indents() {
-        use flowmux_ipc::protocol::{TreePane, TreeTab, TreeWorkspace};
+        use flowmux_core::{AgentActivity, AgentStatus};
+        use flowmux_ipc::protocol::{TreeAgent, TreePane, TreeTab, TreeWorkspace};
         let pane = PaneId::new();
         let t1 = SurfaceId::new();
         let t2 = SurfaceId::new();
@@ -2321,12 +2360,23 @@ mod tests {
                         title: "shell".into(),
                         kind: "terminal".into(),
                         active: false,
+                        agent: Some(TreeAgent {
+                            name: "codex".into(),
+                            status: AgentStatus::Blocked,
+                            activity: AgentActivity::NeedsInput,
+                            source: Some("flowmux:hook".into()),
+                            seq: Some(7),
+                            message: Some("approval needed".into()),
+                            custom_status: None,
+                            session_id: Some("session-1".into()),
+                        }),
                     },
                     TreeTab {
                         id: t2,
                         title: "docs".into(),
                         kind: "browser".into(),
                         active: true,
+                        agent: None,
                     },
                 ],
             }],
@@ -2337,7 +2387,9 @@ mod tests {
         assert!(out.contains(&format!("pane {pane}")));
         // Active tab marked with '*', inactive with a space.
         assert!(out.contains(&format!("* [browser] {t2} \"docs\"")));
-        assert!(out.contains(&format!("  [terminal] {t1} \"shell\"")));
+        assert!(out.contains(&format!(
+            "  [terminal] {t1} \"shell\" agent=codex status=blocked"
+        )));
         assert_eq!(render_tree(&[]), "(no workspaces)\n");
     }
 

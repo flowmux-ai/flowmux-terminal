@@ -21,7 +21,7 @@
 use crate::bridge::{Bridge, GtkCommand};
 use crate::notifications::{NotificationEntry, NotificationStore};
 use crate::ui::workspace_view::{parse_tab_dnd_payload, TAB_DND_MIME, TAB_DND_PAYLOAD_MAX};
-use flowmux_core::{AgentActivity, NotificationLevel, PrState, Workspace, WorkspaceId};
+use flowmux_core::{AgentStatus, NotificationLevel, PrState, Workspace, WorkspaceId};
 use gtk::prelude::*;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -40,11 +40,9 @@ pub struct Sidebar {
     bell_popover: gtk::Popover,
     notifications: NotificationStore,
     attentions: Rc<RefCell<HashSet<WorkspaceId>>>,
-    /// Workspaces with an agent currently `Running`; their row carries
-    /// the `flowmux-agent-running` class so the color bar breathes. The
-    /// class lives on the reused `ListBoxRow`, so it survives a row
-    /// rebuild; this set just keeps the membership idempotent.
-    agent_running: Rc<RefCell<HashSet<WorkspaceId>>>,
+    /// Workspace-level AI agent status rollups. The classes live on reused
+    /// rows, so this map keeps membership idempotent across redraws.
+    agent_status: Rc<RefCell<HashMap<WorkspaceId, AgentStatus>>>,
     bridge: Bridge,
     /// Last computed subtitle lines per workspace, capped at 3 lines.
     /// Kept so paths that do not know subtitle data, such as rename or color
@@ -239,7 +237,7 @@ impl Sidebar {
             bell_popover,
             notifications,
             attentions,
-            agent_running: Rc::new(RefCell::new(HashSet::new())),
+            agent_status: Rc::new(RefCell::new(HashMap::new())),
             bridge,
             subtitle_cache: Rc::new(RefCell::new(HashMap::new())),
             titles: Rc::new(RefCell::new(Vec::new())),
@@ -293,6 +291,8 @@ impl Sidebar {
                 self.on_close.clone(),
                 self.bridge.clone(),
             )));
+            let status = self.agent_status.borrow().get(&ws.id).copied();
+            apply_agent_status_class(&row, status);
             return;
         }
         let row = gtk::ListBoxRow::new();
@@ -302,6 +302,8 @@ impl Sidebar {
             self.on_close.clone(),
             self.bridge.clone(),
         )));
+        let status = self.agent_status.borrow().get(&ws.id).copied();
+        apply_agent_status_class(&row, status);
         attach_dnd_handlers(&row, ws.id, self.bridge.clone(), self.rows.clone());
         attach_tab_drop_to_row(&row, ws.id, self.bridge.clone());
         self.list.append(&row);
@@ -348,6 +350,7 @@ impl Sidebar {
             self.list.remove(&rows[idx].1);
             rows.swap_remove(idx);
         }
+        self.agent_status.borrow_mut().remove(&id);
         self.titles.borrow_mut().retain(|(tid, _)| *tid != id);
     }
 
@@ -402,18 +405,13 @@ impl Sidebar {
         }
     }
 
-    /// Reflect an AI agent's live activity on the workspace row. Only
-    /// [`AgentActivity::Running`] breathes the color bar (via the
-    /// `flowmux-agent-running` class); `NeedsInput`/`Idle`/`None` clear
-    /// it (a waiting agent still shows the separate attention tint from
-    /// its notification). The class sits on the reused `ListBoxRow`, so
-    /// it persists across row rebuilds.
-    pub fn set_agent_activity(&self, id: WorkspaceId, activity: Option<AgentActivity>) {
-        let running = matches!(activity, Some(AgentActivity::Running));
-        let changed = if running {
-            self.agent_running.borrow_mut().insert(id)
-        } else {
-            self.agent_running.borrow_mut().remove(&id)
+    /// Reflect an AI agent's rolled-up status on the workspace row. `Working`
+    /// keeps the existing breathing color bar; `Blocked` and `Done` get stable
+    /// row classes so CSS can distinguish them.
+    pub fn set_agent_status(&self, id: WorkspaceId, status: Option<AgentStatus>) {
+        let changed = match status {
+            Some(status) => self.agent_status.borrow_mut().insert(id, status) != Some(status),
+            None => self.agent_status.borrow_mut().remove(&id).is_some(),
         };
         if !changed {
             return;
@@ -425,11 +423,7 @@ impl Sidebar {
             .find(|(wid, _)| *wid == id)
             .cloned()
         {
-            if running {
-                row.add_css_class("flowmux-agent-running");
-            } else {
-                row.remove_css_class("flowmux-agent-running");
-            }
+            apply_agent_status_class(&row, status);
         }
     }
 
@@ -1120,6 +1114,18 @@ fn color_bar(color: &str) -> gtk::Widget {
         let _ = cr.fill();
     });
     bar.upcast()
+}
+
+fn apply_agent_status_class(row: &gtk::ListBoxRow, status: Option<AgentStatus>) {
+    row.remove_css_class("flowmux-agent-running");
+    row.remove_css_class("flowmux-agent-blocked");
+    row.remove_css_class("flowmux-agent-done");
+    match status {
+        Some(AgentStatus::Working) => row.add_css_class("flowmux-agent-running"),
+        Some(AgentStatus::Blocked) => row.add_css_class("flowmux-agent-blocked"),
+        Some(AgentStatus::Done) => row.add_css_class("flowmux-agent-done"),
+        Some(AgentStatus::Idle | AgentStatus::Unknown) | None => {}
+    }
 }
 
 fn build_meta_column(ws: &Workspace, subtitles: &[String]) -> gtk::Box {

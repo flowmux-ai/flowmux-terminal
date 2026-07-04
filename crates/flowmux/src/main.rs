@@ -267,11 +267,9 @@ fn main() -> anyhow::Result<()> {
                 for (workspace, surface, pid) in sweep_store.live_agent_presences().await {
                     if !flowmux_procmon::pid_alive(pid) {
                         sweep_store.set_agent_activity(surface, None).await;
+                        let status = sweep_store.workspace_agent_status(workspace).await;
                         let _ = sweep_tx
-                            .send(crate::bridge::GtkCommand::SetAgentActivity {
-                                workspace,
-                                activity: None,
-                            })
+                            .send(crate::bridge::GtkCommand::SetAgentStatus { workspace, status })
                             .await;
                     }
                 }

@@ -22,7 +22,7 @@ use serde::{de::DeserializeOwned, Deserialize};
 use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const HOOK_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const HOOK_NOTIFY_TIMEOUT: Duration = Duration::from_millis(750);
@@ -124,6 +124,13 @@ pub fn pid_from_env() -> Option<u32> {
         .filter(|&p| p != 0)
 }
 
+fn hook_seq() -> Option<u64> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_nanos().min(u64::MAX as u128) as u64)
+}
+
 /// Build a `Request::AgentActivityUpdate`. `activity: None` clears the
 /// presence (session end / teardown).
 pub fn build_activity_update(
@@ -133,12 +140,32 @@ pub fn build_activity_update(
     pane: Option<PaneId>,
     surface: Option<SurfaceId>,
 ) -> Request {
+    build_activity_update_with_metadata(agent, activity, pid, pane, surface, None, None, None)
+}
+
+/// Build a live activity update with optional agent hook metadata.
+pub fn build_activity_update_with_metadata(
+    agent: &str,
+    activity: Option<AgentActivity>,
+    pid: Option<u32>,
+    pane: Option<PaneId>,
+    surface: Option<SurfaceId>,
+    message: Option<&str>,
+    custom_status: Option<&str>,
+    session_id: Option<&str>,
+) -> Request {
     Request::AgentActivityUpdate {
         pane,
         surface,
         agent: agent.to_ascii_lowercase(),
+        status: activity.map(AgentActivity::status),
         activity,
         pid,
+        source: Some("flowmux:hook".into()),
+        seq: hook_seq(),
+        message: message.map(str::to_string),
+        custom_status: custom_status.map(str::to_string),
+        session_id: session_id.map(str::to_string),
     }
 }
 
@@ -385,6 +412,39 @@ mod tests {
                 assert_eq!(agent, "claude");
                 assert_eq!(activity, Some(AgentActivity::Running));
                 assert_eq!(pid, Some(4321));
+            }
+            other => panic!("expected AgentActivityUpdate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_activity_update_with_metadata_carries_hook_fields() {
+        let req = build_activity_update_with_metadata(
+            "Claude",
+            Some(AgentActivity::NeedsInput),
+            None,
+            None,
+            None,
+            Some("approval needed"),
+            Some("waiting"),
+            Some("session-1"),
+        );
+        match req {
+            Request::AgentActivityUpdate {
+                status,
+                source,
+                seq,
+                message,
+                custom_status,
+                session_id,
+                ..
+            } => {
+                assert_eq!(status, Some(flowmux_core::AgentStatus::Blocked));
+                assert_eq!(source.as_deref(), Some("flowmux:hook"));
+                assert!(seq.is_some());
+                assert_eq!(message.as_deref(), Some("approval needed"));
+                assert_eq!(custom_status.as_deref(), Some("waiting"));
+                assert_eq!(session_id.as_deref(), Some("session-1"));
             }
             other => panic!("expected AgentActivityUpdate, got {other:?}"),
         }

@@ -382,6 +382,14 @@ paned > separator {{
 .navigation-sidebar row.flowmux-agent-running .flowmux-color-bar {{
     animation: flowmux-breathe 2.6s ease-in-out infinite;
 }}
+.navigation-sidebar row.flowmux-agent-blocked {{
+    background-color: rgba(59, 130, 246, 0.16);
+    border-left: 3px solid rgba(59, 130, 246, 0.85);
+}}
+.navigation-sidebar row.flowmux-agent-done {{
+    background-color: rgba(34, 197, 94, 0.14);
+    border-left: 3px solid rgba(34, 197, 94, 0.78);
+}}
 .navigation-sidebar row.flowmux-dragging {{
     opacity: 0.4;
 }}

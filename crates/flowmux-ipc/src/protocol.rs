@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use flowmux_core::{
-    AgentActivity, NotificationId, NotificationLevel, Pane, PaneContent, PaneId, PlacementStrategy,
-    SplitDirection, SurfaceId, SurfaceKind, Workspace, WorkspaceId,
+    AgentActivity, AgentStatus, NotificationId, NotificationLevel, Pane, PaneContent, PaneId,
+    PlacementStrategy, SplitDirection, SurfaceId, SurfaceKind, Workspace, WorkspaceId,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -74,6 +74,25 @@ pub struct TreeTab {
     pub kind: String,
     /// True for the tab currently shown in this pane.
     pub active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<TreeAgent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TreeAgent {
+    pub name: String,
+    pub status: AgentStatus,
+    pub activity: AgentActivity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 /// A leaf pane (one slot in the split grid) and its tabs.
@@ -112,6 +131,16 @@ fn collect_leaf_panes(pane: &Pane, out: &mut Vec<TreePane>) {
                         title: s.title.clone(),
                         kind: surface_kind_label(&s.kind).to_string(),
                         active: s.id == *active,
+                        agent: s.agent.as_ref().map(|agent| TreeAgent {
+                            name: agent.name.clone(),
+                            status: agent.public_status(),
+                            activity: agent.activity,
+                            source: agent.source.clone(),
+                            seq: agent.seq,
+                            message: agent.message.clone(),
+                            custom_status: agent.custom_status.clone(),
+                            session_id: agent.session_id.clone(),
+                        }),
                     })
                     .collect(),
                 // Legacy content shapes are normalized into `Tabs` on
@@ -462,9 +491,21 @@ pub enum Request {
         surface: Option<SurfaceId>,
         agent: String,
         #[serde(default)]
+        status: Option<AgentStatus>,
+        #[serde(default)]
         activity: Option<AgentActivity>,
         #[serde(default)]
         pid: Option<u32>,
+        #[serde(default)]
+        source: Option<String>,
+        #[serde(default)]
+        seq: Option<u64>,
+        #[serde(default)]
+        message: Option<String>,
+        #[serde(default)]
+        custom_status: Option<String>,
+        #[serde(default)]
+        session_id: Option<String>,
     },
 
     /// `flowmux claude-teams [--count N] [-- args...]` — spin up a
@@ -657,7 +698,8 @@ mod tests {
     #[test]
     fn describe_workspaces_flattens_panes_and_marks_active_tab() {
         use flowmux_core::{
-            Pane, PaneContent, PaneSurface, Surface, SurfaceKind, Workspace, WorkspaceId,
+            AgentActivity, AgentPresence, AgentStatus, Pane, PaneContent, PaneSurface, Surface,
+            SurfaceKind, Workspace, WorkspaceId,
         };
         let term = || SurfaceKind::Terminal {
             shell: None,
@@ -666,18 +708,24 @@ mod tests {
         let tab1 = SurfaceId::new();
         let tab2 = SurfaceId::new();
         let leaf_id = PaneId::new();
+        let mut shell = PaneSurface {
+            id: tab1,
+            title: "shell".into(),
+            title_locked: false,
+            kind: term(),
+            agent: None,
+        };
+        shell.agent = Some(AgentPresence::new(
+            "codex",
+            AgentActivity::Running,
+            Some(1234),
+        ));
         let leaf = Pane::Leaf {
             id: leaf_id,
             content: PaneContent::Tabs {
                 active: tab2,
                 surfaces: vec![
-                    PaneSurface {
-                        id: tab1,
-                        title: "shell".into(),
-                        title_locked: false,
-                        kind: term(),
-                        agent: None,
-                    },
+                    shell,
                     PaneSurface {
                         id: tab2,
                         title: "docs".into(),
@@ -713,6 +761,10 @@ mod tests {
         assert_eq!(tabs.len(), 2);
         assert_eq!(tabs[0].kind, "terminal");
         assert_eq!(tabs[1].kind, "browser");
+        assert_eq!(
+            tabs[0].agent.as_ref().map(|a| a.status),
+            Some(AgentStatus::Working)
+        );
         assert!(!tabs[0].active, "tab1 is not the active surface");
         assert!(tabs[1].active, "tab2 is the active surface");
     }

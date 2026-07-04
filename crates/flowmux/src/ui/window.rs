@@ -2076,6 +2076,30 @@ impl WindowController {
             }
         }
         self.sync_workspace_label(ws_id).await;
+        let active_surface = self.pane_registry.borrow().active_surface(pane);
+        if let Some(surface) = active_surface {
+            self.refresh_agent_screen_status(surface, None).await;
+        }
+    }
+
+    async fn refresh_agent_screen_status(&self, surface: SurfaceId, title: Option<String>) {
+        let screen = {
+            let registry = self.pane_registry.borrow();
+            registry
+                .terminals
+                .get(&surface)
+                .and_then(|terminal| terminal.screen_text())
+        };
+        if screen.is_none() && title.is_none() {
+            return;
+        }
+        if let Some((ws_id, status)) = self
+            .store
+            .report_agent_screen_signals(surface, screen.as_deref(), title.as_deref())
+            .await
+        {
+            self.sidebar.set_agent_status(ws_id, status);
+        }
     }
 
     fn flush_terminal_cwds_blocking(&self) {
@@ -2272,7 +2296,10 @@ impl WindowController {
         self.refresh_window_title().await;
         if let Some(ws_id) = ws_id {
             self.sync_workspace_label(ws_id).await;
+            let status = self.store.workspace_agent_status(ws_id).await;
+            self.sidebar.set_agent_status(ws_id, status);
         }
+        self.refresh_agent_screen_status(surface, None).await;
         self.refresh_file_browser_from_focus().await;
     }
 
@@ -2648,7 +2675,10 @@ impl WindowController {
                     // Tab activation changes the active surface used for the
                     // side-panel name and subtitles.
                     self.sync_workspace_label(ws_id).await;
+                    let status = self.store.workspace_agent_status(ws_id).await;
+                    self.sidebar.set_agent_status(ws_id, status);
                 }
+                self.refresh_agent_screen_status(surface, None).await;
                 // After a surface is activated through click, IPC, or another
                 // path, move keyboard focus to the
                 // newly active widget: the terminal's gtk::DrawingArea or the
@@ -2877,6 +2907,7 @@ impl WindowController {
                 if title.trim().is_empty() {
                     return;
                 }
+                let signal_title = title.clone();
                 if let Some(ws_id) = self
                     .store
                     .update_surface_auto_title(pane, surface, title)
@@ -2890,6 +2921,8 @@ impl WindowController {
                     self.refresh_window_title().await;
                     self.sync_workspace_label(ws_id).await;
                 }
+                self.refresh_agent_screen_status(surface, Some(signal_title))
+                    .await;
             }
             GtkCommand::RefreshWindowTitle => {
                 self.refresh_window_title().await;
@@ -3262,13 +3295,8 @@ impl WindowController {
                 self.refresh_launcher_badge();
                 self.sidebar.refresh_notification_popover();
             }
-            GtkCommand::SetAgentActivity {
-                workspace,
-                activity,
-            } => {
-                // Breathe the workspace's color bar while an agent is
-                // Running; clear it otherwise.
-                self.sidebar.set_agent_activity(workspace, activity);
+            GtkCommand::SetAgentStatus { workspace, status } => {
+                self.sidebar.set_agent_status(workspace, status);
             }
             GtkCommand::FocusWorkspaceAt { idx } => {
                 let snap = self.store.snapshot().await;
@@ -3908,6 +3936,8 @@ impl WindowController {
         }
         self.refresh_launcher_badge();
         self.store.set_active_workspace(Some(id)).await;
+        let status = self.store.workspace_agent_status(id).await;
+        self.sidebar.set_agent_status(id, status);
         if let Some(ws) = self.store.get_workspace(id).await {
             // Selecting a workspace lands on the last tab of its first pane.
             if let Some(leaf) = ws
@@ -3927,6 +3957,9 @@ impl WindowController {
                 if let Some(last) = last {
                     self.store.set_active_surface(leaf, last).await;
                     self.pane_registry.borrow_mut().activate_surface(leaf, last);
+                    let status = self.store.workspace_agent_status(id).await;
+                    self.sidebar.set_agent_status(id, status);
+                    self.refresh_agent_screen_status(last, None).await;
                 }
             }
             self.focus_first_leaf_of(&ws);

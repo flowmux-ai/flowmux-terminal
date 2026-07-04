@@ -201,6 +201,22 @@ impl Workspace {
             .filter(|s| !s.is_empty())
             .unwrap_or(&self.name)
     }
+
+    pub fn agent_status_rollup(&self) -> Option<AgentStatus> {
+        rollup_agent_statuses(
+            self.surfaces
+                .iter()
+                .filter_map(|surface| surface.root_pane.agent_status_rollup()),
+        )
+    }
+}
+
+pub fn rollup_agent_statuses(
+    statuses: impl IntoIterator<Item = AgentStatus>,
+) -> Option<AgentStatus> {
+    statuses
+        .into_iter()
+        .max_by_key(|status| status.rollup_rank())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -453,6 +469,173 @@ impl Pane {
                 first.set_surface_agent(surface_id, agent.clone())
                     || second.set_surface_agent(surface_id, agent)
             }
+        }
+    }
+
+    /// Merge a live agent report into the matching tab surface. `workspace_visible`
+    /// tells the done/seen logic whether this workspace is currently foregrounded;
+    /// the pane-local active tab is checked here.
+    pub fn report_surface_agent(
+        &mut self,
+        surface_id: SurfaceId,
+        report: AgentStatusReport,
+        workspace_visible: bool,
+    ) -> Option<bool> {
+        match self {
+            Pane::Leaf {
+                content: PaneContent::Tabs { active, surfaces },
+                ..
+            } => {
+                let visible = workspace_visible && *active == surface_id;
+                let surface = surfaces.iter_mut().find(|s| s.id == surface_id)?;
+                match surface.agent.as_mut() {
+                    Some(agent) => Some(agent.apply_report(report, visible)),
+                    None => {
+                        surface.agent = AgentPresence::from_report(report, visible);
+                        Some(surface.agent.is_some())
+                    }
+                }
+            }
+            Pane::Leaf { .. } => None,
+            Pane::Split { first, second, .. } => first
+                .report_surface_agent(surface_id, report.clone(), workspace_visible)
+                .or_else(|| second.report_surface_agent(surface_id, report, workspace_visible)),
+        }
+    }
+
+    pub fn report_surface_agent_signal(
+        &mut self,
+        surface_id: SurfaceId,
+        status: AgentStatus,
+        source: &'static str,
+        agent_name: Option<&str>,
+        workspace_visible: bool,
+    ) -> Option<bool> {
+        match self {
+            Pane::Leaf {
+                content: PaneContent::Tabs { active, surfaces },
+                ..
+            } => {
+                let visible = workspace_visible && *active == surface_id;
+                let surface = surfaces.iter_mut().find(|s| s.id == surface_id)?;
+                let name = surface
+                    .agent
+                    .as_ref()
+                    .map(|agent| agent.name.clone())
+                    .or_else(|| agent_name.map(str::to_string))?;
+                if source == "flowmux:screen"
+                    && surface.agent.as_ref().is_some_and(|agent| {
+                        agent.name == "claude" && agent.source.as_deref() == Some("flowmux:hook")
+                    })
+                {
+                    return Some(false);
+                }
+                if source == "flowmux:screen"
+                    && status == AgentStatus::Idle
+                    && surface.agent.as_ref().is_some_and(|agent| {
+                        matches!(agent.status, AgentStatus::Working | AgentStatus::Blocked)
+                            && agent.source.as_deref() == Some("flowmux:hook")
+                    })
+                {
+                    return Some(false);
+                }
+                let report = AgentStatusReport {
+                    name,
+                    status: Some(status),
+                    activity: Some(status.to_activity()),
+                    pid: None,
+                    source: Some(source.into()),
+                    seq: None,
+                    message: None,
+                    custom_status: None,
+                    session_id: None,
+                };
+                match surface.agent.as_mut() {
+                    Some(agent) => Some(agent.apply_report(report, visible)),
+                    None => {
+                        surface.agent = AgentPresence::from_report(report, visible);
+                        Some(surface.agent.is_some())
+                    }
+                }
+            }
+            Pane::Leaf { .. } => None,
+            Pane::Split { first, second, .. } => first
+                .report_surface_agent_signal(
+                    surface_id,
+                    status,
+                    source,
+                    agent_name,
+                    workspace_visible,
+                )
+                .or_else(|| {
+                    second.report_surface_agent_signal(
+                        surface_id,
+                        status,
+                        source,
+                        agent_name,
+                        workspace_visible,
+                    )
+                }),
+        }
+    }
+
+    /// Mark the matching surface as seen. Used when a user activates a tab that
+    /// was showing the derived `done` status.
+    pub fn mark_surface_agent_seen(&mut self, surface_id: SurfaceId) -> bool {
+        match self {
+            Pane::Leaf {
+                content: PaneContent::Tabs { surfaces, .. },
+                ..
+            } => surfaces
+                .iter_mut()
+                .find(|surface| surface.id == surface_id)
+                .and_then(|surface| surface.agent.as_mut())
+                .map(AgentPresence::mark_seen)
+                .unwrap_or(false),
+            Pane::Leaf { .. } => false,
+            Pane::Split { first, second, .. } => {
+                first.mark_surface_agent_seen(surface_id)
+                    || second.mark_surface_agent_seen(surface_id)
+            }
+        }
+    }
+
+    /// Mark every active tab in this pane tree as seen. Used when a workspace is
+    /// brought to the foreground.
+    pub fn mark_active_agents_seen(&mut self) -> bool {
+        match self {
+            Pane::Leaf {
+                content: PaneContent::Tabs { active, surfaces },
+                ..
+            } => surfaces
+                .iter_mut()
+                .find(|surface| surface.id == *active)
+                .and_then(|surface| surface.agent.as_mut())
+                .map(AgentPresence::mark_seen)
+                .unwrap_or(false),
+            Pane::Leaf { .. } => false,
+            Pane::Split { first, second, .. } => {
+                first.mark_active_agents_seen() | second.mark_active_agents_seen()
+            }
+        }
+    }
+
+    pub fn agent_status_rollup(&self) -> Option<AgentStatus> {
+        match self {
+            Pane::Leaf {
+                content: PaneContent::Tabs { surfaces, .. },
+                ..
+            } => surfaces
+                .iter()
+                .filter_map(|surface| surface.agent.as_ref().map(AgentPresence::public_status))
+                .max_by_key(|status| status.rollup_rank()),
+            Pane::Leaf { .. } => None,
+            Pane::Split { first, second, .. } => rollup_agent_statuses(
+                first
+                    .agent_status_rollup()
+                    .into_iter()
+                    .chain(second.agent_status_rollup()),
+            ),
         }
     }
 
@@ -1373,6 +1556,62 @@ pub enum NotificationLevel {
     Error,
 }
 
+/// Public/live status of an AI coding agent inside a surface. `Done` is a
+/// derived user-visible state: the underlying agent is idle, but it finished
+/// while the user was not looking at that surface.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentStatus {
+    Unknown,
+    Idle,
+    Working,
+    Done,
+    Blocked,
+}
+
+impl AgentStatus {
+    pub fn from_activity(activity: AgentActivity) -> Self {
+        match activity {
+            AgentActivity::Running => AgentStatus::Working,
+            AgentActivity::NeedsInput => AgentStatus::Blocked,
+            AgentActivity::Idle => AgentStatus::Idle,
+        }
+    }
+
+    pub fn to_activity(self) -> AgentActivity {
+        match self {
+            AgentStatus::Working => AgentActivity::Running,
+            AgentStatus::Blocked => AgentActivity::NeedsInput,
+            AgentStatus::Unknown | AgentStatus::Idle | AgentStatus::Done => AgentActivity::Idle,
+        }
+    }
+
+    /// Rollup priority for workspace/sidebar status. Higher wins.
+    pub fn rollup_rank(self) -> u8 {
+        match self {
+            AgentStatus::Blocked => 5,
+            AgentStatus::Done => 4,
+            AgentStatus::Working => 3,
+            AgentStatus::Idle => 2,
+            AgentStatus::Unknown => 1,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AgentStatus::Unknown => "unknown",
+            AgentStatus::Idle => "idle",
+            AgentStatus::Working => "working",
+            AgentStatus::Done => "done",
+            AgentStatus::Blocked => "blocked",
+        }
+    }
+
+    fn should_mark_unseen_on_idle(prev: AgentStatus, next: AgentStatus) -> bool {
+        matches!(prev, AgentStatus::Working | AgentStatus::Blocked) && next == AgentStatus::Idle
+    }
+}
+
 /// Live activity state of an AI coding agent (Claude Code, Codex,
 /// OpenCode) running inside a surface. Driven by the agent's lifecycle
 /// hooks. Runtime-only — never persisted (see [`PaneSurface::agent`]).
@@ -1395,6 +1634,57 @@ pub enum AgentActivity {
     Idle,
 }
 
+impl AgentActivity {
+    pub fn status(self) -> AgentStatus {
+        AgentStatus::from_activity(self)
+    }
+}
+
+impl From<AgentActivity> for AgentStatus {
+    fn from(value: AgentActivity) -> Self {
+        value.status()
+    }
+}
+
+/// Normalized agent status report before it is merged into a surface's
+/// runtime-only [`AgentPresence`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentStatusReport {
+    pub name: String,
+    pub status: Option<AgentStatus>,
+    pub activity: Option<AgentActivity>,
+    pub pid: Option<u32>,
+    pub source: Option<String>,
+    pub seq: Option<u64>,
+    pub message: Option<String>,
+    pub custom_status: Option<String>,
+    pub session_id: Option<String>,
+}
+
+impl AgentStatusReport {
+    pub fn from_activity(
+        name: impl Into<String>,
+        activity: Option<AgentActivity>,
+        pid: Option<u32>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            status: activity.map(AgentStatus::from_activity),
+            activity,
+            pid,
+            source: None,
+            seq: None,
+            message: None,
+            custom_status: None,
+            session_id: None,
+        }
+    }
+
+    pub fn effective_status(&self) -> Option<AgentStatus> {
+        self.status.or_else(|| self.activity.map(AgentStatus::from))
+    }
+}
+
 /// An AI agent currently occupying a surface, with its live activity and
 /// (when known) the agent process PID used for liveness sweeps.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1403,10 +1693,198 @@ pub struct AgentPresence {
     /// `opencode`). Lowercase CLI name.
     pub name: String,
     pub activity: AgentActivity,
+    pub status: AgentStatus,
     /// PID of the agent process (from the wrapper shim's
     /// `FLOWMUX_AGENT_PID`). `None` for agents without a wrapper; such
     /// presences are cleared by hooks only, not the PID sweep.
     pub pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default = "agent_presence_seen_default")]
+    pub seen: bool,
+}
+
+fn agent_presence_seen_default() -> bool {
+    true
+}
+
+impl AgentPresence {
+    pub fn new(name: impl Into<String>, activity: AgentActivity, pid: Option<u32>) -> Self {
+        Self {
+            name: name.into(),
+            activity,
+            status: activity.status(),
+            pid,
+            source: None,
+            seq: None,
+            message: None,
+            custom_status: None,
+            session_id: None,
+            seen: true,
+        }
+    }
+
+    pub fn from_report(report: AgentStatusReport, visible: bool) -> Option<Self> {
+        let status = report.effective_status()?;
+        let mut presence = Self::new(report.name, status.to_activity(), report.pid);
+        presence.status = status;
+        presence.source = report.source;
+        presence.seq = report.seq;
+        presence.message = report.message;
+        presence.custom_status = report.custom_status;
+        presence.session_id = report.session_id;
+        presence.seen = visible || status != AgentStatus::Idle;
+        Some(presence)
+    }
+
+    pub fn public_status(&self) -> AgentStatus {
+        if self.status == AgentStatus::Idle && !self.seen {
+            AgentStatus::Done
+        } else {
+            self.status
+        }
+    }
+
+    /// Merge a hook/screen report into this presence. Returns `false` when the
+    /// report was stale and should not be published.
+    pub fn apply_report(&mut self, report: AgentStatusReport, visible: bool) -> bool {
+        if let (Some(current), Some(incoming)) = (self.seq, report.seq) {
+            if incoming <= current {
+                return false;
+            }
+        }
+        let next = report.effective_status().unwrap_or(self.status);
+        let prev = self.status;
+        self.name = report.name;
+        self.status = next;
+        self.activity = next.to_activity();
+        if report.pid.is_some() {
+            self.pid = report.pid;
+        }
+        if report.source.is_some() {
+            self.source = report.source;
+        }
+        if report.seq.is_some() {
+            self.seq = report.seq;
+        }
+        self.message = report.message;
+        self.custom_status = report.custom_status;
+        if report.session_id.is_some() {
+            self.session_id = report.session_id;
+        }
+        self.seen = if next != AgentStatus::Idle {
+            true
+        } else if AgentStatus::should_mark_unseen_on_idle(prev, next) && !visible {
+            false
+        } else if prev == AgentStatus::Idle && !self.seen && !visible {
+            false
+        } else {
+            true
+        };
+        true
+    }
+
+    pub fn mark_seen(&mut self) -> bool {
+        let was_done = self.public_status() == AgentStatus::Done;
+        self.seen = true;
+        was_done
+    }
+}
+
+pub fn detect_agent_status_from_signals(
+    screen_text: Option<&str>,
+    osc_title: Option<&str>,
+) -> Option<AgentStatus> {
+    let title = osc_title.unwrap_or_default().trim();
+    let title_lower = title.to_ascii_lowercase();
+    if title_lower.contains("action required")
+        || title_lower.contains("needs input")
+        || title_lower.contains("permission required")
+        || title_lower.contains("needs permission")
+    {
+        return Some(AgentStatus::Blocked);
+    }
+    if title.chars().any(is_braille_spinner)
+        || title_lower.contains("working")
+        || title_lower.contains("thinking")
+        || title_lower.contains("running")
+    {
+        return Some(AgentStatus::Working);
+    }
+
+    let text = screen_text.unwrap_or_default();
+    let recent = text
+        .lines()
+        .rev()
+        .take(80)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_ascii_lowercase();
+    if recent.contains("do you want to")
+        || recent.contains("approve")
+        || recent.contains("allow this")
+        || recent.contains("permission to")
+        || recent.contains("permission prompt")
+        || recent.contains("requires permission")
+        || recent.contains("continue?")
+        || recent.contains("proceed?")
+        || recent.contains("action required")
+    {
+        return Some(AgentStatus::Blocked);
+    }
+    if recent.contains("working")
+        || recent.contains("thinking")
+        || recent.contains("running tool")
+        || recent.contains("executing")
+    {
+        return Some(AgentStatus::Working);
+    }
+    if title_lower.contains("idle") || recent.contains("ready") {
+        return Some(AgentStatus::Idle);
+    }
+    None
+}
+
+pub fn detect_agent_name_from_signals(
+    screen_text: Option<&str>,
+    osc_title: Option<&str>,
+) -> Option<&'static str> {
+    let mut haystack = String::new();
+    if let Some(title) = osc_title {
+        haystack.push_str(title);
+        haystack.push('\n');
+    }
+    if let Some(text) = screen_text {
+        for line in text.lines().rev().take(80) {
+            haystack.push_str(line);
+            haystack.push('\n');
+        }
+    }
+    let haystack = haystack.to_ascii_lowercase();
+    if haystack.contains("opencode") || haystack.contains("open code") {
+        Some("opencode")
+    } else if haystack.contains("claude") {
+        Some("claude")
+    } else if haystack.contains("codex") {
+        Some("codex")
+    } else {
+        None
+    }
+}
+
+fn is_braille_spinner(ch: char) -> bool {
+    matches!(ch as u32, 0x2800..=0x28ff)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -2947,11 +3425,11 @@ mod tests {
                 shell: None,
                 cwd: None,
             },
-            agent: Some(AgentPresence {
-                name: "claude".into(),
-                activity: AgentActivity::Running,
-                pid: Some(4321),
-            }),
+            agent: Some(AgentPresence::new(
+                "claude",
+                AgentActivity::Running,
+                Some(4321),
+            )),
         };
         let json = serde_json::to_string(&surface).unwrap();
         assert!(
@@ -2964,6 +3442,193 @@ mod tests {
         assert!(back.agent.is_none());
         assert_eq!(back.id, surface.id);
         assert_eq!(back.title, surface.title);
+    }
+
+    #[test]
+    fn agent_activity_maps_to_public_status() {
+        assert_eq!(AgentActivity::Running.status(), AgentStatus::Working);
+        assert_eq!(AgentActivity::NeedsInput.status(), AgentStatus::Blocked);
+        assert_eq!(AgentActivity::Idle.status(), AgentStatus::Idle);
+    }
+
+    #[test]
+    fn agent_presence_ignores_stale_seq() {
+        let mut presence = AgentPresence::new("codex", AgentActivity::Running, Some(7));
+        presence.seq = Some(20);
+        let applied = presence.apply_report(
+            AgentStatusReport {
+                name: "codex".into(),
+                status: Some(AgentStatus::Idle),
+                activity: Some(AgentActivity::Idle),
+                pid: Some(7),
+                source: Some("flowmux:hook".into()),
+                seq: Some(19),
+                message: None,
+                custom_status: None,
+                session_id: None,
+            },
+            true,
+        );
+        assert!(!applied);
+        assert_eq!(presence.public_status(), AgentStatus::Working);
+    }
+
+    #[test]
+    fn working_to_idle_in_hidden_surface_becomes_done_until_seen() {
+        let mut presence = AgentPresence::new("claude", AgentActivity::Running, None);
+        presence.seq = Some(1);
+        let applied = presence.apply_report(
+            AgentStatusReport {
+                name: "claude".into(),
+                status: Some(AgentStatus::Idle),
+                activity: Some(AgentActivity::Idle),
+                pid: None,
+                source: Some("flowmux:hook".into()),
+                seq: Some(2),
+                message: None,
+                custom_status: None,
+                session_id: None,
+            },
+            false,
+        );
+        assert!(applied);
+        assert_eq!(presence.status, AgentStatus::Idle);
+        assert_eq!(presence.public_status(), AgentStatus::Done);
+        assert!(presence.mark_seen());
+        assert_eq!(presence.public_status(), AgentStatus::Idle);
+    }
+
+    #[test]
+    fn agent_presence_replaces_transient_message_metadata() {
+        let mut presence = AgentPresence::new("claude", AgentActivity::NeedsInput, None);
+        presence.message = Some("approval needed".into());
+        presence.custom_status = Some("waiting".into());
+        presence.session_id = Some("session-1".into());
+        presence.seq = Some(1);
+
+        let applied = presence.apply_report(
+            AgentStatusReport {
+                name: "claude".into(),
+                status: Some(AgentStatus::Working),
+                activity: Some(AgentActivity::Running),
+                pid: None,
+                source: Some("flowmux:hook".into()),
+                seq: Some(2),
+                message: None,
+                custom_status: None,
+                session_id: None,
+            },
+            true,
+        );
+
+        assert!(applied);
+        assert_eq!(presence.public_status(), AgentStatus::Working);
+        assert_eq!(presence.message, None);
+        assert_eq!(presence.custom_status, None);
+        assert_eq!(presence.session_id.as_deref(), Some("session-1"));
+    }
+
+    #[test]
+    fn pane_mark_surface_seen_clears_done() {
+        let mut surface = PaneSurface::terminal("agent", None);
+        let surface_id = surface.id;
+        let mut presence = AgentPresence::new("codex", AgentActivity::Idle, None);
+        presence.seen = false;
+        surface.agent = Some(presence);
+        let pane_id = PaneId::new();
+        let mut pane = Pane::Leaf {
+            id: pane_id,
+            content: PaneContent::Tabs {
+                active: surface_id,
+                surfaces: vec![surface],
+            },
+        };
+        assert_eq!(pane.agent_status_rollup(), Some(AgentStatus::Done));
+        assert!(pane.mark_surface_agent_seen(surface_id));
+        assert_eq!(pane.agent_status_rollup(), Some(AgentStatus::Idle));
+    }
+
+    #[test]
+    fn screen_fallback_does_not_override_claude_hook_presence() {
+        let mut surface = PaneSurface::terminal("agent", None);
+        let surface_id = surface.id;
+        let mut presence = AgentPresence::new("claude", AgentActivity::Idle, None);
+        presence.source = Some("flowmux:hook".into());
+        presence.seq = Some(1);
+        surface.agent = Some(presence);
+        let mut pane = Pane::Leaf {
+            id: PaneId::new(),
+            content: PaneContent::Tabs {
+                active: surface_id,
+                surfaces: vec![surface],
+            },
+        };
+
+        assert_eq!(
+            pane.report_surface_agent_signal(
+                surface_id,
+                AgentStatus::Blocked,
+                "flowmux:screen",
+                Some("claude"),
+                true,
+            ),
+            Some(false)
+        );
+        assert_eq!(pane.agent_status_rollup(), Some(AgentStatus::Idle));
+    }
+
+    #[test]
+    fn agent_status_rollup_uses_blocked_done_working_idle_unknown_order() {
+        assert_eq!(
+            rollup_agent_statuses([
+                AgentStatus::Unknown,
+                AgentStatus::Idle,
+                AgentStatus::Working,
+                AgentStatus::Done,
+                AgentStatus::Blocked,
+            ]),
+            Some(AgentStatus::Blocked)
+        );
+        assert_eq!(
+            rollup_agent_statuses([AgentStatus::Working, AgentStatus::Done]),
+            Some(AgentStatus::Done)
+        );
+    }
+
+    #[test]
+    fn detector_reads_strong_osc_and_screen_signals() {
+        assert_eq!(
+            detect_agent_status_from_signals(None, Some("Codex Action Required")),
+            Some(AgentStatus::Blocked)
+        );
+        assert_eq!(
+            detect_agent_status_from_signals(None, Some("Codex ⠋ working")),
+            Some(AgentStatus::Working)
+        );
+        assert_eq!(
+            detect_agent_status_from_signals(Some("Do you want to approve this command?"), None),
+            Some(AgentStatus::Blocked)
+        );
+        assert_eq!(
+            detect_agent_status_from_signals(Some("bypass permissions on"), None),
+            None
+        );
+    }
+
+    #[test]
+    fn detector_reads_agent_name_from_osc_and_screen_signals() {
+        assert_eq!(
+            detect_agent_name_from_signals(None, Some("OpenCode Action Required")),
+            Some("opencode")
+        );
+        assert_eq!(
+            detect_agent_name_from_signals(Some("Claude is thinking"), None),
+            Some("claude")
+        );
+        assert_eq!(
+            detect_agent_name_from_signals(Some("Codex working"), None),
+            Some("codex")
+        );
     }
 
     #[test]

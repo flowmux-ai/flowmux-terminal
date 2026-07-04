@@ -7,7 +7,8 @@
 //! boot.
 
 use flowmux_core::{
-    terminal_tab_title_for_cwd, AgentPresence, CloseSurfaceOutcome, Pane, PaneContent, PaneId,
+    detect_agent_name_from_signals, detect_agent_status_from_signals, terminal_tab_title_for_cwd,
+    AgentPresence, AgentStatus, AgentStatusReport, CloseSurfaceOutcome, Pane, PaneContent, PaneId,
     PaneSurface, RemoveOutcome, SplitDirection, Surface, SurfaceId, SurfaceKind, Workspace,
     WorkspaceId,
 };
@@ -631,6 +632,11 @@ impl StateStore {
         if changed {
             s.active_workspace = id;
         }
+        if let Some(id) = id {
+            if let Some(ws) = s.workspaces.iter_mut().find(|w| w.id == id) {
+                Self::mark_active_agents_seen_locked(ws);
+            }
+        }
         drop(s);
         if changed {
             self.mark_dirty();
@@ -738,6 +744,94 @@ impl StateStore {
             }
         }
         None
+    }
+
+    /// Merge a live agent status report into a tab surface. Returns the owning
+    /// workspace and its rolled-up agent status when the report was accepted.
+    /// Stale sequence numbers are ignored and return `None`.
+    pub async fn report_agent_status(
+        &self,
+        surface_id: SurfaceId,
+        report: AgentStatusReport,
+    ) -> Option<(WorkspaceId, Option<AgentStatus>)> {
+        let mut s = self.inner.lock().await;
+        let active_workspace = s.active_workspace;
+        for ws in s.workspaces.iter_mut() {
+            let workspace_visible = active_workspace == Some(ws.id);
+            let mut found = false;
+            let mut changed = false;
+            for surface in ws.surfaces.iter_mut() {
+                if let Some(applied) = surface.root_pane.report_surface_agent(
+                    surface_id,
+                    report.clone(),
+                    workspace_visible,
+                ) {
+                    found = true;
+                    changed = applied;
+                    break;
+                }
+            }
+            if found {
+                if !changed {
+                    return None;
+                }
+                return Some((ws.id, ws.agent_status_rollup()));
+            }
+        }
+        None
+    }
+
+    pub async fn report_agent_screen_signals(
+        &self,
+        surface_id: SurfaceId,
+        screen_text: Option<&str>,
+        osc_title: Option<&str>,
+    ) -> Option<(WorkspaceId, Option<AgentStatus>)> {
+        let status = detect_agent_status_from_signals(screen_text, osc_title)?;
+        let agent_name = detect_agent_name_from_signals(screen_text, osc_title);
+        let mut s = self.inner.lock().await;
+        let active_workspace = s.active_workspace;
+        for ws in s.workspaces.iter_mut() {
+            let workspace_visible = active_workspace == Some(ws.id);
+            let mut found = false;
+            let mut changed = false;
+            for surface in ws.surfaces.iter_mut() {
+                if let Some(applied) = surface.root_pane.report_surface_agent_signal(
+                    surface_id,
+                    status,
+                    "flowmux:screen",
+                    agent_name,
+                    workspace_visible,
+                ) {
+                    found = true;
+                    changed = applied;
+                    break;
+                }
+            }
+            if found {
+                if !changed {
+                    return None;
+                }
+                return Some((ws.id, ws.agent_status_rollup()));
+            }
+        }
+        None
+    }
+
+    pub async fn workspace_agent_status(&self, workspace: WorkspaceId) -> Option<AgentStatus> {
+        let s = self.inner.lock().await;
+        s.workspaces
+            .iter()
+            .find(|ws| ws.id == workspace)
+            .and_then(Workspace::agent_status_rollup)
+    }
+
+    fn mark_active_agents_seen_locked(ws: &mut Workspace) -> bool {
+        let mut changed = false;
+        for surface in ws.surfaces.iter_mut() {
+            changed |= surface.root_pane.mark_active_agents_seen();
+        }
+        changed
     }
 
     /// Collect `(workspace, surface, pid)` for every tab surface that
@@ -1244,6 +1338,7 @@ impl StateStore {
             let mut hit = false;
             for surface in ws.surfaces.iter_mut() {
                 if surface.root_pane.set_active_surface(pane, surface_id) {
+                    surface.root_pane.mark_surface_agent_seen(surface_id);
                     hit = true;
                     break;
                 }
@@ -1534,6 +1629,62 @@ mod tests {
         };
         assert_eq!(surfaces[0].title, "demo");
         assert!(!surfaces[0].title_locked);
+    }
+
+    #[tokio::test]
+    async fn report_agent_status_surfaces_in_workspace_tree() {
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("demo".into()), std::path::PathBuf::from("/tmp/demo"))
+            .await;
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        let surface = first_pane_active_surface(&ws);
+
+        let result = store
+            .report_agent_status(
+                surface,
+                AgentStatusReport {
+                    name: "claude".into(),
+                    status: Some(AgentStatus::Working),
+                    activity: Some(flowmux_core::AgentActivity::Running),
+                    pid: Some(42),
+                    source: Some("flowmux:hook".into()),
+                    seq: Some(1),
+                    message: None,
+                    custom_status: None,
+                    session_id: None,
+                },
+            )
+            .await;
+        assert_eq!(result, Some((ws_id, Some(AgentStatus::Working))));
+
+        let state = store.snapshot().await;
+        let tree = flowmux_ipc::protocol::describe_workspaces(&state.workspaces);
+        let agent = tree[0].panes[0].tabs[0].agent.as_ref().unwrap();
+        assert_eq!(agent.name, "claude");
+        assert_eq!(agent.status, AgentStatus::Working);
+    }
+
+    #[tokio::test]
+    async fn report_agent_screen_signals_can_create_fallback_presence() {
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("demo".into()), std::path::PathBuf::from("/tmp/demo"))
+            .await;
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        let surface = first_pane_active_surface(&ws);
+
+        let result = store
+            .report_agent_screen_signals(surface, None, Some("Codex Action Required"))
+            .await;
+        assert_eq!(result, Some((ws_id, Some(AgentStatus::Blocked))));
+
+        let state = store.snapshot().await;
+        let tree = flowmux_ipc::protocol::describe_workspaces(&state.workspaces);
+        let agent = tree[0].panes[0].tabs[0].agent.as_ref().unwrap();
+        assert_eq!(agent.name, "codex");
+        assert_eq!(agent.status, AgentStatus::Blocked);
+        assert_eq!(agent.source.as_deref(), Some("flowmux:screen"));
     }
 
     #[tokio::test]
