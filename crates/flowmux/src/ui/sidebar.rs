@@ -427,9 +427,8 @@ impl Sidebar {
         }
     }
 
-    /// Reflect an AI agent's rolled-up status on the workspace row. `Working`
-    /// keeps the existing breathing color bar; `Blocked` and `Done` get stable
-    /// row classes so CSS can distinguish them.
+    /// Reflect an AI agent's rolled-up status on the workspace row.
+    /// `Blocked` and `Done` get stable row classes so CSS can distinguish them.
     pub fn set_agent_status(&self, id: WorkspaceId, status: Option<AgentStatus>) {
         let changed = match status {
             Some(status) => self.agent_status.borrow_mut().insert(id, status) != Some(status),
@@ -1085,8 +1084,8 @@ fn color_bar(color: &str) -> gtk::Widget {
     bar.set_size_request(4, -1);
     bar.set_vexpand(true);
     bar.set_valign(gtk::Align::Fill);
-    // Targeted by the `.flowmux-agent-running .flowmux-color-bar` CSS
-    // rule so the bar's opacity "breathes" while an agent is working.
+    // Stable workspace color indicator. Agent state colors are rendered
+    // elsewhere on the row; the bar itself does not animate.
     bar.add_css_class("flowmux-color-bar");
     let color_owned = color.to_string();
     bar.set_draw_func(move |_, cr, w, h| {

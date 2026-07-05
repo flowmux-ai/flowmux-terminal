@@ -373,15 +373,6 @@ paned > separator {{
     background-color: rgba(245, 158, 11, 0.18);
     border-left: 3px solid rgba(245, 158, 11, 0.85);
 }}
-/* Agent Running: the workspace's left color bar "breathes" by cycling
-   its opacity. The class lives on the row; the rule targets the bar. */
-@keyframes flowmux-breathe {{
-    0%, 100% {{ opacity: 1; }}
-    50% {{ opacity: 0.28; }}
-}}
-.navigation-sidebar row.flowmux-agent-running .flowmux-color-bar {{
-    animation: flowmux-breathe 2.6s ease-in-out infinite;
-}}
 .navigation-sidebar row.flowmux-agent-blocked {{
     background-color: rgba(239, 68, 68, 0.16);
     border-left: 3px solid rgba(239, 68, 68, 0.85);
@@ -647,6 +638,11 @@ mod tests {
     #[test]
     fn sidebar_agent_state_colors_match_status_contract() {
         let css = sample_css();
+        assert!(
+            !css.contains("flowmux-breathe")
+                && !css.contains("flowmux-agent-running .flowmux-color-bar"),
+            "running agent state must not animate the sidebar color bar"
+        );
         assert!(
             css.contains(".navigation-sidebar row.flowmux-agent-blocked")
                 && css.contains("rgba(239, 68, 68, 0.16)")
