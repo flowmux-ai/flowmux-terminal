@@ -1765,6 +1765,8 @@ fn prepare_terminal_child_env(extra_env: &mut Vec<(String, String)>) {
     #[cfg(target_os = "macos")]
     add_macos_gui_env_fallbacks(extra_env);
     prepend_agent_shim_dir(extra_env);
+    #[cfg(target_os = "macos")]
+    add_macos_zsh_agent_path_guard(extra_env);
 }
 
 #[cfg(target_os = "macos")]
@@ -1812,6 +1814,82 @@ fn prepend_path_entry(dir: &std::path::Path, base: &str) -> String {
     } else {
         format!("{dir}:{base}")
     }
+}
+
+#[cfg(target_os = "macos")]
+fn add_macos_zsh_agent_path_guard(extra_env: &mut Vec<(String, String)>) {
+    let shell = std::env::var_os("SHELL").map(PathBuf::from);
+    if shell
+        .as_ref()
+        .and_then(|path| path.file_name())
+        .is_none_or(|name| name != "zsh")
+    {
+        return;
+    }
+    let Some(shim_dir) = flowmux_config::paths::agent_shim_dir().filter(|path| path.is_dir())
+    else {
+        return;
+    };
+    let Some(wrapper_dir) = flowmux_config::paths::state_dir().map(|dir| dir.join("zsh-flowmux"))
+    else {
+        return;
+    };
+    let real_zdotdir = std::env::var_os("ZDOTDIR")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    if write_zsh_agent_path_guard_files(&wrapper_dir).is_err() {
+        return;
+    }
+    extra_env.push(("ZDOTDIR".to_string(), wrapper_dir.to_string_lossy().into()));
+    extra_env.push((
+        "FLOWMUX_REAL_ZDOTDIR".to_string(),
+        real_zdotdir.to_string_lossy().into(),
+    ));
+    extra_env.push((
+        "FLOWMUX_AGENT_SHIM_DIR".to_string(),
+        shim_dir.to_string_lossy().into(),
+    ));
+}
+
+#[cfg(target_os = "macos")]
+fn write_zsh_agent_path_guard_files(dir: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    for (name, should_prepend) in [
+        (".zshenv", false),
+        (".zprofile", true),
+        (".zshrc", true),
+        (".zlogin", true),
+        (".zlogout", false),
+    ] {
+        std::fs::write(
+            dir.join(name),
+            zsh_agent_path_guard_file(name, should_prepend),
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn zsh_agent_path_guard_file(name: &str, should_prepend: bool) -> String {
+    let prepend = if should_prepend {
+        r#"
+if [ -n "${FLOWMUX_AGENT_SHIM_DIR:-}" ]; then
+  export PATH="$FLOWMUX_AGENT_SHIM_DIR:$PATH"
+fi
+"#
+    } else {
+        ""
+    };
+    format!(
+        r#"# flowmux generated zsh startup wrapper; do not edit.
+_flowmux_real_zdotdir="${{FLOWMUX_REAL_ZDOTDIR:-$HOME}}"
+_flowmux_real_file="$_flowmux_real_zdotdir/{name}"
+if [ -r "$_flowmux_real_file" ]; then
+  source "$_flowmux_real_file"
+fi
+{prepend}"#
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -2213,6 +2291,19 @@ mod tests {
             prepend_path_entry(std::path::Path::new("/tmp/flowmux-shims"), ""),
             "/tmp/flowmux-shims"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn zsh_agent_path_guard_sources_real_file_then_reprepends_shim() {
+        let zshrc = zsh_agent_path_guard_file(".zshrc", true);
+        assert!(zshrc.contains("FLOWMUX_REAL_ZDOTDIR"));
+        assert!(zshrc.contains("source \"$_flowmux_real_file\""));
+        assert!(zshrc.contains("FLOWMUX_AGENT_SHIM_DIR:$PATH"));
+
+        let zshenv = zsh_agent_path_guard_file(".zshenv", false);
+        assert!(zshenv.contains(".zshenv"));
+        assert!(!zshenv.contains("FLOWMUX_AGENT_SHIM_DIR:$PATH"));
     }
 
     #[cfg(target_os = "macos")]

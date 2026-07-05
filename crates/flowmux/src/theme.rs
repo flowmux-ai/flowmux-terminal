@@ -21,6 +21,7 @@
 //! the format) or run `flowmux theme import <path>` to copy one from
 //! anywhere on their machine.
 
+use flowmux_core::AGENT_BAR_ITEM_MIN_WIDTH_PX;
 use gtk::gdk;
 use gtk::pango;
 
@@ -400,6 +401,40 @@ paned > separator {{
     color: {fg};
     opacity: 0.72;
 }}
+.flowmux-agent-bar {{
+    background-color: {sidebar};
+    border-top: 1px solid {border};
+    padding: 3px 6px;
+}}
+.flowmux-agent-bar > label {{
+    color: {fg};
+    min-width: 52px;
+}}
+.flowmux-agent-bar-item {{
+    min-width: {agent_item_min}px;
+    min-height: 39px;
+    padding: 3px 6px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+}}
+.flowmux-agent-bar-item:hover {{
+    background-color: {control_hover};
+}}
+.flowmux-agent-bar-item.focused {{
+    border-color: {focus};
+}}
+.flowmux-agent-bar-item.flowmux-attention {{
+    background-color: rgba(245, 158, 11, 0.18);
+}}
+.flowmux-agent-bar-item.flowmux-drop-before {{
+    border-left-color: {focus_full};
+}}
+.flowmux-agent-bar-item.flowmux-drop-after {{
+    border-right-color: {focus_full};
+}}
+.flowmux-agent-bar-color {{
+    border-radius: 2px;
+}}
 .navigation-sidebar row.flowmux-dragging {{
     opacity: 0.4;
 }}
@@ -482,6 +517,7 @@ paned > separator {{
             sidebar = sidebar_bg,
             toast_bg = toast_bg_css,
             toast_border = toast_border_css,
+            agent_item_min = AGENT_BAR_ITEM_MIN_WIDTH_PX,
         )
     }
 }
@@ -659,6 +695,14 @@ mod tests {
                 && css.contains("rgba(59, 130, 246, 0.14)")
                 && css.contains("rgba(59, 130, 246, 0.95)"),
             "unseen done agent state must use blue row and inline status colors"
+        );
+        assert!(
+            css.contains(".flowmux-agent-bar")
+                && css.contains(".flowmux-agent-bar-item.flowmux-attention")
+                && css.contains(".flowmux-agent-bar-item.focused")
+                && css.contains(".flowmux-agent-bar-item.flowmux-drop-before")
+                && css.contains(&format!("min-width: {AGENT_BAR_ITEM_MIN_WIDTH_PX}px")),
+            "agent bar must keep its bottom-bar and item sizing rules"
         );
     }
 }

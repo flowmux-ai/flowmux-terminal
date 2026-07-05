@@ -11,6 +11,7 @@
 //! to newly created browser tabs.
 
 use crate::keybindings::KeybindingOverrides;
+use flowmux_core::AgentNotificationTarget;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -43,6 +44,11 @@ pub const PERSIST_BROWSER_SESSION_DEFAULT: bool = true;
 /// enabled so flowmux behaves like every other notifying app on first launch;
 /// the user can opt out to keep only the in-app bell list.
 pub const SYSTEM_NOTIFICATIONS_ENABLED_DEFAULT: bool = true;
+
+/// Default for [`Options::agent_bar_enabled`]. The Agent Bar is part of the
+/// default agent workflow surface and can be hidden when the user wants more
+/// vertical terminal space.
+pub const AGENT_BAR_ENABLED_DEFAULT: bool = true;
 
 /// Default for [`Options::cursor_blink`]. The terminal cursor blinks on first
 /// launch, matching VTE / most terminals.
@@ -125,6 +131,11 @@ pub struct Options {
     /// is sent. Default: [`SYSTEM_NOTIFICATIONS_ENABLED_DEFAULT`] (`true`).
     #[serde(default = "default_system_notifications_enabled")]
     pub system_notifications_enabled: bool,
+    /// When true, show the bottom Agent Bar whenever live agents exist. When
+    /// false, agent tracking and notifications continue, but the bottom bar is
+    /// hidden. Default: [`AGENT_BAR_ENABLED_DEFAULT`] (`true`).
+    #[serde(default = "default_agent_bar_enabled")]
+    pub agent_bar_enabled: bool,
     /// When true, the terminal cursor blinks. Default:
     /// [`CURSOR_BLINK_DEFAULT`] (`true`).
     #[serde(default = "default_cursor_blink")]
@@ -145,6 +156,10 @@ pub struct Options {
     /// (the theme file's `font-size`, or the built-in 12pt fallback).
     #[serde(default)]
     pub font_size: Option<f32>,
+    /// Where agent notification attention should blink. Default is the
+    /// bottom agent bar so workspace rows stay quiet unless requested.
+    #[serde(default)]
+    pub agent_notification_target: AgentNotificationTarget,
     /// User overrides for keyboard shortcuts. Partial overlay over the
     /// built-in defaults exposed by
     /// [`crate::keybindings::defaults`] — actions absent from this map
@@ -176,6 +191,10 @@ fn default_system_notifications_enabled() -> bool {
     SYSTEM_NOTIFICATIONS_ENABLED_DEFAULT
 }
 
+fn default_agent_bar_enabled() -> bool {
+    AGENT_BAR_ENABLED_DEFAULT
+}
+
 fn default_cursor_blink() -> bool {
     CURSOR_BLINK_DEFAULT
 }
@@ -193,10 +212,12 @@ impl Default for Options {
             focus_border_opacity: default_focus_border_opacity(),
             persist_browser_session: default_persist_browser_session(),
             system_notifications_enabled: default_system_notifications_enabled(),
+            agent_bar_enabled: default_agent_bar_enabled(),
             cursor_blink: default_cursor_blink(),
             cursor_blink_interval_ms: default_cursor_blink_interval(),
             font_family: None,
             font_size: None,
+            agent_notification_target: AgentNotificationTarget::default(),
             keybindings: KeybindingOverrides::default(),
         }
     }
@@ -281,6 +302,12 @@ impl Options {
         self
     }
 
+    /// Builder-style setter for the bottom Agent Bar visibility flag.
+    pub fn with_agent_bar_enabled(mut self, enabled: bool) -> Self {
+        self.agent_bar_enabled = enabled;
+        self
+    }
+
     /// Builder-style setter for the terminal font family. An empty string
     /// resets to `None` (inherit the theme font).
     pub fn with_font_family(mut self, family: Option<String>) -> Self {
@@ -291,6 +318,11 @@ impl Options {
     /// Builder-style setter for the terminal font size in points.
     pub fn with_font_size(mut self, size: Option<f32>) -> Self {
         self.font_size = size;
+        self
+    }
+
+    pub fn with_agent_notification_target(mut self, target: AgentNotificationTarget) -> Self {
+        self.agent_notification_target = target;
         self
     }
 }
@@ -397,6 +429,11 @@ mod tests {
         let opts = Options::default();
         assert_eq!(opts.zoom_percent, 100);
         assert_eq!(opts.default_browser_engine, BrowserEngine::Webkit);
+        assert_eq!(
+            opts.agent_notification_target,
+            AgentNotificationTarget::AgentBar
+        );
+        assert!(opts.agent_bar_enabled);
     }
 
     #[test]
@@ -440,10 +477,14 @@ mod tests {
     fn options_serde_roundtrip_with_custom_engine() {
         let opts = Options::default()
             .with_zoom_percent(140)
+            .with_agent_bar_enabled(false)
             .with_engine(BrowserEngine::Custom {
                 name: "Brave".into(),
-            });
+            })
+            .with_agent_notification_target(AgentNotificationTarget::Both);
         let s = serde_json::to_string(&opts).unwrap();
+        assert!(s.contains("\"agent_bar_enabled\":false"));
+        assert!(s.contains("\"agent_notification_target\":\"both\""));
         let back: Options = serde_json::from_str(&s).unwrap();
         assert_eq!(opts, back);
     }

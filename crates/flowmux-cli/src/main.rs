@@ -1410,7 +1410,10 @@ async fn run_claude_hook_event(
     let input = read_claude_hook_input();
     let pane = pane_from_env();
     let surface = surface_from_env();
-    let pid = pid_from_env();
+    let pid = match event {
+        ClaudeHookEvent::SessionStart => pid_from_env_or_parent(),
+        _ => pid_from_env(),
+    };
     // Most events carry exactly one request; Stop/Notification carry two
     // (the user-facing toast *and* the activity flip) so the existing
     // "ready" notification keeps firing alongside the new live-status
@@ -1522,7 +1525,10 @@ async fn run_generic_agent_hook_event(
         "entry agent={agent:?} event={event:?} cli_pane={cli_pane:?} cli_surface={cli_surface:?} env_pane={env_pane:?} env_surface={env_surface:?} resolved_pane={pane:?} resolved_surface={surface:?} socket_arg={socket:?}"
     );
     use flowmux_core::AgentActivity::{Idle, NeedsInput};
-    let pid = hooks::pid_from_env();
+    let pid = match event {
+        AgentHookEvent::SessionStart { .. } => hooks::pid_from_env_or_parent(),
+        _ => hooks::pid_from_env(),
+    };
     let mut reqs: Vec<_> = Vec::new();
     match event {
         AgentHookEvent::Stop { args, .. } => {

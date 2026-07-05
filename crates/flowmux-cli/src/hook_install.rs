@@ -330,26 +330,41 @@ pub fn uninstall(target: HookTarget) -> Result<HookInstallReport> {
 /// these scripts first. They export `FLOWMUX_AGENT_PID=$$` (read by the
 /// hooks) and then `exec` the real binary, so they are otherwise fully
 /// transparent.
-const SHIM_AGENTS: &[&str] = &["claude", "codex"];
+const SHIM_AGENTS: &[&str] = &["claude", "codex", "opencode", "cline"];
 
-/// Body of a wrapper shim for `agent`. Skips its own directory when
-/// resolving the real binary so it never re-execs itself.
+/// Body of a wrapper shim for `agent`. Skips flowmux-managed shims when
+/// resolving the real binary so it never re-execs itself or another copy. The shim
+/// registers a best-effort SessionStart itself because not every agent
+/// exposes a startup hook; the daemon still clears dead sessions through
+/// the PID liveness sweep when the agent exits without SessionEnd.
 fn shim_script(agent: &str) -> String {
     format!(
         r#"#!/usr/bin/env bash
 # flowmux agent wrapper shim (managed by `flowmux fix`).
-# Records the real {agent} PID so flowmux can detect a hard kill, then
-# transparently exec's the real binary. Safe to run outside flowmux.
+# Records the real {agent} PID, registers a best-effort flowmux presence,
+# then transparently exec's the real binary. Safe to run outside flowmux.
 if [ -n "${{FLOWMUX_SURFACE_ID:-}}" ]; then
   export FLOWMUX_AGENT_PID=$$
+  if command -v flowmuxctl >/dev/null 2>&1; then
+    flowmuxctl hooks {agent} session-start >/dev/null 2>&1 </dev/null &
+  elif command -v flowmux >/dev/null 2>&1; then
+    flowmux hooks {agent} session-start >/dev/null 2>&1 </dev/null &
+  fi
 fi
 self_dir=$(cd "$(dirname "$0")" && pwd)
+is_flowmux_shim() {{
+  grep -q "flowmux agent wrapper shim" "$1" 2>/dev/null
+}}
 real=""
 saved_ifs=$IFS
 IFS=:
 for d in $PATH; do
   [ "$d" = "$self_dir" ] && continue
-  if [ -x "$d/{agent}" ]; then real="$d/{agent}"; break; fi
+  candidate="$d/{agent}"
+  [ -x "$candidate" ] || continue
+  is_flowmux_shim "$candidate" && continue
+  real="$candidate"
+  break
 done
 IFS=$saved_ifs
 if [ -z "$real" ]; then
@@ -389,11 +404,34 @@ pub fn install_agent_shims() -> Result<Vec<PathBuf>> {
             perms.set_mode(0o755);
             fs::set_permissions(&path, perms)?;
             if !written.contains(&path) {
-                written.push(path);
+                written.push(path.clone());
+            }
+        }
+        if let Some(local_bin) = user_local_bin_dir() {
+            fs::create_dir_all(&local_bin)?;
+            let local_path = local_bin.join(agent);
+            if should_write_local_agent_shim(&local_path, &body) {
+                fs::write(&local_path, &body)?;
+                let mut perms = fs::metadata(&local_path)?.permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(&local_path, perms)?;
+                written.push(local_path);
             }
         }
     }
     Ok(written)
+}
+
+fn user_local_bin_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local").join("bin"))
+}
+
+fn should_write_local_agent_shim(path: &Path, body: &str) -> bool {
+    match fs::read_to_string(path) {
+        Ok(existing) => existing.contains("flowmux agent wrapper shim") && existing != body,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(_) => false,
+    }
 }
 
 // ---- Claude Code ----------------------------------------------------
@@ -1200,11 +1238,32 @@ mod tests {
         assert!(body.contains("export FLOWMUX_AGENT_PID=$$"));
         // Only when inside flowmux, so it stays transparent elsewhere.
         assert!(body.contains("FLOWMUX_SURFACE_ID"));
-        // Skips its own dir and exec's the resolved real binary.
+        // Registers presence even for agents without their own startup hook.
+        assert!(body.contains("flowmuxctl hooks claude session-start"));
+        assert!(body.contains("flowmux hooks claude session-start"));
+        // Skips its own dir, skips other flowmux shims, and exec's the resolved real binary.
         assert!(body.contains("[ \"$d\" = \"$self_dir\" ] && continue"));
+        assert!(body.contains("is_flowmux_shim \"$candidate\" && continue"));
         assert!(body.contains("exec \"$real\" \"$@\""));
         // Agent name is substituted into the lookup.
         assert!(body.contains("$d/claude"));
+    }
+
+    #[test]
+    fn local_agent_shim_write_policy_preserves_existing_real_binary() {
+        let dir = tmp();
+        let path = dir.path().join("codex");
+        let body = shim_script("codex");
+
+        assert!(should_write_local_agent_shim(&path, &body));
+        fs::write(&path, "#!/bin/sh\necho real codex\n").unwrap();
+        assert!(!should_write_local_agent_shim(&path, &body));
+        fs::write(
+            &path,
+            shim_script("codex").replace("exec \"$real\"", "exec \"$real\" "),
+        )
+        .unwrap();
+        assert!(should_write_local_agent_shim(&path, &body));
     }
 
     #[test]

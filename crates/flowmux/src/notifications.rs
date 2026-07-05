@@ -233,6 +233,67 @@ impl NotificationStore {
         closed
     }
 
+    pub fn mark_source_read(
+        &self,
+        workspace: Option<WorkspaceId>,
+        pane: Option<PaneId>,
+        surface: Option<SurfaceId>,
+    ) -> Vec<String> {
+        let mut entries = self.inner.borrow_mut();
+        let mut closed = Vec::new();
+        for e in entries.iter_mut() {
+            if e.read {
+                continue;
+            }
+            let matches = if let Some(surface) = surface {
+                e.surface == Some(surface)
+            } else if let Some(pane) = pane {
+                e.pane == Some(pane)
+            } else if let Some(workspace) = workspace {
+                e.workspace == Some(workspace)
+            } else {
+                false
+            };
+            if matches {
+                e.read = true;
+                if let Some(did) = e.desktop_id.take() {
+                    closed.push(did);
+                }
+            }
+        }
+        closed
+    }
+
+    pub fn unread_surfaces_for_workspace(&self, ws: WorkspaceId) -> Vec<SurfaceId> {
+        let mut surfaces = Vec::new();
+        for entry in self.inner.borrow().iter() {
+            if entry.read || entry.workspace != Some(ws) {
+                continue;
+            }
+            let Some(surface) = entry.surface else {
+                continue;
+            };
+            if !surfaces.contains(&surface) {
+                surfaces.push(surface);
+            }
+        }
+        surfaces
+    }
+
+    pub fn has_unread_workspace(&self, ws: WorkspaceId) -> bool {
+        self.inner
+            .borrow()
+            .iter()
+            .any(|entry| !entry.read && entry.workspace == Some(ws))
+    }
+
+    pub fn has_unread_surface(&self, surface: SurfaceId) -> bool {
+        self.inner
+            .borrow()
+            .iter()
+            .any(|entry| !entry.read && entry.surface == Some(surface))
+    }
+
     pub fn find(&self, id: NotificationId) -> Option<NotificationEntry> {
         self.inner.borrow().iter().find(|e| e.id == id).cloned()
     }
@@ -705,6 +766,91 @@ mod tests {
         // notifications — only the bell popover sweep does that.
         assert!(s.mark_workspace_read(ws).is_empty());
         assert_eq!(s.unread_count(), 1);
+    }
+
+    #[test]
+    fn mark_source_read_prefers_surface_then_pane_then_workspace() {
+        let s = store();
+        let ws = WorkspaceId::new();
+        let pane_a = PaneId::new();
+        let pane_b = PaneId::new();
+        let surface_a = SurfaceId::new();
+        let surface_b = SurfaceId::new();
+        let a = s
+            .push(
+                "codex".into(),
+                "a".into(),
+                NotificationLevel::AttentionNeeded,
+                Some(pane_a),
+                Some(surface_a),
+                Some(ws),
+            )
+            .expect("push must record an entry");
+        let b = s
+            .push(
+                "claude".into(),
+                "b".into(),
+                NotificationLevel::AttentionNeeded,
+                Some(pane_b),
+                Some(surface_b),
+                Some(ws),
+            )
+            .expect("push must record an entry");
+        let _ = s.set_desktop_id(a, "did-a".into());
+        let _ = s.set_desktop_id(b, "did-b".into());
+
+        assert_eq!(
+            s.mark_source_read(Some(ws), Some(pane_a), Some(surface_a)),
+            vec!["did-a".to_string()]
+        );
+        assert!(s.find(a).unwrap().read);
+        assert!(!s.find(b).unwrap().read);
+
+        assert_eq!(
+            s.mark_source_read(Some(ws), Some(pane_b), None),
+            vec!["did-b".to_string()]
+        );
+        assert_eq!(s.unread_count(), 0);
+    }
+
+    #[test]
+    fn unread_workspace_helpers_track_remaining_source_notifications() {
+        let s = store();
+        let ws = WorkspaceId::new();
+        let pane = PaneId::new();
+        let surface_a = SurfaceId::new();
+        let surface_b = SurfaceId::new();
+        let a = s
+            .push(
+                "codex".into(),
+                "a".into(),
+                NotificationLevel::AttentionNeeded,
+                Some(pane),
+                Some(surface_a),
+                Some(ws),
+            )
+            .expect("push must record an entry");
+        let _b = s
+            .push(
+                "claude".into(),
+                "b".into(),
+                NotificationLevel::AttentionNeeded,
+                Some(pane),
+                Some(surface_b),
+                Some(ws),
+            )
+            .expect("push must record an entry");
+
+        assert!(s.has_unread_workspace(ws));
+        assert!(s.has_unread_surface(surface_a));
+        assert_eq!(
+            s.unread_surfaces_for_workspace(ws),
+            vec![surface_a, surface_b]
+        );
+
+        s.mark_read(a);
+        assert!(!s.has_unread_surface(surface_a));
+        assert_eq!(s.unread_surfaces_for_workspace(ws), vec![surface_b]);
     }
 
     #[test]

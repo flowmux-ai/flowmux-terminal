@@ -456,6 +456,14 @@ pub enum GtkCommand {
     /// visibility, store active_workspace, and first-leaf grab_focus happen
     /// in one flow shared by clicks, Alt+number, and Ctrl+Tab.
     ActivateWorkspace { id: WorkspaceId },
+    /// A bottom agent-bar item was clicked. The dispatcher activates the
+    /// workspace, switches to that pane-local tab, focuses the pane, and
+    /// acknowledges matching notifications through the normal read path.
+    OpenAgentBarItem {
+        workspace: WorkspaceId,
+        pane: PaneId,
+        surface: SurfaceId,
+    },
     /// A notification was raised on a pane (from terminal OSC signal). Update
     /// the pane border / sidebar badge.
     #[allow(dead_code)]

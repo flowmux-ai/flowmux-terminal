@@ -11,6 +11,7 @@ use crate::notifications::{
     NotificationEntry, NotificationStore, RemoveOutcome, SetDesktopIdResult,
 };
 use crate::theme::ResolvedTheme;
+use crate::ui::agent_bar::AgentBar;
 use crate::ui::file_browser::{FileBrowserPaneState, FileBrowserPanel};
 use crate::ui::pane_terminal::PaneCallbacks;
 use crate::ui::sidebar::{Sidebar, WorkspaceRowAgentBlock, WorkspaceRowDetails};
@@ -21,8 +22,9 @@ use crate::ui::workspace_view::{
 use adw::prelude::*;
 use flowmux_config::cmux_json::{CmuxJson, CommandTarget, CustomCommand};
 use flowmux_core::{
-    Pane, PaneContent, PaneId, PaneSurface, PlacementStrategy, SplitDirection, Surface, SurfaceId,
-    SurfaceKind, Workspace, WorkspaceAgentBlock, WorkspaceId,
+    AgentNotificationVisualFlags, AgentStatus, Pane, PaneContent, PaneId, PaneSurface,
+    PlacementStrategy, SplitDirection, Surface, SurfaceId, SurfaceKind, Workspace,
+    WorkspaceAgentBlock, WorkspaceId,
 };
 use flowmux_daemon::StateStore;
 use flowmux_ipc::protocol::{BrowserWaitCondition, NotificationSummary};
@@ -206,6 +208,8 @@ pub struct WindowController {
     file_browser_split: gtk::Paned,
     file_browser: FileBrowserPanel,
     stack: gtk::Stack,
+    agent_bar: AgentBar,
+    agent_bar_attentions: Rc<RefCell<HashSet<SurfaceId>>>,
     surfaces: Rc<RefCell<HashMap<WorkspaceId, gtk::Widget>>>,
     pane_registry: Rc<RefCell<PaneRegistry>>,
     callbacks: PaneCallbacks,
@@ -459,6 +463,8 @@ impl WindowController {
             });
         };
         let sidebar = Sidebar::new(on_select, on_close, bridge.clone(), notifications.clone());
+        let agent_bar = AgentBar::new(bridge.clone());
+        let agent_bar_attentions = Rc::new(RefCell::new(HashSet::new()));
 
         let pane_registry: Rc<RefCell<PaneRegistry>> =
             Rc::new(RefCell::new(PaneRegistry::default()));
@@ -477,6 +483,12 @@ impl WindowController {
             sidebar.workspace_titles(),
         );
 
+        let content_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        content_box.set_hexpand(true);
+        content_box.set_vexpand(true);
+        content_box.append(&stack);
+        content_box.append(&agent_bar.root);
+
         // gtk::Paned lets the user drag the divider between the
         // sidebar and the content stack — replaces the fixed-width
         // adw::OverlaySplitView so people can hide / widen the tab
@@ -487,7 +499,7 @@ impl WindowController {
         let split = gtk::Paned::builder()
             .orientation(gtk::Orientation::Horizontal)
             .start_child(&sidebar.root)
-            .end_child(&stack)
+            .end_child(&content_box)
             .resize_start_child(false)
             .resize_end_child(true)
             .shrink_start_child(false)
@@ -594,6 +606,8 @@ impl WindowController {
             file_browser_split,
             file_browser,
             stack,
+            agent_bar,
+            agent_bar_attentions,
             surfaces,
             pane_registry,
             callbacks,
@@ -1309,13 +1323,13 @@ impl WindowController {
                     self.refresh_workspace_solo(&ws);
                 }
                 self.refresh_window_title().await;
-                self.sync_workspace_label(workspace).await;
+                self.sync_workspace_agent_status_from_store(workspace).await;
             }
             Some(flowmux_daemon::CloseOutcome::PaneRemoved { workspace }) => {
                 self.apply_close_pane_incremental_or_rerender(workspace, pane)
                     .await;
                 self.focus_after_close(workspace, pane).await;
-                self.sync_workspace_label(workspace).await;
+                self.sync_workspace_agent_status_from_store(workspace).await;
             }
         }
     }
@@ -1408,9 +1422,11 @@ impl WindowController {
         if let Some(ws) = self.store.get_workspace(outcome.dst_workspace).await {
             self.refresh_workspace_solo(&ws);
         }
-        self.sync_workspace_label(outcome.dst_workspace).await;
+        self.sync_workspace_agent_status_from_store(outcome.dst_workspace)
+            .await;
         if outcome.src_workspace != outcome.dst_workspace && !outcome.src_workspace_removed {
-            self.sync_workspace_label(outcome.src_workspace).await;
+            self.sync_workspace_agent_status_from_store(outcome.src_workspace)
+                .await;
         }
         self.refresh_window_title().await;
         self.focus_pane(dst_pane);
@@ -1530,7 +1546,7 @@ impl WindowController {
         if let Some(ws) = self.store.get_workspace(ws_id).await {
             self.refresh_workspace_solo(&ws);
         }
-        self.sync_workspace_label(ws_id).await;
+        self.sync_workspace_agent_status_from_store(ws_id).await;
         self.refresh_window_title().await;
         self.focus_pane(dst_pane);
         Ok(())
@@ -1597,7 +1613,7 @@ impl WindowController {
         }
 
         self.refresh_workspace_solo(&ws);
-        self.sync_workspace_label(ws.id).await;
+        self.sync_workspace_agent_status_from_store(ws.id).await;
         self.refresh_window_title().await;
         self.focus_pane(new_pane);
         Ok(())
@@ -1714,9 +1730,10 @@ impl WindowController {
         if let Some(ws) = self.store.get_workspace(dst_ws).await {
             self.refresh_workspace_solo(&ws);
         }
-        self.sync_workspace_label(dst_ws).await;
+        self.sync_workspace_agent_status_from_store(dst_ws).await;
         if outcome.src_workspace != dst_ws && !outcome.src_workspace_removed {
-            self.sync_workspace_label(outcome.src_workspace).await;
+            self.sync_workspace_agent_status_from_store(outcome.src_workspace)
+                .await;
         }
         self.refresh_window_title().await;
         self.focus_pane(new_pane);
@@ -2053,6 +2070,147 @@ impl WindowController {
             let details = workspace_row_details(&ws, &mru);
             self.sidebar.upsert_with_details(&ws, details);
         }
+        self.refresh_agent_bar().await;
+    }
+
+    async fn refresh_agent_bar(&self) {
+        if !self.options.borrow().agent_bar_enabled {
+            self.agent_bar.render(
+                &flowmux_core::AgentBarModel {
+                    visible: false,
+                    items: Vec::new(),
+                },
+                &HashSet::new(),
+                None,
+            );
+            return;
+        }
+
+        let snap = self.store.snapshot().await;
+        let mut ordered = Vec::new();
+        for ws_id in &snap.workspace_order {
+            if let Some(ws) = snap.workspaces.iter().find(|ws| ws.id == *ws_id) {
+                ordered.push(ws);
+            }
+        }
+        for ws in &snap.workspaces {
+            if !snap.workspace_order.contains(&ws.id) {
+                ordered.push(ws);
+            }
+        }
+
+        let model = flowmux_core::collect_agent_bar_model(ordered);
+        let live_surfaces: HashSet<SurfaceId> =
+            model.items.iter().map(|item| item.surface).collect();
+        let focused_surface = self
+            .focused_pane
+            .get()
+            .and_then(|pane| self.pane_registry.borrow().active_surface(pane))
+            .filter(|surface| live_surfaces.contains(surface));
+        let attentions = {
+            let mut attentions = self.agent_bar_attentions.borrow_mut();
+            attentions.retain(|surface| live_surfaces.contains(surface));
+            attentions.clone()
+        };
+        self.agent_bar.render(&model, &attentions, focused_surface);
+    }
+
+    async fn sync_workspace_agent_status(
+        &self,
+        workspace: WorkspaceId,
+        status: Option<AgentStatus>,
+    ) {
+        self.sidebar.set_agent_status(workspace, status);
+        self.sync_workspace_label(workspace).await;
+        self.refresh_agent_bar().await;
+    }
+
+    async fn sync_workspace_agent_status_from_store(&self, workspace: WorkspaceId) {
+        let status = self.store.workspace_agent_status(workspace).await;
+        self.sync_workspace_agent_status(workspace, status).await;
+    }
+
+    fn mark_agent_bar_attention(&self, surface: SurfaceId) {
+        if self.agent_bar_attentions.borrow_mut().insert(surface) {
+            self.agent_bar.mark_attention(surface);
+        }
+    }
+
+    fn clear_agent_bar_attention(&self, surface: SurfaceId) {
+        if self.agent_bar_attentions.borrow_mut().remove(&surface) {
+            self.agent_bar.clear_attention(surface);
+        }
+    }
+
+    fn clear_agent_bar_attentions<I>(&self, surfaces: I)
+    where
+        I: IntoIterator<Item = SurfaceId>,
+    {
+        for surface in surfaces {
+            self.clear_agent_bar_attention(surface);
+        }
+    }
+
+    fn acknowledge_workspace_notifications(&self, workspace: WorkspaceId) {
+        let surfaces = self.notifications.unread_surfaces_for_workspace(workspace);
+        let to_close = self.notifications.mark_workspace_read(workspace);
+        self.clear_agent_bar_attentions(surfaces);
+        self.sidebar.clear_attention(workspace);
+        if !to_close.is_empty() {
+            self.close_desktop_notifications(to_close);
+        }
+        self.refresh_launcher_badge();
+    }
+
+    fn acknowledge_source_notifications(
+        &self,
+        workspace: Option<WorkspaceId>,
+        pane: Option<PaneId>,
+        surface: Option<SurfaceId>,
+    ) {
+        let unread_before = self.notifications.unread_count();
+        let to_close = self
+            .notifications
+            .mark_source_read(workspace, pane, surface);
+        let changed = self.notifications.unread_count() != unread_before;
+        if let Some(surface) = surface {
+            self.clear_agent_bar_attention(surface);
+        }
+        if let Some(workspace) = workspace {
+            if !self.notifications.has_unread_workspace(workspace) {
+                self.sidebar.clear_attention(workspace);
+            }
+        }
+        if !to_close.is_empty() {
+            self.close_desktop_notifications(to_close);
+        }
+        if changed {
+            self.refresh_launcher_badge();
+        }
+    }
+
+    fn clear_notification_attention_for_entry(&self, entry: &NotificationEntry) {
+        if let Some(surface) = entry.surface {
+            if !self.notifications.has_unread_surface(surface) {
+                self.clear_agent_bar_attention(surface);
+            }
+        }
+        if let Some(workspace) = entry.workspace {
+            if !self.notifications.has_unread_workspace(workspace) {
+                self.sidebar.clear_attention(workspace);
+            }
+        }
+    }
+
+    fn clear_all_notification_attention_for_entries(&self, entries: &[NotificationEntry]) {
+        for entry in entries {
+            if let Some(surface) = entry.surface {
+                self.clear_agent_bar_attention(surface);
+            }
+            if let Some(workspace) = entry.workspace {
+                self.sidebar.clear_attention(workspace);
+            }
+        }
     }
 
     /// Handle a pane focus event, update MRU, and sync label/subtitles. Focusing
@@ -2075,18 +2233,21 @@ impl WindowController {
         }
         self.sync_workspace_label(ws_id).await;
         let active_surface = self.pane_registry.borrow().active_surface(pane);
+        self.acknowledge_source_notifications(Some(ws_id), Some(pane), active_surface);
         if let Some(surface) = active_surface {
             self.refresh_agent_screen_status(surface, None).await;
         }
     }
 
     async fn refresh_agent_screen_status(&self, surface: SurfaceId, title: Option<String>) {
-        let screen = {
+        let (screen, title) = {
             let registry = self.pane_registry.borrow();
-            registry
+            let screen = registry
                 .terminals
                 .get(&surface)
-                .and_then(|terminal| terminal.screen_text())
+                .and_then(|terminal| terminal.screen_text());
+            let title = title.or_else(|| registry.surface_title_text(surface));
+            (screen, title)
         };
         if screen.is_none() && title.is_none() {
             return;
@@ -2096,9 +2257,22 @@ impl WindowController {
             .report_agent_screen_signals(surface, screen.as_deref(), title.as_deref())
             .await
         {
-            self.sidebar.set_agent_status(ws_id, status);
-            self.sync_workspace_label(ws_id).await;
+            self.sync_workspace_agent_status(ws_id, status).await;
         }
+    }
+
+    async fn refresh_all_agent_screen_statuses(&self) {
+        let surfaces: Vec<SurfaceId> = self
+            .pane_registry
+            .borrow()
+            .terminals
+            .keys()
+            .copied()
+            .collect();
+        for surface in surfaces {
+            self.refresh_agent_screen_status(surface, None).await;
+        }
+        self.refresh_agent_bar().await;
     }
 
     fn flush_terminal_cwds_blocking(&self) {
@@ -2281,6 +2455,17 @@ impl WindowController {
             }
         }
         self.show_status_when_empty();
+        self.refresh_agent_bar().await;
+    }
+
+    async fn open_agent_bar_item(&self, workspace: WorkspaceId, pane: PaneId, surface: SurfaceId) {
+        self.activate_workspace(workspace).await;
+        if self.pane_registry.borrow().active_surface(pane) != Some(surface) {
+            self.activate_surface_now(pane, surface).await;
+        }
+        self.focus_pane(pane);
+        self.acknowledge_source_notifications(Some(workspace), Some(pane), Some(surface));
+        self.window.present();
     }
 
     /// Inline copy of the `GtkCommand::ActivateSurface` arm — used by
@@ -2294,9 +2479,7 @@ impl WindowController {
             .activate_surface(pane, surface);
         self.refresh_window_title().await;
         if let Some(ws_id) = ws_id {
-            self.sync_workspace_label(ws_id).await;
-            let status = self.store.workspace_agent_status(ws_id).await;
-            self.sidebar.set_agent_status(ws_id, status);
+            self.sync_workspace_agent_status_from_store(ws_id).await;
         }
         self.refresh_agent_screen_status(surface, None).await;
         self.refresh_file_browser_from_focus().await;
@@ -2439,6 +2622,7 @@ impl WindowController {
                 let css_provider = self.css_provider.clone();
                 let theme = self.theme.clone();
                 let window = self.window.clone();
+                let controller = self.clone();
                 let default_font_family = theme.font_family();
                 let default_font_size = theme.font_size();
                 crate::ui::options_dialog::present(
@@ -2492,9 +2676,14 @@ impl WindowController {
                             engine = ?opts.default_browser_engine,
                             focus_border_color = %opts.focus_border_color,
                             focus_border_opacity = opts.focus_border_opacity,
+                            agent_bar_enabled = opts.agent_bar_enabled,
                             keybindings_overrides = opts.keybindings.len(),
                             "options applied"
                         );
+                        let controller = controller.clone();
+                        glib::MainContext::default().spawn_local(async move {
+                            controller.refresh_agent_bar().await;
+                        });
                     },
                 );
             }
@@ -2579,7 +2768,7 @@ impl WindowController {
                         self.apply_close_pane_incremental_or_rerender(workspace, pane)
                             .await;
                         self.focus_after_close(workspace, pane).await;
-                        self.sync_workspace_label(workspace).await;
+                        self.sync_workspace_agent_status_from_store(workspace).await;
                         let _ = ack.send(Ok(()));
                     }
                     Some(flowmux_daemon::CloseOutcome::SurfaceRemoved { workspace }) => {
@@ -2590,7 +2779,7 @@ impl WindowController {
                         // not in the user's reset complaint scope.
                         if let Some(ws) = self.store.get_workspace(workspace).await {
                             self.rerender_workspace(&ws);
-                            self.sync_workspace_label(workspace).await;
+                            self.sync_workspace_agent_status_from_store(workspace).await;
                         }
                         let _ = ack.send(Ok(()));
                     }
@@ -2675,9 +2864,7 @@ impl WindowController {
                 if let Some(ws_id) = ws_id {
                     // Tab activation changes the active surface used for the
                     // side-panel name and subtitles.
-                    self.sync_workspace_label(ws_id).await;
-                    let status = self.store.workspace_agent_status(ws_id).await;
-                    self.sidebar.set_agent_status(ws_id, status);
+                    self.sync_workspace_agent_status_from_store(ws_id).await;
                 }
                 self.refresh_agent_screen_status(surface, None).await;
                 // After a surface is activated through click, IPC, or another
@@ -2744,7 +2931,7 @@ impl WindowController {
                             self.refresh_workspace_solo(&ws);
                         }
                         self.refresh_window_title().await;
-                        self.sync_workspace_label(workspace).await;
+                        self.sync_workspace_agent_status_from_store(workspace).await;
                         let _ = ack.send(Ok(()));
                     }
                     Some(flowmux_daemon::CloseOutcome::PaneRemoved { workspace }) => {
@@ -2760,7 +2947,7 @@ impl WindowController {
                         // CloseFocused already calls focus_after_close in the
                         // same situation; keep the two close paths in sync.
                         self.focus_after_close(workspace, pane).await;
-                        self.sync_workspace_label(workspace).await;
+                        self.sync_workspace_agent_status_from_store(workspace).await;
                         let _ = ack.send(Ok(()));
                     }
                 }
@@ -2989,6 +3176,7 @@ impl WindowController {
                 if let Some(ws) = self.store.get_workspace(id).await {
                     self.sidebar.upsert(&ws);
                 }
+                self.refresh_agent_bar().await;
                 let _ = ack.send(());
             }
             GtkCommand::ReorderWorkspace { id, target_index } => {
@@ -3121,9 +3309,21 @@ impl WindowController {
                 self.sidebar.bump_notification_badge();
                 let mut marked_attention = false;
                 if matches!(level, flowmux_core::NotificationLevel::AttentionNeeded) {
-                    if let Some(ws_id) = workspace {
-                        self.sidebar.mark_attention(ws_id);
-                        marked_attention = true;
+                    let flags = AgentNotificationVisualFlags::for_unread(
+                        self.options.borrow().agent_notification_target,
+                        false,
+                    );
+                    if flags.agent_bar {
+                        if let Some(surface_id) = surface {
+                            self.mark_agent_bar_attention(surface_id);
+                            marked_attention = true;
+                        }
+                    }
+                    if flags.workspace {
+                        if let Some(ws_id) = workspace {
+                            self.sidebar.mark_attention(ws_id);
+                            marked_attention = true;
+                        }
                     }
                 }
                 tracing::info!(
@@ -3182,11 +3382,12 @@ impl WindowController {
                     tracing::debug!(%id, "open notification: id not found");
                     return;
                 };
-                let did = entry.desktop_id;
+                let did = entry.desktop_id.clone();
                 if self.notifications.mark_read(id) {
                     if let Some(did) = did {
                         self.close_desktop_notifications(vec![did]);
                     }
+                    self.clear_notification_attention_for_entry(&entry);
                     self.refresh_launcher_badge();
                 }
                 if let Some(ws_id) = entry.workspace {
@@ -3242,14 +3443,15 @@ impl WindowController {
             }
 
             GtkCommand::MarkNotificationRead { id, ack } => {
-                let desktop_id = self
-                    .notifications
-                    .find(id)
-                    .and_then(|entry| entry.desktop_id);
+                let entry = self.notifications.find(id);
+                let desktop_id = entry.as_ref().and_then(|entry| entry.desktop_id.clone());
                 let changed = self.notifications.mark_read(id);
                 if changed {
                     if let Some(desktop_id) = desktop_id {
                         self.close_desktop_notifications(vec![desktop_id]);
+                    }
+                    if let Some(entry) = &entry {
+                        self.clear_notification_attention_for_entry(entry);
                     }
                     self.refresh_launcher_badge();
                 }
@@ -3257,8 +3459,10 @@ impl WindowController {
             }
 
             GtkCommand::ClearNotifications { ack } => {
-                let had_entries = !self.notifications.entries().is_empty();
+                let entries = self.notifications.entries();
+                let had_entries = !entries.is_empty();
                 let desktop_ids = self.notifications.clear_all();
+                self.clear_all_notification_attention_for_entries(&entries);
                 if !desktop_ids.is_empty() {
                     self.close_desktop_notifications(desktop_ids);
                 }
@@ -3272,6 +3476,7 @@ impl WindowController {
                 // center shrinks in lockstep), re-publish the dock
                 // badge if the unread count changed, and re-render the
                 // popover so the deleted row vanishes immediately.
+                let entry = self.notifications.find(id);
                 match self.notifications.remove(id) {
                     RemoveOutcome::Unknown => {
                         tracing::debug!(%id, "delete notification: id not found");
@@ -3279,11 +3484,17 @@ impl WindowController {
                     RemoveOutcome::RemovedRead => {
                         // Read-only delete: unread count unchanged, no
                         // FDO toast was outstanding for this entry.
+                        if let Some(entry) = &entry {
+                            self.clear_notification_attention_for_entry(entry);
+                        }
                         self.sidebar.refresh_notification_popover();
                     }
                     RemoveOutcome::RemovedUnread { desktop_id } => {
                         if let Some(did) = desktop_id {
                             self.close_desktop_notifications(vec![did]);
+                        }
+                        if let Some(entry) = &entry {
+                            self.clear_notification_attention_for_entry(entry);
                         }
                         self.refresh_launcher_badge();
                         self.sidebar.refresh_notification_popover();
@@ -3291,7 +3502,9 @@ impl WindowController {
                 }
             }
             GtkCommand::ClearAllNotifications => {
+                let entries = self.notifications.entries();
                 let desktop_ids = self.notifications.clear_all();
+                self.clear_all_notification_attention_for_entries(&entries);
                 if !desktop_ids.is_empty() {
                     self.close_desktop_notifications(desktop_ids);
                 }
@@ -3299,8 +3512,7 @@ impl WindowController {
                 self.sidebar.refresh_notification_popover();
             }
             GtkCommand::SetAgentStatus { workspace, status } => {
-                self.sidebar.set_agent_status(workspace, status);
-                self.sync_workspace_label(workspace).await;
+                self.sync_workspace_agent_status(workspace, status).await;
             }
             GtkCommand::FocusWorkspaceAt { idx } => {
                 let snap = self.store.snapshot().await;
@@ -3311,6 +3523,13 @@ impl WindowController {
             }
             GtkCommand::ActivateWorkspace { id } => {
                 self.activate_workspace(id).await;
+            }
+            GtkCommand::OpenAgentBarItem {
+                workspace,
+                pane,
+                surface,
+            } => {
+                self.open_agent_bar_item(workspace, pane, surface).await;
             }
             GtkCommand::PaneSendKeys { pane, keys, ack } => {
                 let registry = self.pane_registry.borrow();
@@ -3335,6 +3554,7 @@ impl WindowController {
                 let known = self.pane_registry.borrow().pane_frame(pane).is_some();
                 if known {
                     self.focus_pane(pane);
+                    self.on_pane_focused(pane).await;
                     let _ = ack.send(Ok(()));
                     self.refresh_file_browser_from_focus().await;
                 } else {
@@ -3919,24 +4139,9 @@ impl WindowController {
         // number, focus shortcut) bypass the row-activated callback
         // that would otherwise drop the attention tint, so we clear it
         // here too.
-        self.sidebar.clear_attention(id);
-        // The user has now seen the workspace, so any notifications it
-        // produced are acknowledged. Flip them to read, close their
-        // matching FDO toasts so GNOME / KDE drop them from the
-        // notification center, and re-publish unread_count() to the
-        // dock so the badge shrinks accordingly. Without this the
-        // dock badge counted notifications the user already addressed
-        // by switching to the workspace (matching the cmux/macOS dock
-        // behavior the user expects from agent toasts).
-        let to_close = self.notifications.mark_workspace_read(id);
-        if !to_close.is_empty() {
-            self.close_desktop_notifications(to_close);
-        }
-        self.refresh_launcher_badge();
+        self.acknowledge_workspace_notifications(id);
         self.store.set_active_workspace(Some(id)).await;
-        let status = self.store.workspace_agent_status(id).await;
-        self.sidebar.set_agent_status(id, status);
-        self.sync_workspace_label(id).await;
+        self.sync_workspace_agent_status_from_store(id).await;
         if let Some(ws) = self.store.get_workspace(id).await {
             // Selecting a workspace lands on the last tab of its first pane.
             if let Some(leaf) = ws
@@ -3956,9 +4161,7 @@ impl WindowController {
                 if let Some(last) = last {
                     self.store.set_active_surface(leaf, last).await;
                     self.pane_registry.borrow_mut().activate_surface(leaf, last);
-                    let status = self.store.workspace_agent_status(id).await;
-                    self.sidebar.set_agent_status(id, status);
-                    self.sync_workspace_label(id).await;
+                    self.sync_workspace_agent_status_from_store(id).await;
                     self.refresh_agent_screen_status(last, None).await;
                 }
             }
@@ -4224,6 +4427,7 @@ impl WindowController {
             if let Some(desktop_id) = desktop_id {
                 self.close_desktop_notifications(vec![desktop_id]);
             }
+            self.clear_notification_attention_for_entry(&entry);
             self.refresh_launcher_badge();
         }
 
@@ -4348,6 +4552,7 @@ impl WindowController {
         if let Some(active) = active {
             self.activate_workspace(active).await;
         }
+        self.refresh_all_agent_screen_statuses().await;
     }
 }
 
@@ -7940,7 +8145,9 @@ mod tests {
                 },
             )
             .await;
-        controller.sync_workspace_label(ws_id).await;
+        controller
+            .sync_workspace_agent_status_from_store(ws_id)
+            .await;
         assert_eq!(
             controller
                 .sidebar
@@ -7950,6 +8157,10 @@ mod tests {
                 .len(),
             1,
             "precondition: closing pane starts with an agent block"
+        );
+        assert!(
+            controller.agent_bar.root.is_visible(),
+            "precondition: closing pane starts with an Agent Bar item"
         );
 
         {
@@ -8032,6 +8243,10 @@ mod tests {
                 .is_empty(),
             "closing an agent pane must refresh sidebar details"
         );
+        assert!(
+            !controller.agent_bar.root.is_visible(),
+            "closing an agent pane must refresh Agent Bar visibility"
+        );
     }
 
     /// Regression: closing an agent tab inside a pane must also recalculate the
@@ -8090,7 +8305,9 @@ mod tests {
                 },
             )
             .await;
-        controller.sync_workspace_label(ws_id).await;
+        controller
+            .sync_workspace_agent_status_from_store(ws_id)
+            .await;
         assert_eq!(
             controller
                 .sidebar
@@ -8100,6 +8317,10 @@ mod tests {
                 .len(),
             1,
             "precondition: closing tab starts with an agent block"
+        );
+        assert!(
+            controller.agent_bar.root.is_visible(),
+            "precondition: closing tab starts with an Agent Bar item"
         );
 
         let (ack_tx, ack_rx) = oneshot::channel();
@@ -8120,6 +8341,10 @@ mod tests {
                 .agent_blocks
                 .is_empty(),
             "closing an agent tab must refresh sidebar details"
+        );
+        assert!(
+            !controller.agent_bar.root.is_visible(),
+            "closing an agent tab must refresh Agent Bar visibility"
         );
     }
 
@@ -8859,6 +9084,188 @@ mod tests {
         controller.render_workspace(&ws);
         store.set_active_workspace(Some(ws_id)).await;
         (controller, ws_id, pane)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[gtk::test]
+    async fn set_agent_status_dispatch_refreshes_agent_bar_visibility() {
+        let (controller, ws_id, pane) =
+            build_single_workspace_controller("com.flowmux.App.UiTest.AgentBarSetStatus").await;
+        let surface = controller
+            .pane_registry
+            .borrow()
+            .active_surface(pane)
+            .expect("single workspace pane should have an active surface");
+
+        assert!(
+            !controller.agent_bar.root.is_visible(),
+            "Agent Bar should stay hidden while no live agents exist"
+        );
+
+        controller
+            .store
+            .set_agent_activity(
+                surface,
+                Some(flowmux_core::AgentPresence::new(
+                    "codex",
+                    flowmux_core::AgentActivity::Running,
+                    Some(42),
+                )),
+            )
+            .await;
+        controller
+            .dispatch(GtkCommand::SetAgentStatus {
+                workspace: ws_id,
+                status: Some(AgentStatus::Working),
+            })
+            .await;
+        assert!(
+            controller.agent_bar.root.is_visible(),
+            "SetAgentStatus must refresh Agent Bar after a live agent appears"
+        );
+
+        controller.store.set_agent_activity(surface, None).await;
+        controller
+            .dispatch(GtkCommand::SetAgentStatus {
+                workspace: ws_id,
+                status: None,
+            })
+            .await;
+        assert!(
+            !controller.agent_bar.root.is_visible(),
+            "SetAgentStatus must hide Agent Bar after the last agent is cleared"
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[gtk::test]
+    async fn agent_bar_option_hides_live_agent_bar() {
+        let (controller, ws_id, pane) =
+            build_single_workspace_controller("com.flowmux.App.UiTest.AgentBarOption").await;
+        let surface = controller
+            .pane_registry
+            .borrow()
+            .active_surface(pane)
+            .expect("single workspace pane should have an active surface");
+
+        controller.options.borrow_mut().agent_bar_enabled = false;
+        controller
+            .store
+            .set_agent_activity(
+                surface,
+                Some(flowmux_core::AgentPresence::new(
+                    "codex",
+                    flowmux_core::AgentActivity::Running,
+                    Some(42),
+                )),
+            )
+            .await;
+        controller
+            .dispatch(GtkCommand::SetAgentStatus {
+                workspace: ws_id,
+                status: Some(AgentStatus::Working),
+            })
+            .await;
+        assert!(
+            !controller.agent_bar.root.is_visible(),
+            "disabled Agent Bar option must hide live agent items"
+        );
+
+        controller.options.borrow_mut().agent_bar_enabled = true;
+        controller.refresh_agent_bar().await;
+        assert!(
+            controller.agent_bar.root.is_visible(),
+            "re-enabling Agent Bar should render existing live agents"
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[gtk::test]
+    async fn open_agent_bar_item_activates_workspace_pane_and_surface() {
+        adw::init().expect("libadwaita should initialize in GTK test");
+        let root_a = std::env::temp_dir().join("flowmux-agent-bar-click-a");
+        let root_b = std::env::temp_dir().join("flowmux-agent-bar-click-b");
+        std::fs::create_dir_all(&root_a).unwrap();
+        std::fs::create_dir_all(&root_b).unwrap();
+        let store = StateStore::new_lazy(State::default());
+        let ws_a = store
+            .create_workspace(Some("a".into()), root_a.clone())
+            .await;
+        let ws_b = store
+            .create_workspace(Some("b".into()), root_b.clone())
+            .await;
+        let ws_a_model = store.get_workspace(ws_a).await.unwrap();
+        let ws_b_model = store.get_workspace(ws_b).await.unwrap();
+        let pane_a = ws_a_model.surfaces[0].root_pane.first_leaf_id().unwrap();
+        let pane_b = ws_b_model.surfaces[0].root_pane.first_leaf_id().unwrap();
+        let surface_b = ws_b_model.surfaces[0]
+            .root_pane
+            .active_surface_id(pane_b)
+            .unwrap();
+
+        let (bridge, _rx) = Bridge::new();
+        let app = adw::Application::builder()
+            .application_id("com.flowmux.App.UiTest.AgentBarItemClick")
+            .build();
+        app.register(None::<&gtk::gio::Cancellable>).unwrap();
+        let controller = WindowController::new(
+            &app,
+            store.clone(),
+            Arc::new(ResolvedTheme::load()),
+            bridge,
+            gtk::CssProvider::new(),
+            None,
+        );
+        controller.render_workspace(&ws_a_model);
+        controller.render_workspace(&ws_b_model);
+        store.set_active_workspace(Some(ws_a)).await;
+        controller.stack.set_visible_child_name(&ws_a.to_string());
+        controller.focused_pane.set(Some(pane_a));
+
+        store
+            .set_agent_activity(
+                surface_b,
+                Some(flowmux_core::AgentPresence::new(
+                    "cline",
+                    flowmux_core::AgentActivity::Idle,
+                    Some(42),
+                )),
+            )
+            .await;
+        controller
+            .sync_workspace_agent_status_from_store(ws_b)
+            .await;
+        assert!(
+            controller.agent_bar.root.is_visible(),
+            "precondition: Agent Bar is visible before clicking an item"
+        );
+
+        controller
+            .dispatch(GtkCommand::OpenAgentBarItem {
+                workspace: ws_b,
+                pane: pane_b,
+                surface: surface_b,
+            })
+            .await;
+        let (idle_tx, idle_rx) = oneshot::channel();
+        glib::idle_add_local_once(move || {
+            let _ = idle_tx.send(());
+        });
+        let _ = idle_rx.await;
+
+        assert_eq!(store.active_workspace().await, Some(ws_b));
+        assert_eq!(controller.focused_pane.get(), Some(pane_b));
+        assert_eq!(
+            controller.pane_registry.borrow().active_surface(pane_b),
+            Some(surface_b)
+        );
+        assert_eq!(
+            controller
+                .stack
+                .visible_child_name()
+                .map(|name| name.to_string()),
+            Some(ws_b.to_string())
+        );
     }
 
     /// Push a notification through the same `GtkCommand::AddNotification`

@@ -12,6 +12,7 @@
 //! * Browser session persistence toggle (CheckButton, default checked) —
 //!   keeps cookies / localStorage / IndexedDB across flowmux restarts so
 //!   site logins survive a quit/relaunch.
+//! * Agent Bar visibility toggle (Switch, default on).
 //!
 //! OK / Cancel close the dialog. `on_apply` is called only on OK, and the
 //! dialog closes itself so the caller only handles the callback.
@@ -26,6 +27,7 @@ use flowmux_config::options::{
     BrowserEngine, Options, CURSOR_BLINK_INTERVAL_MAX, CURSOR_BLINK_INTERVAL_MIN,
     FOCUS_BORDER_OPACITY_MAX, FOCUS_BORDER_OPACITY_MIN, ZOOM_MAX, ZOOM_MIN,
 };
+use flowmux_core::AgentNotificationTarget;
 
 /// Present the modal options dialog. If the user clicks OK, `on_apply` is
 /// called with the new [`Options`]. Cancel or window close does not call back.
@@ -88,6 +90,7 @@ fn build_dialog(
     let opacity_widgets = build_focus_opacity_row(current.focus_border_opacity);
     let persist_check = build_persist_check(current.persist_browser_session);
     let system_notify_switch = build_system_notify_switch(current.system_notifications_enabled);
+    let agent_bar_switch = build_agent_bar_switch(current.agent_bar_enabled);
     let cursor_blink_switch = build_cursor_blink_switch(current.cursor_blink);
     let blink_interval_spin = build_blink_interval_spin(current.cursor_blink_interval_ms);
 
@@ -105,6 +108,7 @@ fn build_dialog(
     general.append(&row("Focus border opacity (%)", &opacity_widgets.row));
     general.append(&row("Keep browser session data", &persist_check));
     general.append(&row("System notifications", &system_notify_switch));
+    general.append(&row("Agent Bar", &agent_bar_switch));
     general.append(&row("Cursor blink", &cursor_blink_switch));
     general.append(&row("Cursor blink interval (ms)", &blink_interval_spin));
 
@@ -189,6 +193,7 @@ fn build_dialog(
         let opacity_spin = opacity_widgets.spin.clone();
         let persist_check = persist_check.clone();
         let system_notify_switch = system_notify_switch.clone();
+        let agent_bar_switch = agent_bar_switch.clone();
         let cursor_blink_switch = cursor_blink_switch.clone();
         let blink_interval_spin = blink_interval_spin.clone();
         let family_drop = font_widgets.family_drop.clone();
@@ -196,6 +201,7 @@ fn build_dialog(
         let families = font_widgets.families.clone();
         let on_apply = on_apply.clone();
         let kb_state = kb_state.clone();
+        let agent_notification_target = current.agent_notification_target;
         ok_btn.connect_clicked(move |_| {
             let kb = kb_state.borrow().clone();
             let conflicts = crate::ui::keybindings_panel::detect_conflicts(&kb);
@@ -212,12 +218,14 @@ fn build_dialog(
                 &opacity_spin,
                 &persist_check,
                 &system_notify_switch,
+                &agent_bar_switch,
                 &cursor_blink_switch,
                 &blink_interval_spin,
                 &family_drop,
                 &font_size_spin,
                 &families,
                 default_font_size,
+                agent_notification_target,
                 &kb,
             );
             (on_apply)(opts);
@@ -359,12 +367,14 @@ fn collect_options(
     opacity_spin: &gtk::SpinButton,
     persist_check: &gtk::CheckButton,
     system_notify_switch: &gtk::Switch,
+    agent_bar_switch: &gtk::Switch,
     cursor_blink_switch: &gtk::Switch,
     blink_interval_spin: &gtk::SpinButton,
     family_drop: &gtk::DropDown,
     font_size_spin: &gtk::SpinButton,
     families: &[Option<String>],
     default_font_size: f32,
+    agent_notification_target: AgentNotificationTarget,
     keybindings: &KeybindingOverrides,
 ) -> Options {
     let zoom = Options::clamp_zoom(spin.value_as_int().max(0) as u16);
@@ -396,12 +406,14 @@ fn collect_options(
         focus_border_opacity: opacity,
         persist_browser_session: persist_check.is_active(),
         system_notifications_enabled: system_notify_switch.is_active(),
+        agent_bar_enabled: agent_bar_switch.is_active(),
         cursor_blink: cursor_blink_switch.is_active(),
         cursor_blink_interval_ms: Options::clamp_cursor_blink_interval(
             blink_interval_spin.value() as u32
         ),
         font_family,
         font_size,
+        agent_notification_target,
         keybindings: keybindings.clone(),
     }
 }
@@ -641,6 +653,14 @@ fn build_system_notify_switch(initial: bool) -> gtk::Switch {
     toggle
 }
 
+fn build_agent_bar_switch(initial: bool) -> gtk::Switch {
+    let toggle = gtk::Switch::new();
+    toggle.set_active(initial);
+    toggle.set_halign(gtk::Align::End);
+    toggle.set_valign(gtk::Align::Center);
+    toggle
+}
+
 fn build_cursor_blink_switch(initial: bool) -> gtk::Switch {
     let toggle = gtk::Switch::new();
     toggle.set_active(initial);
@@ -795,6 +815,7 @@ mod tests {
         );
         let kb = KeybindingOverrides::default();
         let notify_on = build_system_notify_switch(true);
+        let agent_bar_on = build_agent_bar_switch(true);
         let blink_on = build_cursor_blink_switch(true);
         let blink_interval = build_blink_interval_spin(300);
         let opts = collect_options(
@@ -804,16 +825,23 @@ mod tests {
             &opacity.spin,
             &persist_off,
             &notify_on,
+            &agent_bar_on,
             &blink_on,
             &blink_interval,
             &family_drop,
             &size_spin,
             &families,
             12.0,
+            AgentNotificationTarget::Both,
             &kb,
         );
+        assert!(opts.agent_bar_enabled);
         assert!(opts.cursor_blink);
         assert_eq!(opts.cursor_blink_interval_ms, 300);
+        assert_eq!(
+            opts.agent_notification_target,
+            AgentNotificationTarget::Both
+        );
         assert_eq!(opts.zoom_percent, 120);
         assert_eq!(opts.default_browser_engine, BrowserEngine::Firefox);
         assert_eq!(opts.focus_border_opacity, 40);
@@ -827,6 +855,7 @@ mod tests {
         size_spin.set_value(15.0);
         let persist_on = build_persist_check(true);
         let notify_off = build_system_notify_switch(false);
+        let agent_bar_off = build_agent_bar_switch(false);
         let blink_off = build_cursor_blink_switch(false);
         let blink_interval = build_blink_interval_spin(800);
         let opts = collect_options(
@@ -836,18 +865,25 @@ mod tests {
             &opacity.spin,
             &persist_on,
             &notify_off,
+            &agent_bar_off,
             &blink_off,
             &blink_interval,
             &family_drop,
             &size_spin,
             &families,
             12.0,
+            AgentNotificationTarget::Workspace,
             &kb,
         );
         assert!(!opts.cursor_blink);
         assert_eq!(opts.cursor_blink_interval_ms, 800);
+        assert_eq!(
+            opts.agent_notification_target,
+            AgentNotificationTarget::Workspace
+        );
         assert!(opts.persist_browser_session);
         assert!(!opts.system_notifications_enabled);
+        assert!(!opts.agent_bar_enabled);
         assert_eq!(opts.font_family, Some("Fira Code".to_string()));
         assert_eq!(opts.font_size, Some(15.0));
     }

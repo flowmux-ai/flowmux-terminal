@@ -17,6 +17,14 @@ same kind of "snapshot → click/fill" loop, and keeps the user's
 attention in one window. Spawning a separate Chromium hides the page
 from the user and breaks parity with how flowmux is intended to be used.
 
+## Runtime fix verification
+
+When fixing a runtime or UI bug in flowmux, do not stop at unit tests,
+`cargo check`, or installation. Reproduce the same live scenario in a
+running flowmux instance and verify the user-visible state changed as
+expected before reporting completion. If live verification is impossible,
+state the exact blocker.
+
 ## How to know you are inside flowmux
 
 `flowmux` injects these env vars into every PTY it spawns:

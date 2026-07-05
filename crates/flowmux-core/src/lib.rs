@@ -11,6 +11,8 @@ use uuid::Uuid;
 
 const TERMINAL_TAB_TITLE_MAX_CHARS: usize = 17;
 const FALLBACK_TERMINAL_TAB_TITLE: &str = "Terminal";
+pub const AGENT_BAR_ITEM_MIN_WIDTH_PX: u16 = 84;
+pub const AGENT_BAR_ITEM_MAX_WIDTH_PX: u16 = 168;
 
 pub fn terminal_tab_title_for_cwd(cwd: Option<&Path>) -> String {
     let folder = cwd
@@ -232,6 +234,17 @@ impl Workspace {
                 .then_with(|| a.surface.to_string().cmp(&b.surface.to_string()))
         });
         blocks
+    }
+
+    pub fn collect_agent_bar_items(&self) -> Vec<AgentBarItem> {
+        let mut items = Vec::new();
+        let color = self.color.as_deref();
+        for surface in &self.surfaces {
+            surface
+                .root_pane
+                .collect_agent_bar_items(self.id, color, &mut items);
+        }
+        items
     }
 }
 
@@ -610,6 +623,35 @@ impl Pane {
         }
     }
 
+    pub fn clear_surface_agent_from_source(
+        &mut self,
+        surface_id: SurfaceId,
+        source: &str,
+    ) -> Option<bool> {
+        match self {
+            Pane::Leaf {
+                content: PaneContent::Tabs { surfaces, .. },
+                ..
+            } => {
+                let surface = surfaces.iter_mut().find(|s| s.id == surface_id)?;
+                let should_clear = surface
+                    .agent
+                    .as_ref()
+                    .is_some_and(|agent| agent.source.as_deref() == Some(source));
+                if should_clear {
+                    surface.agent = None;
+                    Some(true)
+                } else {
+                    Some(false)
+                }
+            }
+            Pane::Leaf { .. } => None,
+            Pane::Split { first, second, .. } => first
+                .clear_surface_agent_from_source(surface_id, source)
+                .or_else(|| second.clear_surface_agent_from_source(surface_id, source)),
+        }
+    }
+
     /// Mark the matching surface as seen. Used when a user activates a tab that
     /// was showing the derived `done` status.
     pub fn mark_surface_agent_seen(&mut self, surface_id: SurfaceId) -> bool {
@@ -730,6 +772,56 @@ impl Pane {
             Pane::Split { first, second, .. } => {
                 first.collect_agent_blocks(out);
                 second.collect_agent_blocks(out);
+            }
+        }
+    }
+
+    pub fn agent_presence_for_surface(&self, surface_id: SurfaceId) -> Option<AgentPresence> {
+        match self {
+            Pane::Leaf {
+                content: PaneContent::Tabs { surfaces, .. },
+                ..
+            } => surfaces
+                .iter()
+                .find(|surface| surface.id == surface_id)
+                .and_then(|surface| surface.agent.clone()),
+            Pane::Leaf { .. } => None,
+            Pane::Split { first, second, .. } => first
+                .agent_presence_for_surface(surface_id)
+                .or_else(|| second.agent_presence_for_surface(surface_id)),
+        }
+    }
+
+    pub fn collect_agent_bar_items(
+        &self,
+        workspace: WorkspaceId,
+        workspace_color: Option<&str>,
+        out: &mut Vec<AgentBarItem>,
+    ) {
+        match self {
+            Pane::Leaf {
+                id,
+                content: PaneContent::Tabs { surfaces, .. },
+            } => {
+                for surface in surfaces {
+                    let Some(agent) = &surface.agent else {
+                        continue;
+                    };
+                    if let Some(item) = AgentBarItem::from_presence(
+                        workspace,
+                        *id,
+                        surface.id,
+                        agent,
+                        workspace_color,
+                    ) {
+                        out.push(item);
+                    }
+                }
+            }
+            Pane::Leaf { .. } => {}
+            Pane::Split { first, second, .. } => {
+                first.collect_agent_bar_items(workspace, workspace_color, out);
+                second.collect_agent_bar_items(workspace, workspace_color, out);
             }
         }
     }
@@ -1628,6 +1720,56 @@ pub enum NotificationLevel {
     Error,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentNotificationTarget {
+    #[default]
+    AgentBar,
+    Workspace,
+    Both,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AgentNotificationVisualFlags {
+    pub agent_bar: bool,
+    pub workspace: bool,
+    pub desktop_toast: bool,
+}
+
+impl AgentNotificationVisualFlags {
+    pub fn for_unread(target: AgentNotificationTarget, desktop_toast: bool) -> Self {
+        Self {
+            agent_bar: matches!(
+                target,
+                AgentNotificationTarget::AgentBar | AgentNotificationTarget::Both
+            ),
+            workspace: matches!(
+                target,
+                AgentNotificationTarget::Workspace | AgentNotificationTarget::Both
+            ),
+            desktop_toast,
+        }
+    }
+
+    pub fn clear(self) -> Self {
+        Self::default()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentNotificationClearTrigger {
+    WorkspaceClick,
+    PaneFocus,
+    AgentBarItemClick,
+}
+
+pub fn clear_agent_notification_visuals(
+    _trigger: AgentNotificationClearTrigger,
+    flags: AgentNotificationVisualFlags,
+) -> AgentNotificationVisualFlags {
+    flags.clear()
+}
+
 /// Public/live status of an AI coding agent inside a surface. `Done` is a
 /// derived user-visible state: the underlying agent is idle, but it finished
 /// while the user was not looking at that surface.
@@ -1768,6 +1910,108 @@ pub struct WorkspaceAgentBlock {
     pub cwd: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentBarVisualStatus {
+    Working,
+    Waiting,
+    Done,
+}
+
+pub fn agent_bar_visual_status(status: AgentStatus) -> Option<AgentBarVisualStatus> {
+    match status {
+        AgentStatus::Working => Some(AgentBarVisualStatus::Working),
+        AgentStatus::Idle | AgentStatus::Blocked => Some(AgentBarVisualStatus::Waiting),
+        AgentStatus::Done => Some(AgentBarVisualStatus::Done),
+        AgentStatus::Unknown => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentBarItemWidth {
+    pub width_px: u16,
+    pub ellipsize: bool,
+}
+
+pub fn clamp_agent_bar_item_width(preferred_px: u16) -> AgentBarItemWidth {
+    AgentBarItemWidth {
+        width_px: preferred_px.clamp(AGENT_BAR_ITEM_MIN_WIDTH_PX, AGENT_BAR_ITEM_MAX_WIDTH_PX),
+        ellipsize: preferred_px > AGENT_BAR_ITEM_MAX_WIDTH_PX,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentBarItem {
+    pub workspace: WorkspaceId,
+    pub pane: PaneId,
+    pub surface: SurfaceId,
+    pub agent_name: String,
+    pub status: AgentStatus,
+    pub visual_status: AgentBarVisualStatus,
+    pub seen: bool,
+    pub status_text: String,
+    pub color: String,
+}
+
+impl AgentBarItem {
+    fn from_presence(
+        workspace: WorkspaceId,
+        pane: PaneId,
+        surface: SurfaceId,
+        agent: &AgentPresence,
+        workspace_color: Option<&str>,
+    ) -> Option<Self> {
+        let status = agent.public_status();
+        let visual_status = agent_bar_visual_status(status)?;
+        Some(Self {
+            workspace,
+            pane,
+            surface,
+            agent_name: agent.name.clone(),
+            status,
+            visual_status,
+            seen: agent.seen,
+            status_text: agent
+                .status_text()
+                .map(str::to_string)
+                .unwrap_or_else(|| status.as_str().to_string()),
+            color: workspace_color
+                .map(str::to_string)
+                .unwrap_or_else(|| agent_bar_color_for_surface(surface)),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentBarModel {
+    pub visible: bool,
+    pub items: Vec<AgentBarItem>,
+}
+
+pub fn collect_agent_bar_model<'a>(
+    workspaces: impl IntoIterator<Item = &'a Workspace>,
+) -> AgentBarModel {
+    let mut items = Vec::new();
+    for workspace in workspaces {
+        items.extend(workspace.collect_agent_bar_items());
+    }
+    AgentBarModel {
+        visible: !items.is_empty(),
+        items,
+    }
+}
+
+pub fn agent_bar_color_for_surface(surface: SurfaceId) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in surface.0.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    let r = 64 + ((hash & 0x9f) as u8);
+    let g = 64 + (((hash >> 16) & 0x9f) as u8);
+    let b = 64 + (((hash >> 32) & 0x9f) as u8);
+    format!("#{r:02x}{g:02x}{b:02x}")
+}
+
 /// An AI agent currently occupying a surface, with its live activity and
 /// (when known) the agent process PID used for liveness sweeps.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1815,7 +2059,7 @@ impl AgentPresence {
         }
     }
 
-    pub fn from_report(report: AgentStatusReport, visible: bool) -> Option<Self> {
+    pub fn from_report(report: AgentStatusReport, _visible: bool) -> Option<Self> {
         let status = report.effective_status()?;
         let mut presence = Self::new(report.name, status.to_activity(), report.pid);
         presence.status = status;
@@ -1824,7 +2068,10 @@ impl AgentPresence {
         presence.message = report.message;
         presence.custom_status = report.custom_status;
         presence.session_id = report.session_id;
-        presence.seen = visible || status != AgentStatus::Idle;
+        // A freshly reported idle agent is an active session waiting for input,
+        // not an unseen completed turn. Only transitions from a prior live state
+        // to hidden Idle become public Done until the user sees them.
+        presence.seen = true;
         Some(presence)
     }
 
@@ -1857,14 +2104,20 @@ impl AgentPresence {
         }
         let next = report.effective_status().unwrap_or(self.status);
         let prev = self.status;
+        let same_agent = self.name == report.name;
         self.name = report.name;
         self.status = next;
         self.activity = next.to_activity();
         if report.pid.is_some() {
             self.pid = report.pid;
         }
-        if report.source.is_some() {
-            self.source = report.source;
+        if let Some(source) = report.source {
+            let keep_hook_ownership = same_agent
+                && self.source.as_deref() == Some("flowmux:hook")
+                && source == "flowmux:screen";
+            if !keep_hook_ownership {
+                self.source = Some(source);
+            }
         }
         if report.seq.is_some() {
             self.seq = report.seq;
@@ -1913,6 +2166,7 @@ pub fn detect_agent_status_from_signals(
     let recent = text
         .lines()
         .rev()
+        .filter(|line| !line.trim().is_empty())
         .take(80)
         .collect::<Vec<_>>()
         .into_iter()
@@ -1921,7 +2175,12 @@ pub fn detect_agent_status_from_signals(
         .join("\n")
         .to_ascii_lowercase();
     if recent.contains("do you want to")
-        || recent.contains("approve")
+        || recent.contains("approve this")
+        || recent.contains("approve command")
+        || recent.contains("requires approval")
+        || recent.contains("waiting for approval")
+        || recent.contains("awaiting approval")
+        || recent.contains("needs approval")
         || recent.contains("allow this")
         || recent.contains("permission to")
         || recent.contains("permission prompt")
@@ -1939,7 +2198,7 @@ pub fn detect_agent_status_from_signals(
     {
         return Some(AgentStatus::Working);
     }
-    if title_lower.contains("idle") || recent.contains("ready") {
+    if title_lower.contains("idle") {
         return Some(AgentStatus::Idle);
     }
     None
@@ -1977,6 +2236,50 @@ pub fn detect_agent_name_from_signals(
     }
 }
 
+pub fn detect_agent_idle_name_from_signals(
+    screen_text: Option<&str>,
+    osc_title: Option<&str>,
+) -> Option<&'static str> {
+    let title_agent_name = osc_title.and_then(detect_agent_name_from_surface_title);
+    let text = screen_text.unwrap_or_default();
+    let recent = text
+        .lines()
+        .rev()
+        .filter(|line| !line.trim().is_empty())
+        .take(12)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_ascii_lowercase();
+    let looks_like_agent_prompt = recent.lines().any(is_agent_idle_prompt_line);
+    if !looks_like_agent_prompt {
+        return (screen_text.is_none() || text.trim().is_empty())
+            .then_some(title_agent_name)
+            .flatten();
+    }
+    detect_agent_name_from_signals(Some(&recent), osc_title).or_else(|| {
+        (recent.contains("ask anything") && recent.contains("ctrl+p commands"))
+            .then_some("opencode")
+    })
+}
+
+fn is_agent_idle_prompt_line(line: &str) -> bool {
+    let line = line.trim();
+    let is_shell_command = line.contains("\\n")
+        || line.starts_with("printf ")
+        || line.starts_with("echo ")
+        || line.starts_with("clear;")
+        || line.contains("; echo ");
+    !is_shell_command
+        && (line.contains("press / for commands")
+            || line.contains("press / to")
+            || line.contains("type /")
+            || line.contains("ask anything")
+            || line.contains("ask me anything"))
+}
+
 fn normalize_agent_report_name_for_surface_title(report: &mut AgentStatusReport, title: &str) {
     if let Some(name) = detect_agent_name_from_surface_title(title) {
         report.name = name.to_string();
@@ -1985,12 +2288,22 @@ fn normalize_agent_report_name_for_surface_title(report: &mut AgentStatusReport,
 
 fn detect_agent_name_from_surface_title(title: &str) -> Option<&'static str> {
     let lower = title.trim_start().to_ascii_lowercase();
-    if lower.starts_with("opencode")
+    let first = lower
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '|'))
+        .find(|part| !part.is_empty())
+        .unwrap_or_default();
+    if first == "opencode"
         || lower.starts_with("open code")
         || lower.starts_with("oc |")
         || lower.starts_with("oc|")
     {
         Some("opencode")
+    } else if first == "claude" {
+        Some("claude")
+    } else if first == "codex" {
+        Some("codex")
+    } else if first == "cline" {
+        Some("cline")
     } else {
         None
     }
@@ -3618,6 +3931,29 @@ mod tests {
     }
 
     #[test]
+    fn initial_idle_agent_report_in_hidden_surface_stays_idle() {
+        let presence = AgentPresence::from_report(
+            AgentStatusReport {
+                name: "cline".into(),
+                status: Some(AgentStatus::Idle),
+                activity: Some(AgentActivity::Idle),
+                pid: Some(42),
+                source: Some("flowmux:hook".into()),
+                seq: Some(1),
+                message: None,
+                custom_status: None,
+                session_id: None,
+            },
+            false,
+        )
+        .expect("idle report should create presence");
+
+        assert_eq!(presence.status, AgentStatus::Idle);
+        assert_eq!(presence.public_status(), AgentStatus::Idle);
+        assert!(presence.seen);
+    }
+
+    #[test]
     fn agent_presence_replaces_transient_message_metadata() {
         let mut presence = AgentPresence::new("claude", AgentActivity::NeedsInput, None);
         presence.message = Some("approval needed".into());
@@ -3760,6 +4096,50 @@ mod tests {
         }
     }
 
+    fn workspace_with_tab_leaves(leaves: Vec<(PaneId, Vec<PaneSurface>)>) -> Workspace {
+        fn leaf(id: PaneId, surfaces: Vec<PaneSurface>) -> Pane {
+            let active = surfaces
+                .first()
+                .map(|surface| surface.id)
+                .expect("test leaf needs at least one surface");
+            Pane::Leaf {
+                id,
+                content: PaneContent::Tabs { active, surfaces },
+            }
+        }
+
+        let root = leaves
+            .into_iter()
+            .map(|(id, surfaces)| leaf(id, surfaces))
+            .reduce(|first, second| Pane::Split {
+                id: PaneId::new(),
+                direction: SplitDirection::Vertical,
+                ratio: 0.5,
+                first: Box::new(first),
+                second: Box::new(second),
+            })
+            .expect("workspace needs at least one leaf");
+
+        Workspace {
+            id: WorkspaceId::new(),
+            name: "agents".into(),
+            custom_title: None,
+            root_dir: "/tmp".into(),
+            git: None,
+            listening_ports: Vec::new(),
+            surfaces: vec![Surface {
+                id: SurfaceId::new(),
+                kind: SurfaceKind::Terminal {
+                    shell: None,
+                    cwd: None,
+                },
+                title: "main".into(),
+                root_pane: root,
+            }],
+            color: None,
+        }
+    }
+
     #[test]
     fn workspace_agent_blocks_sort_by_status_then_recent_focus() {
         let working_old = PaneId::new();
@@ -3827,6 +4207,325 @@ mod tests {
     }
 
     #[test]
+    fn agent_bar_model_hidden_when_no_agents_exist() {
+        let pane = PaneId::new();
+        let ws = workspace_with_tab_leaves(vec![(
+            pane,
+            vec![PaneSurface::terminal("shell", Some("/tmp/shell".into()))],
+        )]);
+
+        let model = collect_agent_bar_model([&ws]);
+
+        assert!(!model.visible);
+        assert!(model.items.is_empty());
+    }
+
+    #[test]
+    fn agent_bar_model_collects_one_agent_with_name_and_status_text() {
+        let pane = PaneId::new();
+        let ws = workspace_with_agent_leaves(vec![(
+            pane,
+            terminal_surface_with_agent("codex", "/tmp/codex", "codex", AgentStatus::Working),
+        )]);
+
+        let model = collect_agent_bar_model([&ws]);
+
+        assert!(model.visible);
+        assert_eq!(model.items.len(), 1);
+        assert_eq!(model.items[0].workspace, ws.id);
+        assert_eq!(model.items[0].pane, pane);
+        assert_eq!(model.items[0].agent_name, "codex");
+        assert_eq!(model.items[0].status_text, "codex status");
+        assert_eq!(model.items[0].visual_status, AgentBarVisualStatus::Working);
+    }
+
+    #[test]
+    fn agent_bar_model_uses_workspace_color_for_item_stripe() {
+        let pane = PaneId::new();
+        let mut ws = workspace_with_tab_leaves(vec![(
+            pane,
+            vec![
+                terminal_surface_with_agent("codex", "/tmp/codex", "codex", AgentStatus::Working),
+                terminal_surface_with_agent("claude", "/tmp/claude", "claude", AgentStatus::Idle),
+            ],
+        )]);
+        ws.color = Some("#112233".into());
+
+        let model = collect_agent_bar_model([&ws]);
+        assert_eq!(
+            model
+                .items
+                .iter()
+                .map(|item| item.color.as_str())
+                .collect::<Vec<_>>(),
+            vec!["#112233", "#112233"]
+        );
+
+        ws.color = Some("#445566".into());
+        let model = collect_agent_bar_model([&ws]);
+        assert_eq!(
+            model
+                .items
+                .iter()
+                .map(|item| item.color.as_str())
+                .collect::<Vec<_>>(),
+            vec!["#445566", "#445566"]
+        );
+    }
+
+    #[test]
+    fn agent_bar_model_keeps_workspace_pane_tab_discovery_order() {
+        let first_pane = PaneId::new();
+        let second_pane = PaneId::new();
+        let third_pane = PaneId::new();
+        let ws_a = workspace_with_tab_leaves(vec![
+            (
+                first_pane,
+                vec![
+                    terminal_surface_with_agent("a1", "/tmp/a1", "codex", AgentStatus::Working),
+                    terminal_surface_with_agent("a2", "/tmp/a2", "claude", AgentStatus::Idle),
+                ],
+            ),
+            (
+                second_pane,
+                vec![terminal_surface_with_agent(
+                    "a3",
+                    "/tmp/a3",
+                    "opencode",
+                    AgentStatus::Blocked,
+                )],
+            ),
+        ]);
+        let ws_b = workspace_with_agent_leaves(vec![(
+            third_pane,
+            terminal_surface_with_agent("b1", "/tmp/b1", "cline", AgentStatus::Done),
+        )]);
+
+        let model = collect_agent_bar_model([&ws_a, &ws_b]);
+
+        assert_eq!(
+            model
+                .items
+                .iter()
+                .map(|item| item.agent_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["codex", "claude", "opencode", "cline"]
+        );
+        assert_eq!(
+            model.items.iter().map(|item| item.pane).collect::<Vec<_>>(),
+            vec![first_pane, first_pane, second_pane, third_pane]
+        );
+    }
+
+    #[test]
+    fn agent_bar_visual_status_maps_public_statuses() {
+        assert_eq!(
+            agent_bar_visual_status(AgentStatus::Working),
+            Some(AgentBarVisualStatus::Working)
+        );
+        assert_eq!(
+            agent_bar_visual_status(AgentStatus::Idle),
+            Some(AgentBarVisualStatus::Waiting)
+        );
+        assert_eq!(
+            agent_bar_visual_status(AgentStatus::Blocked),
+            Some(AgentBarVisualStatus::Waiting)
+        );
+        assert_eq!(
+            agent_bar_visual_status(AgentStatus::Done),
+            Some(AgentBarVisualStatus::Done)
+        );
+        assert_eq!(agent_bar_visual_status(AgentStatus::Unknown), None);
+    }
+
+    #[test]
+    fn agent_bar_model_excludes_unknown_status() {
+        let pane = PaneId::new();
+        let ws = workspace_with_agent_leaves(vec![(
+            pane,
+            terminal_surface_with_agent("unknown", "/tmp/unknown", "codex", AgentStatus::Unknown),
+        )]);
+
+        let model = collect_agent_bar_model([&ws]);
+
+        assert!(!model.visible);
+        assert!(model.items.is_empty());
+    }
+
+    #[test]
+    fn agent_bar_text_updates_without_reordering_or_recoloring() {
+        let pane = PaneId::new();
+        let mut ws = workspace_with_agent_leaves(vec![(
+            pane,
+            terminal_surface_with_agent("codex", "/tmp/codex", "codex", AgentStatus::Working),
+        )]);
+        let before = collect_agent_bar_model([&ws]).items[0].clone();
+
+        let Pane::Leaf {
+            content: PaneContent::Tabs { surfaces, .. },
+            ..
+        } = &mut ws.surfaces[0].root_pane
+        else {
+            panic!("expected single leaf test workspace");
+        };
+        surfaces[0].agent.as_mut().unwrap().custom_status = Some("running tests".into());
+        let after = collect_agent_bar_model([&ws]).items[0].clone();
+
+        assert_eq!(after.workspace, before.workspace);
+        assert_eq!(after.pane, before.pane);
+        assert_eq!(after.surface, before.surface);
+        assert_eq!(after.agent_name, before.agent_name);
+        assert_eq!(after.color, before.color);
+        assert_eq!(after.status_text, "running tests");
+    }
+
+    #[test]
+    fn agent_bar_surface_color_is_deterministic() {
+        let surface_a = SurfaceId(uuid::Uuid::from_u128(0x11111111111111111111111111111111));
+        let surface_b = SurfaceId(uuid::Uuid::from_u128(0x22222222222222222222222222222222));
+
+        assert_eq!(
+            agent_bar_color_for_surface(surface_a),
+            agent_bar_color_for_surface(surface_a)
+        );
+        assert_ne!(
+            agent_bar_color_for_surface(surface_a),
+            agent_bar_color_for_surface(surface_b)
+        );
+        assert!(agent_bar_color_for_surface(surface_a).starts_with('#'));
+        assert_eq!(agent_bar_color_for_surface(surface_a).len(), 7);
+    }
+
+    #[test]
+    fn agent_bar_width_clamps_and_reports_ellipsize() {
+        assert_eq!(
+            clamp_agent_bar_item_width(80),
+            AgentBarItemWidth {
+                width_px: AGENT_BAR_ITEM_MIN_WIDTH_PX,
+                ellipsize: false
+            }
+        );
+        assert_eq!(
+            clamp_agent_bar_item_width(126),
+            AgentBarItemWidth {
+                width_px: 126,
+                ellipsize: false
+            }
+        );
+        assert_eq!(
+            clamp_agent_bar_item_width(320),
+            AgentBarItemWidth {
+                width_px: AGENT_BAR_ITEM_MAX_WIDTH_PX,
+                ellipsize: true
+            }
+        );
+    }
+
+    #[test]
+    fn agent_bar_model_reflects_agent_tab_pane_and_workspace_removal() {
+        let pane_a = PaneId::new();
+        let pane_b = PaneId::new();
+        let surface_a = terminal_surface_with_agent("a", "/tmp/a", "codex", AgentStatus::Working);
+        let mut ended_surface =
+            terminal_surface_with_agent("ended", "/tmp/ended", "claude", AgentStatus::Idle);
+        ended_surface.agent = None;
+        let surface_b =
+            terminal_surface_with_agent("b", "/tmp/b", "opencode", AgentStatus::Blocked);
+        let full = workspace_with_tab_leaves(vec![
+            (pane_a, vec![surface_a.clone(), ended_surface]),
+            (pane_b, vec![surface_b.clone()]),
+        ]);
+        assert_eq!(collect_agent_bar_model([&full]).items.len(), 2);
+
+        let tab_closed = workspace_with_tab_leaves(vec![
+            (pane_a, vec![surface_a.clone()]),
+            (pane_b, vec![surface_b.clone()]),
+        ]);
+        assert_eq!(
+            collect_agent_bar_model([&tab_closed])
+                .items
+                .iter()
+                .map(|item| item.agent_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["codex", "opencode"]
+        );
+
+        let pane_closed = workspace_with_tab_leaves(vec![(pane_a, vec![surface_a])]);
+        assert_eq!(
+            collect_agent_bar_model([&pane_closed])
+                .items
+                .iter()
+                .map(|item| item.agent_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["codex"]
+        );
+
+        let workspace_closed = collect_agent_bar_model(std::iter::empty::<&Workspace>());
+        assert!(!workspace_closed.visible);
+        assert!(workspace_closed.items.is_empty());
+    }
+
+    #[test]
+    fn agent_notification_target_controls_blink_flags() {
+        assert_eq!(
+            AgentNotificationVisualFlags::for_unread(AgentNotificationTarget::AgentBar, true),
+            AgentNotificationVisualFlags {
+                agent_bar: true,
+                workspace: false,
+                desktop_toast: true
+            }
+        );
+        assert_eq!(
+            AgentNotificationVisualFlags::for_unread(AgentNotificationTarget::Workspace, true),
+            AgentNotificationVisualFlags {
+                agent_bar: false,
+                workspace: true,
+                desktop_toast: true
+            }
+        );
+        assert_eq!(
+            AgentNotificationVisualFlags::for_unread(AgentNotificationTarget::Both, false),
+            AgentNotificationVisualFlags {
+                agent_bar: true,
+                workspace: true,
+                desktop_toast: false
+            }
+        );
+    }
+
+    #[test]
+    fn agent_notification_clear_triggers_clear_all_visual_flags() {
+        let flags = AgentNotificationVisualFlags {
+            agent_bar: true,
+            workspace: true,
+            desktop_toast: true,
+        };
+
+        for trigger in [
+            AgentNotificationClearTrigger::WorkspaceClick,
+            AgentNotificationClearTrigger::PaneFocus,
+            AgentNotificationClearTrigger::AgentBarItemClick,
+        ] {
+            assert_eq!(
+                clear_agent_notification_visuals(trigger, flags),
+                AgentNotificationVisualFlags::default()
+            );
+        }
+    }
+
+    #[test]
+    fn agent_notification_target_default_is_agent_bar() {
+        assert_eq!(
+            AgentNotificationTarget::default(),
+            AgentNotificationTarget::AgentBar
+        );
+        assert_eq!(
+            serde_json::to_string(&AgentNotificationTarget::default()).unwrap(),
+            "\"agent_bar\""
+        );
+    }
+
+    #[test]
     fn pane_mark_surface_seen_clears_done() {
         let mut surface = PaneSurface::terminal("agent", None);
         let surface_id = surface.id;
@@ -3873,6 +4572,50 @@ mod tests {
             Some(false)
         );
         assert_eq!(pane.agent_status_rollup(), Some(AgentStatus::Idle));
+    }
+
+    #[test]
+    fn screen_fallback_does_not_take_ownership_from_matching_hook_presence() {
+        let mut surface = PaneSurface::terminal("agent", None);
+        let surface_id = surface.id;
+        let mut presence = AgentPresence::new("codex", AgentActivity::Idle, Some(42));
+        presence.source = Some("flowmux:hook".into());
+        presence.seq = Some(1);
+        surface.agent = Some(presence);
+        let mut pane = Pane::Leaf {
+            id: PaneId::new(),
+            content: PaneContent::Tabs {
+                active: surface_id,
+                surfaces: vec![surface],
+            },
+        };
+
+        assert_eq!(
+            pane.report_surface_agent_signal(
+                surface_id,
+                AgentStatus::Working,
+                "flowmux:screen",
+                Some("codex"),
+                true,
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            pane.clear_surface_agent_from_source(surface_id, "flowmux:screen"),
+            Some(false)
+        );
+        let Pane::Leaf {
+            content: PaneContent::Tabs { surfaces, .. },
+            ..
+        } = &pane
+        else {
+            panic!("expected leaf pane");
+        };
+        let agent = surfaces[0].agent.as_ref().unwrap();
+        assert_eq!(agent.name, "codex");
+        assert_eq!(agent.status, AgentStatus::Working);
+        assert_eq!(agent.source.as_deref(), Some("flowmux:hook"));
+        assert_eq!(agent.pid, Some(42));
     }
 
     #[test]
@@ -3957,6 +4700,33 @@ mod tests {
     }
 
     #[test]
+    fn clear_surface_agent_from_source_only_clears_matching_source() {
+        let mut surface = PaneSurface::terminal("agent", None);
+        let surface_id = surface.id;
+        let mut presence = AgentPresence::new("codex", AgentActivity::Idle, None);
+        presence.source = Some("flowmux:screen".into());
+        surface.agent = Some(presence);
+        let mut pane = Pane::Leaf {
+            id: PaneId::new(),
+            content: PaneContent::Tabs {
+                active: surface_id,
+                surfaces: vec![surface],
+            },
+        };
+
+        assert_eq!(
+            pane.clear_surface_agent_from_source(surface_id, "flowmux:hook"),
+            Some(false)
+        );
+        assert_eq!(pane.agent_status_rollup(), Some(AgentStatus::Idle));
+        assert_eq!(
+            pane.clear_surface_agent_from_source(surface_id, "flowmux:screen"),
+            Some(true)
+        );
+        assert_eq!(pane.agent_status_rollup(), None);
+    }
+
+    #[test]
     fn agent_status_rollup_uses_blocked_done_working_idle_unknown_order() {
         assert_eq!(
             rollup_agent_statuses([
@@ -3992,6 +4762,10 @@ mod tests {
             detect_agent_status_from_signals(Some("bypass permissions on"), None),
             None
         );
+        assert_eq!(
+            detect_agent_status_from_signals(Some("Auto-approve all enabled (Shift+Tab)"), None),
+            None
+        );
     }
 
     #[test]
@@ -4003,6 +4777,18 @@ mod tests {
         assert_eq!(
             detect_agent_name_from_signals(Some("Claude is thinking"), Some("OC | greeting")),
             Some("opencode")
+        );
+        assert_eq!(
+            detect_agent_name_from_signals(None, Some("Claude")),
+            Some("claude")
+        );
+        assert_eq!(
+            detect_agent_name_from_signals(None, Some("Codex")),
+            Some("codex")
+        );
+        assert_eq!(
+            detect_agent_name_from_signals(None, Some("Cline")),
+            Some("cline")
         );
         assert_eq!(
             detect_agent_name_from_signals(Some("Claude is thinking"), None),
@@ -4017,6 +4803,55 @@ mod tests {
             Some("cline")
         );
         assert_eq!(detect_agent_name_from_signals(Some("decline"), None), None);
+    }
+
+    #[test]
+    fn detector_reads_idle_agent_prompt_without_trusting_stale_scrollback() {
+        assert_eq!(
+            detect_agent_idle_name_from_signals(
+                Some("Codex\npress / for commands\n\n\n\n\n\n\n\n\n\n\n\n"),
+                None
+            ),
+            Some("codex")
+        );
+        assert_eq!(
+            detect_agent_idle_name_from_signals(
+                Some(
+                    "Ask anything... \"Fix broken tests\"\n\
+                     Sisyphus - Ultraworker · GPT-5.5 OpenAI · medium\n\
+                     tab agents  ctrl+p commands"
+                ),
+                None
+            ),
+            Some("opencode")
+        );
+        assert_eq!(
+            detect_agent_idle_name_from_signals(Some("$ echo shell ready"), Some("OpenCode")),
+            None
+        );
+        assert_eq!(
+            detect_agent_idle_name_from_signals(Some("   \n\n"), Some("Claude")),
+            Some("claude")
+        );
+        assert_eq!(
+            detect_agent_idle_name_from_signals(Some("$ echo shell ready"), Some("Claude")),
+            None
+        );
+        assert_eq!(
+            detect_agent_idle_name_from_signals(None, Some("OpenCode")),
+            Some("opencode")
+        );
+        assert_eq!(
+            detect_agent_idle_name_from_signals(Some("codex exited\n$ echo done"), None),
+            None
+        );
+        assert_eq!(
+            detect_agent_idle_name_from_signals(
+                Some(r#"printf "Codex\\npress / for commands\\n""#),
+                None
+            ),
+            None
+        );
     }
 
     #[test]

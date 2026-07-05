@@ -111,17 +111,37 @@ pub fn surface_from_env() -> Option<SurfaceId> {
         .and_then(|s| SurfaceId::from_str(s).ok())
 }
 
-/// Resolve `FLOWMUX_AGENT_PID` — the agent process id exported by the
-/// wrapper shim (`scripts`/installed `flowmux-shims/<agent>`) right
-/// before it `exec`s the real agent binary. Lets the daemon sweep clear
-/// presences left stale by a hard kill where `SessionEnd` never fired.
-/// `None` when the agent was launched without the shim.
+/// Resolve the live agent PID exported by the wrapper shim. Follow-up
+/// hook events use this only when the wrapper value is still present; they
+/// must not replace a known-good agent PID with a short-lived hook helper PID.
 pub fn pid_from_env() -> Option<u32> {
+    pid_from_env_var()
+}
+
+/// Resolve a PID for initial session registration. Prefer the wrapper shim's
+/// `FLOWMUX_AGENT_PID`; when shell startup bypassed the shim, fall back to this
+/// hook process's parent PID. This fallback is only safe for SessionStart.
+pub fn pid_from_env_or_parent() -> Option<u32> {
+    pid_from_env_var().or_else(|| surface_from_env().and_then(|_| parent_process_pid()))
+}
+
+fn pid_from_env_var() -> Option<u32> {
     std::env::var("FLOWMUX_AGENT_PID")
         .ok()
         .as_deref()
         .and_then(|s| s.trim().parse::<u32>().ok())
         .filter(|&p| p != 0)
+}
+
+#[cfg(unix)]
+fn parent_process_pid() -> Option<u32> {
+    let pid = unsafe { libc::getppid() };
+    u32::try_from(pid).ok().filter(|&p| p != 0)
+}
+
+#[cfg(not(unix))]
+fn parent_process_pid() -> Option<u32> {
+    None
 }
 
 fn hook_seq() -> Option<u64> {
@@ -465,12 +485,49 @@ mod tests {
 
     #[test]
     fn pid_from_env_parses_and_rejects_zero() {
-        // Drive the parse logic directly (env is process-global and would
-        // race other tests). Mirrors `pid_from_env`'s filter.
-        let parse = |s: &str| s.trim().parse::<u32>().ok().filter(|&p| p != 0);
-        assert_eq!(parse(" 4321 "), Some(4321));
-        assert_eq!(parse("0"), None);
-        assert_eq!(parse("notanumber"), None);
+        let _g = hook_env_lock();
+        let prev = std::env::var_os("FLOWMUX_AGENT_PID");
+        std::env::set_var("FLOWMUX_AGENT_PID", " 4321 ");
+        assert_eq!(pid_from_env_var(), Some(4321));
+        std::env::set_var("FLOWMUX_AGENT_PID", "0");
+        assert_eq!(pid_from_env_var(), None);
+        std::env::set_var("FLOWMUX_AGENT_PID", "notanumber");
+        assert_eq!(pid_from_env_var(), None);
+        match prev {
+            Some(v) => std::env::set_var("FLOWMUX_AGENT_PID", v),
+            None => std::env::remove_var("FLOWMUX_AGENT_PID"),
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn parent_process_pid_reports_live_parent() {
+        assert!(parent_process_pid().is_some_and(|pid| pid > 0));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn pid_from_env_does_not_fallback_to_parent_for_followup_events() {
+        let _g = hook_env_lock();
+        let prev_pid = std::env::var_os("FLOWMUX_AGENT_PID");
+        let prev_surface = std::env::var_os("FLOWMUX_SURFACE_ID");
+        std::env::remove_var("FLOWMUX_AGENT_PID");
+        std::env::set_var(
+            "FLOWMUX_SURFACE_ID",
+            flowmux_core::SurfaceId::new().to_string(),
+        );
+
+        assert_eq!(pid_from_env(), None);
+        assert!(pid_from_env_or_parent().is_some());
+
+        match prev_pid {
+            Some(v) => std::env::set_var("FLOWMUX_AGENT_PID", v),
+            None => std::env::remove_var("FLOWMUX_AGENT_PID"),
+        }
+        match prev_surface {
+            Some(v) => std::env::set_var("FLOWMUX_SURFACE_ID", v),
+            None => std::env::remove_var("FLOWMUX_SURFACE_ID"),
+        }
     }
 
     #[test]
@@ -605,5 +662,13 @@ mod tests {
             "hook notify should return promptly when the daemon does not answer"
         );
         server.abort();
+    }
+
+    fn hook_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
     }
 }

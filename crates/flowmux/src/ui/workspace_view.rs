@@ -267,7 +267,6 @@ impl PaneRegistry {
         }
     }
 
-    #[cfg(all(test, not(target_os = "macos")))]
     pub fn surface_title_text(&self, surface: SurfaceId) -> Option<String> {
         self.surface_tab_labels
             .get(&surface)
