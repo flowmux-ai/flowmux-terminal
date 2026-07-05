@@ -652,6 +652,12 @@ enum HooksOp {
         #[command(subcommand)]
         event: AgentHookEvent,
     },
+    /// Cline lifecycle hook handler. Uses the same generic event
+    /// shape as Codex/OpenCode when a caller wires Cline to flowmux.
+    Cline {
+        #[command(subcommand)]
+        event: AgentHookEvent,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1101,11 +1107,9 @@ fn build_request(cmd: Cmd) -> anyhow::Result<Request> {
             NotificationOp::MarkRead { id } => Request::NotificationMarkRead { id },
             NotificationOp::Clear => Request::NotificationsClear,
         },
-        Cmd::Split { pane, right, down } => {
+        Cmd::Split { pane, down, .. } => {
             let direction = if down {
                 SplitDirection::Horizontal
-            } else if right {
-                SplitDirection::Vertical
             } else {
                 SplitDirection::Vertical
             };
@@ -1239,6 +1243,7 @@ async fn run_hooks_op(op: &HooksOp, socket: Option<PathBuf>) -> anyhow::Result<(
         HooksOp::Opencode { event } => {
             run_generic_agent_hook_event("OpenCode", event, socket).await
         }
+        HooksOp::Cline { event } => run_generic_agent_hook_event("Cline", event, socket).await,
     }
 }
 
@@ -2152,7 +2157,7 @@ mod tests {
         assert!(matches!(
             build_request(cli.cmd).unwrap(),
             Request::BrowserScreenshot { pane: got, path }
-                if got == pane && path == PathBuf::from("/tmp/flowmux-page.png")
+                if got == pane && path.as_path() == std::path::Path::new("/tmp/flowmux-page.png")
         ));
     }
 
@@ -3174,6 +3179,39 @@ mod tests {
             panic!("expected hooks codex stop variant");
         };
         assert_eq!(got_pane, Some(pane));
+    }
+
+    #[test]
+    fn hooks_cline_notification_uses_generic_agent_event_parser() {
+        let surface = SurfaceId::new();
+        let payload = r#"{"message":"needs approval"}"#;
+        let cli = Cli::try_parse_from([
+            "flowmuxctl",
+            "hooks",
+            "cline",
+            "notification",
+            "--surface",
+            &surface.to_string(),
+            payload,
+        ])
+        .expect("cline must accept the generic hook event shape");
+        let Cmd::Hooks {
+            op:
+                HooksOp::Cline {
+                    event:
+                        AgentHookEvent::Notification {
+                            pane,
+                            surface: got_surface,
+                            args,
+                        },
+                },
+        } = cli.cmd
+        else {
+            panic!("expected hooks cline notification variant");
+        };
+        assert!(pane.is_none());
+        assert_eq!(got_surface, Some(surface));
+        assert_eq!(args, vec![payload.to_string()]);
     }
 
     #[test]

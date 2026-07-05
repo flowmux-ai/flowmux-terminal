@@ -89,7 +89,7 @@ impl GhosttyPane {
 
     /// The widget used for focus tracking / identity comparisons in the window
     /// controller. With VTE this is the terminal widget itself.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub fn render_area(&self) -> gtk::Widget {
         self.widget.clone().upcast::<gtk::Widget>()
     }
@@ -385,7 +385,6 @@ impl GhosttyPane {
         {
             let cb = callbacks.on_terminal_cwd_changed.clone();
             let pane_id = pane_id.clone();
-            let surface = surface;
             // Forward OSC 7 cwd only on a real change, matching the controller's
             // expectation that the title / VCS / file-browser refresh runs once
             // per `cd` rather than on every redundant announcement.
@@ -406,7 +405,6 @@ impl GhosttyPane {
         {
             let cb = callbacks.on_terminal_title_changed.clone();
             let pane_id = pane_id.clone();
-            let surface = surface;
             let last_title: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
             term.connect_window_title_notify(move |t| {
                 let title = t.window_title().map(|g| g.to_string()).unwrap_or_default();
@@ -1319,7 +1317,7 @@ fn sync_terminal_scrollbar_adjustment(
             let watched = watched_adjustment.borrow();
             watched
                 .as_ref()
-                .map_or(false, |watched| watched.as_ptr() == adj.as_ptr())
+                .is_some_and(|watched| watched.as_ptr() == adj.as_ptr())
         };
         if !already_watching {
             let scrollbar_for_changed = scrollbar.clone();

@@ -173,13 +173,15 @@ mod tests {
     fn window_and_sidebar_position_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
-        let mut state = State::default();
-        state.window = Some(WindowLayout {
-            width: 1600,
-            height: 900,
-            maximized: true,
-        });
-        state.sidebar_position = Some(312);
+        let state = State {
+            window: Some(WindowLayout {
+                width: 1600,
+                height: 900,
+                maximized: true,
+            }),
+            sidebar_position: Some(312),
+            ..Default::default()
+        };
         save_to(&path, &state).unwrap();
 
         let back = load_from(&path).unwrap();

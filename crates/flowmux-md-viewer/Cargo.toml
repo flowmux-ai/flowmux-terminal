@@ -12,6 +12,8 @@ description = "Markdown viewer for flowmux."
 adw = { package = "libadwaita", version = "0.7", features = ["v1_5"] }
 comrak = "0.52"
 gtk = { package = "gtk4", version = "0.9", features = ["v4_12"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
 webkit6 = "0.4"
 
 [dev-dependencies]

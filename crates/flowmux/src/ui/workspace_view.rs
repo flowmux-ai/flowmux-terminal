@@ -30,6 +30,82 @@ pub(crate) struct TabDndPayload {
     pub surface: Option<PaneSurface>,
 }
 
+pub(crate) fn tab_dnd_content_formats() -> gtk::gdk::ContentFormats {
+    gtk::gdk::ContentFormats::builder()
+        .add_mime_type(TAB_DND_MIME)
+        .add_type(gtk::glib::types::Type::STRING)
+        .build()
+}
+
+pub(crate) fn tab_dnd_formats_accept_payload(formats: &gtk::gdk::ContentFormats) -> bool {
+    formats.contain_mime_type(TAB_DND_MIME) || formats.contains_type(gtk::glib::types::Type::STRING)
+}
+
+fn tab_dnd_content_provider(payload: String) -> gtk::gdk::ContentProvider {
+    let bytes = gtk::glib::Bytes::from_owned(payload.clone().into_bytes());
+    let mime_provider = gtk::gdk::ContentProvider::for_bytes(TAB_DND_MIME, &bytes);
+    let value_provider = gtk::gdk::ContentProvider::for_value(&payload.to_value());
+    gtk::gdk::ContentProvider::new_union(&[mime_provider, value_provider])
+}
+
+pub(crate) async fn read_tab_dnd_payload_from_drop(
+    drop: &gtk::gdk::Drop,
+) -> Result<TabDndPayload, String> {
+    let payload = read_tab_dnd_payload_text(drop).await?;
+    parse_tab_dnd_payload(&payload).map_err(|error| format!("payload invalid: {error}"))
+}
+
+async fn read_tab_dnd_payload_text(drop: &gtk::gdk::Drop) -> Result<String, String> {
+    let mut mime_error = None;
+    if drop.formats().contain_mime_type(TAB_DND_MIME) {
+        match drop
+            .read_future(&[TAB_DND_MIME], gtk::glib::Priority::default())
+            .await
+        {
+            Ok((stream, mime_type)) if mime_type.as_str() == TAB_DND_MIME => {
+                let bytes = stream
+                    .read_bytes_future(TAB_DND_PAYLOAD_MAX, gtk::glib::Priority::default())
+                    .await
+                    .map_err(|error| format!("failed to read MIME payload bytes: {error}"))?;
+                return std::str::from_utf8(bytes.as_ref())
+                    .map(str::to_string)
+                    .map_err(|error| format!("MIME payload was not UTF-8: {error}"));
+            }
+            Ok((_stream, mime_type)) => {
+                mime_error = Some(format!("unexpected MIME payload type: {mime_type}"));
+            }
+            Err(error) => {
+                mime_error = Some(format!("failed to read MIME payload: {error}"));
+            }
+        }
+    }
+
+    if drop.formats().contains_type(gtk::glib::types::Type::STRING) {
+        let value = drop
+            .read_value_future(
+                gtk::glib::types::Type::STRING,
+                gtk::glib::Priority::default(),
+            )
+            .await
+            .map_err(|error| format!("failed to read String payload: {error}"))?;
+        return value
+            .get::<String>()
+            .map_err(|error| format!("String payload was not a string: {error}"));
+    }
+
+    Err(mime_error.unwrap_or_else(|| "drop had no tab payload format".to_string()))
+}
+
+fn tab_dnd_payload_string(pane: PaneId, surface: SurfaceId, surface_model: &PaneSurface) -> String {
+    match serde_json::to_string(surface_model) {
+        Ok(surface_json) => format!("{pane}|{surface}|{surface_json}"),
+        Err(error) => {
+            tracing::warn!(%surface, %error, "tab drag: failed to serialize surface model");
+            format!("{pane}|{surface}")
+        }
+    }
+}
+
 /// Return the leaf pane id when the workspace is "solo" — the first
 /// (rendered) surface's root is a single leaf holding a single tab.
 /// Used to suppress the focus border in a trivial 1-pane/1-tab
@@ -997,7 +1073,6 @@ fn build_leaf_pane(
     let split_right = pane_tool_button("go-next-symbolic", "Split right");
     {
         let cb = callbacks.on_split_right.clone();
-        let pane_id = pane_id;
         split_right.connect_clicked(move |_| (cb.borrow_mut())(pane_id));
     }
     tools.append(&split_right);
@@ -1005,7 +1080,6 @@ fn build_leaf_pane(
     let split_down = pane_tool_button("go-down-symbolic", "Split down");
     {
         let cb = callbacks.on_split_down.clone();
-        let pane_id = pane_id;
         split_down.connect_clicked(move |_| (cb.borrow_mut())(pane_id));
     }
     tools.append(&split_down);
@@ -1013,7 +1087,6 @@ fn build_leaf_pane(
     let add = pane_tool_button("tab-new-symbolic", "Add tab");
     {
         let cb = callbacks.on_new_surface.clone();
-        let pane_id = pane_id;
         add.connect_clicked(move |_| (cb.borrow_mut())(pane_id));
     }
     tools.append(&add);
@@ -1021,7 +1094,6 @@ fn build_leaf_pane(
     let add_browser = pane_tool_button("web-browser-symbolic", "Add browser tab");
     {
         let cb = callbacks.on_new_browser_surface.clone();
-        let pane_id = pane_id;
         add_browser.connect_clicked(move |_| (cb.borrow_mut())(pane_id));
     }
     tools.append(&add_browser);
@@ -1155,10 +1227,12 @@ pub(crate) fn build_surface_tab_widget(
 }
 
 /// Build the secondary-click popover used by surface tabs. Mirrors the
-/// pattern used by `ghostty_pane.rs` and `sidebar.rs`: plain `Popover`
-/// + `Button` rows whose `connect_clicked` closures route directly to
-/// the per-pane callbacks. PopoverMenu + `win.*` actions have been
-/// observed to drop in some GTK versions.
+/// plain `Popover` and `Button` row pattern used by `ghostty_pane.rs`
+/// and `sidebar.rs`. The `connect_clicked` closures route directly to the
+/// per-pane callbacks.
+///
+/// PopoverMenu + `win.*` actions have been observed to drop in some GTK
+/// versions.
 fn attach_tab_context_menu(
     tab: &gtk::Box,
     pane_id: PaneId,
@@ -1350,6 +1424,18 @@ mod tab_dnd_tests {
     }
 
     #[test]
+    fn tab_dnd_payload_string_includes_surface_model_for_fallback_drop_targets() {
+        let pane = PaneId::new();
+        let surface = PaneSurface::browser("Docs", "https://example.test".into());
+        let payload = tab_dnd_payload_string(pane, surface.id, &surface);
+
+        let parsed = parse_tab_dnd_payload(&payload).expect("payload parses");
+        assert_eq!(parsed.src_pane, pane);
+        assert_eq!(parsed.src_surface, surface.id);
+        assert!(parsed.surface.is_some());
+    }
+
+    #[test]
     fn parse_tab_dnd_payload_rejects_plain_text() {
         assert!(parse_tab_dnd_payload("not a tab drag").is_err());
     }
@@ -1380,6 +1466,23 @@ mod tab_dnd_tests {
         assert!(matches!(
             landed_drop_zone(PaneDropZone::Tab, Some(0.8), Some(0.2)),
             PaneDropZone::SplitRight
+        ));
+    }
+
+    #[test]
+    fn tab_drag_split_direction_from_delta_uses_right_or_down_drag() {
+        assert!(tab_drag_split_direction_from_delta(20.0, 20.0).is_none());
+        assert!(matches!(
+            tab_drag_split_direction_from_delta(120.0, 20.0),
+            Some(SplitDirection::Vertical)
+        ));
+        assert!(matches!(
+            tab_drag_split_direction_from_delta(20.0, 120.0),
+            Some(SplitDirection::Horizontal)
+        ));
+        assert!(matches!(
+            tab_drag_split_direction_from_delta(120.0, 160.0),
+            Some(SplitDirection::Horizontal)
         ));
     }
 
@@ -1441,6 +1544,10 @@ fn attach_tab_dnd_handlers(
     callbacks: &PaneCallbacks,
 ) {
     let surface_id = surface.id;
+    let drag_widget = tab
+        .first_child()
+        .map(|child| child.upcast::<gtk::Widget>())
+        .unwrap_or_else(|| tab.clone().upcast::<gtk::Widget>());
     let saw_tab_drop_target = callbacks.tab_drag_drop_seen.clone();
     let committed_tab_drop = callbacks.tab_drag_drop_committed.clone();
     let split_candidate = callbacks.tab_drag_split_candidate.clone();
@@ -1451,15 +1558,11 @@ fn attach_tab_dnd_handlers(
     let surface_for_payload = surface.clone();
     drag_source.connect_prepare(move |_, _, _| {
         tracing::debug!(%pane_id, %surface_id, "tab drag prepare");
-        let payload = match serde_json::to_string(&surface_for_payload) {
-            Ok(surface_json) => format!("{pane_id}|{surface_id}|{surface_json}"),
-            Err(error) => {
-                tracing::warn!(%surface_id, %error, "tab drag: failed to serialize surface model");
-                format!("{pane_id}|{surface_id}")
-            }
-        };
-        let bytes = gtk::glib::Bytes::from_owned(payload.into_bytes());
-        Some(gtk::gdk::ContentProvider::for_bytes(TAB_DND_MIME, &bytes))
+        Some(tab_dnd_content_provider(tab_dnd_payload_string(
+            pane_id,
+            surface_id,
+            &surface_for_payload,
+        )))
     });
     let tab_for_begin = tab.clone();
     let saw_target_for_begin = saw_tab_drop_target.clone();
@@ -1603,14 +1706,24 @@ fn attach_tab_dnd_handlers(
         saw_target_for_cancel.set(false);
         false
     });
-    tab.add_controller(drag_source);
+    drag_widget.add_controller(drag_source);
 
-    let drop_target = gtk::DropTargetAsync::new(
-        Some(gtk::gdk::ContentFormats::new(&[TAB_DND_MIME])),
-        gtk::gdk::DragAction::MOVE,
+    #[cfg(target_os = "macos")]
+    install_macos_tab_split_drag_fallback(
+        &drag_widget,
+        tab,
+        pane_id,
+        surface,
+        callbacks,
+        saw_tab_drop_target.clone(),
+        committed_tab_drop.clone(),
+        opened_new_window.clone(),
     );
+
+    let drop_target =
+        gtk::DropTargetAsync::new(Some(tab_dnd_content_formats()), gtk::gdk::DragAction::MOVE);
     drop_target.connect_accept(|target, drop| {
-        if drop.formats().contain_mime_type(TAB_DND_MIME) {
+        if tab_dnd_formats_accept_payload(&drop.formats()) {
             true
         } else {
             target.reject_drop(drop);
@@ -1665,45 +1778,13 @@ fn attach_tab_dnd_handlers(
         let move_to_pane_cb = move_to_pane_cb.clone();
         let position_of_surface_cb = position_of_surface_cb.clone();
         gtk::glib::MainContext::default().spawn_local(async move {
-            let (stream, mime_type) = match drop
-                .read_future(&[TAB_DND_MIME], gtk::glib::Priority::default())
-                .await
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::warn!(error = %e, "tab drop: failed to read payload");
-                    drop.finish(gtk::gdk::DragAction::empty());
-                    return;
-                }
-            };
-            if mime_type.as_str() != TAB_DND_MIME {
-                tracing::warn!(mime = %mime_type, "tab drop: unexpected payload mime type");
-                drop.finish(gtk::gdk::DragAction::empty());
-                return;
-            }
-            let bytes = match stream
-                .read_bytes_future(TAB_DND_PAYLOAD_MAX, gtk::glib::Priority::default())
-                .await
-            {
-                Ok(bytes) => bytes,
-                Err(e) => {
-                    tracing::warn!(error = %e, "tab drop: failed to read payload bytes");
-                    drop.finish(gtk::gdk::DragAction::empty());
-                    return;
-                }
-            };
-            let payload = match std::str::from_utf8(bytes.as_ref()) {
+            let payload = match read_tab_dnd_payload_from_drop(&drop).await {
                 Ok(payload) => payload,
-                Err(e) => {
-                    tracing::warn!(error = %e, "tab drop: payload was not UTF-8");
+                Err(error) => {
+                    tracing::warn!(error = %error, "tab drop: failed to read payload");
                     drop.finish(gtk::gdk::DragAction::empty());
                     return;
                 }
-            };
-            let Ok(payload) = parse_tab_dnd_payload(payload) else {
-                tracing::warn!(payload = %payload, "tab drop: payload invalid");
-                drop.finish(gtk::gdk::DragAction::empty());
-                return;
             };
             let src_pane = payload.src_pane;
             let src_surface = payload.src_surface;
@@ -1783,6 +1864,82 @@ fn attach_tab_dnd_handlers(
     tab.add_controller(drop_target);
 }
 
+#[cfg(target_os = "macos")]
+fn install_macos_tab_split_drag_fallback(
+    drag_widget: &gtk::Widget,
+    tab: &gtk::Box,
+    pane_id: PaneId,
+    surface: &PaneSurface,
+    callbacks: &PaneCallbacks,
+    saw_tab_drop_target: Rc<Cell<bool>>,
+    committed_tab_drop: Rc<Cell<bool>>,
+    opened_new_window: Rc<Cell<bool>>,
+) {
+    let gesture = gtk::GestureDrag::new();
+    gesture.set_propagation_phase(gtk::PropagationPhase::Capture);
+    gesture.set_button(gtk::gdk::BUTTON_PRIMARY);
+
+    let tab_for_begin = tab.clone();
+    let saw_target_for_begin = saw_tab_drop_target.clone();
+    let committed_for_begin = committed_tab_drop.clone();
+    let opened_for_begin = opened_new_window.clone();
+    gesture.connect_drag_begin(move |_, _, _| {
+        saw_target_for_begin.set(false);
+        committed_for_begin.set(false);
+        opened_for_begin.set(false);
+        tab_for_begin.set_opacity(0.4);
+        tab_for_begin.add_css_class("flowmux-pane-tab-dragging");
+    });
+
+    let tab_for_end = tab.clone();
+    let split_cb = callbacks.on_split_surface_into_pane.clone();
+    let surface_model = surface.clone();
+    let surface_id = surface.id;
+    gesture.connect_drag_end(move |_, dx, dy| {
+        tab_for_end.set_opacity(1.0);
+        tab_for_end.remove_css_class("flowmux-pane-tab-dragging");
+        if committed_tab_drop.get() || opened_new_window.get() {
+            return;
+        }
+        let Some(direction) = tab_drag_split_direction_from_delta(dx, dy) else {
+            return;
+        };
+        saw_tab_drop_target.set(true);
+        committed_tab_drop.set(true);
+        opened_new_window.set(true);
+        tracing::info!(
+            %pane_id,
+            %surface_id,
+            ?direction,
+            dx,
+            dy,
+            "macOS tab drag fallback committing split"
+        );
+        (split_cb.borrow_mut())(
+            pane_id,
+            surface_id,
+            Some(surface_model.clone()),
+            pane_id,
+            direction,
+        );
+    });
+
+    drag_widget.add_controller(gesture);
+}
+
+fn tab_drag_split_direction_from_delta(dx: f64, dy: f64) -> Option<SplitDirection> {
+    const MIN_DRAG_DISTANCE: f64 = 80.0;
+    let right = dx >= MIN_DRAG_DISTANCE;
+    let down = dy >= MIN_DRAG_DISTANCE;
+    match (right, down) {
+        (false, false) => None,
+        (true, false) => Some(SplitDirection::Vertical),
+        (false, true) => Some(SplitDirection::Horizontal),
+        (true, true) if dy > dx => Some(SplitDirection::Horizontal),
+        (true, true) => Some(SplitDirection::Vertical),
+    }
+}
+
 /// Which pane-body region a tab drag is over, deciding the drop outcome and the
 /// translucent preview shown on the pane.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1854,7 +2011,7 @@ fn attach_pane_body_dnd(
         motion.connect_motion(move |motion, x, y| {
             if motion
                 .drop()
-                .is_some_and(|drop| drop.formats().contain_mime_type(TAB_DND_MIME))
+                .is_some_and(|drop| tab_dnd_formats_accept_payload(&drop.formats()))
             {
                 saw_drop_target.set(true);
             }
@@ -1898,13 +2055,11 @@ fn attach_pane_body_dnd(
     }
     widget.add_controller(motion);
 
-    let drop_target = gtk::DropTargetAsync::new(
-        Some(gtk::gdk::ContentFormats::new(&[TAB_DND_MIME])),
-        gtk::gdk::DragAction::MOVE,
-    );
+    let drop_target =
+        gtk::DropTargetAsync::new(Some(tab_dnd_content_formats()), gtk::gdk::DragAction::MOVE);
     drop_target.set_propagation_phase(gtk::PropagationPhase::Capture);
     drop_target.connect_accept(|target, drop| {
-        if drop.formats().contain_mime_type(TAB_DND_MIME) {
+        if tab_dnd_formats_accept_payload(&drop.formats()) {
             true
         } else {
             target.reject_drop(drop);
@@ -1935,37 +2090,13 @@ fn attach_pane_body_dnd(
         let move_to_pane_cb = move_to_pane_cb.clone();
         let split_cb = split_cb.clone();
         gtk::glib::MainContext::default().spawn_local(async move {
-            let (stream, mime_type) = match drop
-                .read_future(&[TAB_DND_MIME], gtk::glib::Priority::default())
-                .await
-            {
-                Ok(v) => v,
-                Err(_) => {
+            let payload = match read_tab_dnd_payload_from_drop(&drop).await {
+                Ok(payload) => payload,
+                Err(error) => {
+                    tracing::warn!(error = %error, "pane-body tab drop: failed to read payload");
                     drop.finish(gtk::gdk::DragAction::empty());
                     return;
                 }
-            };
-            if mime_type.as_str() != TAB_DND_MIME {
-                drop.finish(gtk::gdk::DragAction::empty());
-                return;
-            }
-            let bytes = match stream
-                .read_bytes_future(TAB_DND_PAYLOAD_MAX, gtk::glib::Priority::default())
-                .await
-            {
-                Ok(bytes) => bytes,
-                Err(_) => {
-                    drop.finish(gtk::gdk::DragAction::empty());
-                    return;
-                }
-            };
-            let Ok(payload) = std::str::from_utf8(bytes.as_ref()) else {
-                drop.finish(gtk::gdk::DragAction::empty());
-                return;
-            };
-            let Ok(payload) = parse_tab_dnd_payload(payload) else {
-                drop.finish(gtk::gdk::DragAction::empty());
-                return;
             };
             let src_pane = payload.src_pane;
             let src_surface = payload.src_surface;

@@ -4,6 +4,7 @@
 //! Boots libadwaita, brings up the IPC server and the state store on a
 //! tokio runtime, and wires GTK-affecting verbs to the GTK main loop
 //! through an [`async_channel`] bridge.
+#![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
 mod bridge;
 mod builtin_icons;

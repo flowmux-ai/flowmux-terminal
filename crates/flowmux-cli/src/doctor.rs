@@ -281,7 +281,7 @@ fn skill_detail(status: &agent::DoctorStatus, path: &Path, agent_present: bool) 
             format!("{} (missing — `flowmux fix` installs)", path.display())
         }
         agent::DoctorStatus::Missing => {
-            format!("agent not installed; will install when you run the agent")
+            "agent not installed; will install when you run the agent".to_string()
         }
         agent::DoctorStatus::Error(e) => format!("{}: {e}", path.display()),
     }
@@ -324,11 +324,7 @@ async fn section_daemon(socket: Option<PathBuf>) -> Section {
 
     let mut entries = vec![Entry {
         name: "socket".into(),
-        status: if resolved.exists() {
-            Status::Info
-        } else {
-            Status::Info
-        },
+        status: Status::Info,
         detail: resolved.display().to_string(),
     }];
 

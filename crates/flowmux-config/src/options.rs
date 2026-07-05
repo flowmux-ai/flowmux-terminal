@@ -59,10 +59,11 @@ pub const CURSOR_BLINK_INTERVAL_DEFAULT: u32 = 530;
 /// Web view engine to use for new browser tabs. At this stage every variant
 /// falls back to WebKitGTK; external engine spawning is a later step. The
 /// selected value is still persisted so the future wiring can use it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BrowserEngine {
     /// In-pane WebKitGTK (default).
+    #[default]
     Webkit,
     /// Chromium family.
     Chrome,
@@ -70,12 +71,6 @@ pub enum BrowserEngine {
     Firefox,
     /// User-defined external engine.
     Custom { name: String },
-}
-
-impl Default for BrowserEngine {
-    fn default() -> Self {
-        Self::Webkit
-    }
 }
 
 impl BrowserEngine {
@@ -549,8 +544,10 @@ mod tests {
 
     #[test]
     fn focus_border_color_or_default_protects_callers() {
-        let mut opts = Options::default();
-        opts.focus_border_color = "garbage".into();
+        let opts = Options {
+            focus_border_color: "garbage".into(),
+            ..Default::default()
+        };
         assert_eq!(opts.focus_border_color_or_default(), "#fff4b3");
     }
 
@@ -663,7 +660,10 @@ mod tests {
         // The user expectation modeled after every mainstream browser is to
         // stay signed in across quit/relaunch, so the option ships enabled.
         assert!(Options::default().persist_browser_session);
-        assert!(PERSIST_BROWSER_SESSION_DEFAULT);
+        assert_eq!(
+            Options::default().persist_browser_session,
+            PERSIST_BROWSER_SESSION_DEFAULT
+        );
     }
 
     #[test]

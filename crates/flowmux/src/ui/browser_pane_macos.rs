@@ -23,7 +23,7 @@ use objc2_web_kit::{
 };
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -627,7 +627,7 @@ fn load_uri_native(web_view: &WKWebView, url: &str) {
 
 unsafe fn save_nsimage_to_png(
     image: &objc2_app_kit::NSImage,
-    path: &PathBuf,
+    path: &Path,
 ) -> Result<String, String> {
     let tiff = image
         .TIFFRepresentation()

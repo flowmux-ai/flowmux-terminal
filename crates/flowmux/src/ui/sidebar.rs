@@ -20,7 +20,9 @@
 
 use crate::bridge::{Bridge, GtkCommand};
 use crate::notifications::{NotificationEntry, NotificationStore};
-use crate::ui::workspace_view::{parse_tab_dnd_payload, TAB_DND_MIME, TAB_DND_PAYLOAD_MAX};
+use crate::ui::workspace_view::{
+    read_tab_dnd_payload_from_drop, tab_dnd_content_formats, tab_dnd_formats_accept_payload,
+};
 use flowmux_core::{AgentStatus, NotificationLevel, PrState, Workspace, WorkspaceId};
 use gtk::prelude::*;
 use std::cell::RefCell;
@@ -29,6 +31,31 @@ use std::rc::Rc;
 use tokio::sync::oneshot;
 
 type RowsCell = Rc<RefCell<Vec<(WorkspaceId, gtk::ListBoxRow)>>>;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct WorkspaceRowDetails {
+    pub(crate) agent_blocks: Vec<WorkspaceRowAgentBlock>,
+    pub(crate) path_lines: Vec<String>,
+}
+
+impl WorkspaceRowDetails {
+    pub(crate) fn path_only(lines: &[String]) -> Self {
+        Self {
+            agent_blocks: Vec::new(),
+            path_lines: lines.iter().take(3).cloned().collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorkspaceRowAgentBlock {
+    pub(crate) agent_name: String,
+    pub(crate) status: AgentStatus,
+    pub(crate) seen: bool,
+    pub(crate) status_text: String,
+    pub(crate) path: Option<String>,
+    pub(crate) overflow_count: usize,
+}
 
 #[derive(Clone)]
 pub struct Sidebar {
@@ -44,12 +71,11 @@ pub struct Sidebar {
     /// rows, so this map keeps membership idempotent across redraws.
     agent_status: Rc<RefCell<HashMap<WorkspaceId, AgentStatus>>>,
     bridge: Bridge,
-    /// Last computed subtitle lines per workspace, capped at 3 lines.
-    /// Kept so paths that do not know subtitle data, such as rename or color
-    /// changes, can redraw a row without losing its subtitles. WindowController
-    /// updates this via [`Sidebar::upsert_with_subtitles`] after
-    /// sync_workspace_label.
-    subtitle_cache: Rc<RefCell<HashMap<WorkspaceId, Vec<String>>>>,
+    /// Last computed row detail per workspace. Kept so paths that do not know
+    /// subtitle data, such as rename or color changes, can redraw a row without
+    /// losing its current path/agent details. WindowController updates this via
+    /// [`Sidebar::upsert_with_details`] after sync_workspace_label.
+    subtitle_cache: Rc<RefCell<HashMap<WorkspaceId, WorkspaceRowDetails>>>,
     /// Live, ordered (id, name) snapshot mirroring the visible rows. Read
     /// synchronously by the pane tab "Move" submenu so it reflects the current
     /// workspace set and names at click time. Kept in sync by `upsert_inner`,
@@ -246,22 +272,18 @@ impl Sidebar {
 
     /// Add or redraw a workspace row using cached subtitles. Used by paths
     /// that do not know subtitle data, such as rename or color changes; the
-    /// subtitles stay at the last value supplied to [`Self::upsert_with_subtitles`].
+    /// subtitles stay at the last value supplied to [`Self::upsert_with_details`].
     pub fn upsert(&self, ws: &Workspace) {
         let cached = self.subtitle_cache.borrow().get(&ws.id).cloned();
-        let lines = cached.unwrap_or_default();
-        self.upsert_inner(ws, &lines);
+        let details = cached.unwrap_or_default();
+        self.upsert_inner(ws, &details);
     }
 
-    /// Add or update a workspace row while supplying subtitle lines. Lines are
-    /// capped at 3, and an empty list removes the subtitle area. Repeated calls
-    /// for the same workspace replace the row content with the new subtitles.
-    pub fn upsert_with_subtitles(&self, ws: &Workspace, lines: &[String]) {
-        let trimmed: Vec<String> = lines.iter().take(3).cloned().collect();
+    pub(crate) fn upsert_with_details(&self, ws: &Workspace, details: WorkspaceRowDetails) {
         self.subtitle_cache
             .borrow_mut()
-            .insert(ws.id, trimmed.clone());
-        self.upsert_inner(ws, &trimmed);
+            .insert(ws.id, details.clone());
+        self.upsert_inner(ws, &details);
     }
 
     /// Live, ordered (id, name) snapshot of the side-panel workspaces. Read by
@@ -270,7 +292,7 @@ impl Sidebar {
         self.titles.clone()
     }
 
-    fn upsert_inner(&self, ws: &Workspace, subtitles: &[String]) {
+    fn upsert_inner(&self, ws: &Workspace, details: &WorkspaceRowDetails) {
         {
             // Use the displayed title (custom name, else folder-derived name) so
             // the "Move" submenu matches what the side panel shows, including
@@ -287,7 +309,7 @@ impl Sidebar {
         if let Some((_, row)) = rows.iter().find(|(id, _)| *id == ws.id).cloned() {
             row.set_child(Some(&row_widget(
                 ws,
-                subtitles,
+                details,
                 self.on_close.clone(),
                 self.bridge.clone(),
             )));
@@ -298,7 +320,7 @@ impl Sidebar {
         let row = gtk::ListBoxRow::new();
         row.set_child(Some(&row_widget(
             ws,
-            subtitles,
+            details,
             self.on_close.clone(),
             self.bridge.clone(),
         )));
@@ -428,11 +450,20 @@ impl Sidebar {
     }
 
     /// Expose a cache copy so scenario tests can verify subtitle lines passed
-    /// to [`Self::upsert_with_subtitles`]. The side-panel row widget tree is a
+    /// to [`Self::upsert_with_details`]. The side-panel row widget tree is a
     /// GTK object and awkward to read directly, so the cache is the source of truth.
     #[cfg(test)]
     #[cfg_attr(all(test, target_os = "macos"), allow(dead_code))]
     pub(crate) fn cached_subtitles(&self, id: WorkspaceId) -> Option<Vec<String>> {
+        self.subtitle_cache
+            .borrow()
+            .get(&id)
+            .map(|details| details.path_lines.clone())
+    }
+
+    #[cfg(test)]
+    #[cfg_attr(all(test, target_os = "macos"), allow(dead_code))]
+    pub(crate) fn cached_details(&self, id: WorkspaceId) -> Option<WorkspaceRowDetails> {
         self.subtitle_cache.borrow().get(&id).cloned()
     }
 
@@ -811,13 +842,11 @@ fn attach_dnd_handlers(row: &gtk::ListBoxRow, id: WorkspaceId, bridge: Bridge, r
 /// keep dragging into one of its panes), and releasing on the row moves the tab
 /// to the last position of the workspace's first pane.
 fn attach_tab_drop_to_row(row: &gtk::ListBoxRow, ws_id: WorkspaceId, bridge: Bridge) {
-    let drop_target = gtk::DropTargetAsync::new(
-        Some(gtk::gdk::ContentFormats::new(&[TAB_DND_MIME])),
-        gtk::gdk::DragAction::MOVE,
-    );
+    let drop_target =
+        gtk::DropTargetAsync::new(Some(tab_dnd_content_formats()), gtk::gdk::DragAction::MOVE);
     let bridge_accept = bridge.clone();
     drop_target.connect_accept(move |target, drop| {
-        if drop.formats().contain_mime_type(TAB_DND_MIME) {
+        if tab_dnd_formats_accept_payload(&drop.formats()) {
             let bridge = bridge_accept.clone();
             gtk::glib::MainContext::default().spawn_local(async move {
                 let _ = bridge
@@ -836,37 +865,13 @@ fn attach_tab_drop_to_row(row: &gtk::ListBoxRow, ws_id: WorkspaceId, bridge: Bri
         let drop = drop.clone();
         let bridge = bridge_drop.clone();
         gtk::glib::MainContext::default().spawn_local(async move {
-            let (stream, mime_type) = match drop
-                .read_future(&[TAB_DND_MIME], gtk::glib::Priority::default())
-                .await
-            {
-                Ok(v) => v,
-                Err(_) => {
+            let payload = match read_tab_dnd_payload_from_drop(&drop).await {
+                Ok(payload) => payload,
+                Err(error) => {
+                    tracing::warn!(error = %error, "sidebar tab drop: failed to read payload");
                     drop.finish(gtk::gdk::DragAction::empty());
                     return;
                 }
-            };
-            if mime_type.as_str() != TAB_DND_MIME {
-                drop.finish(gtk::gdk::DragAction::empty());
-                return;
-            }
-            let bytes = match stream
-                .read_bytes_future(TAB_DND_PAYLOAD_MAX, gtk::glib::Priority::default())
-                .await
-            {
-                Ok(bytes) => bytes,
-                Err(_) => {
-                    drop.finish(gtk::gdk::DragAction::empty());
-                    return;
-                }
-            };
-            let Ok(payload) = std::str::from_utf8(bytes.as_ref()) else {
-                drop.finish(gtk::gdk::DragAction::empty());
-                return;
-            };
-            let Ok(payload) = parse_tab_dnd_payload(payload) else {
-                drop.finish(gtk::gdk::DragAction::empty());
-                return;
             };
             let src_pane = payload.src_pane;
             let surface = payload.src_surface;
@@ -889,7 +894,7 @@ fn attach_tab_drop_to_row(row: &gtk::ListBoxRow, ws_id: WorkspaceId, bridge: Bri
 
 fn row_widget(
     ws: &Workspace,
-    subtitles: &[String],
+    details: &WorkspaceRowDetails,
     on_close: Rc<dyn Fn(WorkspaceId)>,
     bridge: Bridge,
 ) -> gtk::Widget {
@@ -911,7 +916,7 @@ fn row_widget(
         content.append(&color_bar(color));
     }
 
-    let meta = build_meta_column(ws, subtitles);
+    let meta = build_meta_column(ws, details);
     meta.set_hexpand(true);
     meta.set_margin_start(6);
     content.append(&meta);
@@ -1128,11 +1133,11 @@ fn apply_agent_status_class(row: &gtk::ListBoxRow, status: Option<AgentStatus>) 
     }
 }
 
-fn build_meta_column(ws: &Workspace, subtitles: &[String]) -> gtk::Box {
+fn build_meta_column(ws: &Workspace, details: &WorkspaceRowDetails) -> gtk::Box {
     // Layout:
     //   line 1: workspace display title, custom_title if present, otherwise name
-    //   line 2..4: up to 3 subtitle lines supplied by the caller, usually
-    //              shortened MRU pane cwd paths in .../A/B/C form.
+    //   line 2..: optional agent blocks followed by up to 3 shortened MRU cwd
+    //             paths in .../A/B/C form.
     //   optional aux: linked PR badge / listening ports.
     let v = gtk::Box::new(gtk::Orientation::Vertical, 1);
 
@@ -1143,19 +1148,29 @@ fn build_meta_column(ws: &Workspace, subtitles: &[String]) -> gtk::Box {
     title.add_css_class("heading");
     v.append(&title);
 
-    for (i, line) in subtitles.iter().take(3).enumerate() {
-        let label = gtk::Label::new(Some(line.as_str()));
-        label.set_halign(gtk::Align::Start);
-        label.set_xalign(0.0);
-        label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
-        label.add_css_class("caption");
-        label.add_css_class("dim-label");
-        // Make the first subtitle, the MRU head, slightly stronger to indicate
-        // the terminal the user is currently viewing.
-        if i == 0 {
-            label.add_css_class("flowmux-sidebar-subtitle-primary");
+    for block in &details.agent_blocks {
+        v.append(&agent_block_header(block));
+        let status = gtk::Label::new(Some(block.status_text.as_str()));
+        status.set_halign(gtk::Align::Start);
+        status.set_xalign(0.0);
+        status.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        status.set_margin_start(18);
+        status.add_css_class("caption");
+        status.add_css_class("dim-label");
+        v.append(&status);
+
+        if let Some(path) = block.path.as_deref() {
+            let label = sidebar_path_label(path, false);
+            label.set_margin_start(18);
+            v.append(&label);
         }
-        v.append(&label);
+    }
+
+    for (i, line) in details.path_lines.iter().take(3).enumerate() {
+        v.append(&sidebar_path_label(
+            line.as_str(),
+            i == 0 && details.agent_blocks.is_empty(),
+        ));
     }
 
     // Auxiliary line: PR badge + listening ports (kept compact).
@@ -1193,6 +1208,72 @@ fn build_meta_column(ws: &Workspace, subtitles: &[String]) -> gtk::Box {
     }
 
     v
+}
+
+fn agent_block_header(block: &WorkspaceRowAgentBlock) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    row.set_halign(gtk::Align::Start);
+
+    let icon = gtk::Image::from_icon_name(agent_status_icon_name(block.status, block.seen));
+    icon.set_pixel_size(12);
+    icon.add_css_class(agent_status_css_class(block.status, block.seen));
+    row.append(&icon);
+
+    let label_text = agent_block_label_text(block);
+    let label = gtk::Label::new(Some(&label_text));
+    label.set_halign(gtk::Align::Start);
+    label.set_xalign(0.0);
+    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    label.add_css_class("caption");
+    label.add_css_class(agent_status_css_class(block.status, block.seen));
+    row.append(&label);
+
+    row
+}
+
+fn agent_block_label_text(block: &WorkspaceRowAgentBlock) -> String {
+    if block.overflow_count == 0 {
+        return block.agent_name.clone();
+    }
+    let suffix = if block.overflow_count == 1 {
+        "agent"
+    } else {
+        "agents"
+    };
+    format!("{} +{} {}", block.agent_name, block.overflow_count, suffix)
+}
+
+fn sidebar_path_label(line: &str, primary: bool) -> gtk::Label {
+    let label = gtk::Label::new(Some(line));
+    label.set_halign(gtk::Align::Start);
+    label.set_xalign(0.0);
+    label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+    label.add_css_class("caption");
+    label.add_css_class("dim-label");
+    if primary {
+        label.add_css_class("flowmux-sidebar-subtitle-primary");
+    }
+    label
+}
+
+fn agent_status_icon_name(status: AgentStatus, seen: bool) -> &'static str {
+    match status {
+        AgentStatus::Blocked => "dialog-warning-symbolic",
+        AgentStatus::Working => "process-working-symbolic",
+        AgentStatus::Done if !seen => "emblem-ok-symbolic",
+        AgentStatus::Done | AgentStatus::Idle => "media-playback-pause-symbolic",
+        AgentStatus::Unknown => "dialog-question-symbolic",
+    }
+}
+
+fn agent_status_css_class(status: AgentStatus, seen: bool) -> &'static str {
+    match status {
+        AgentStatus::Blocked => "flowmux-sidebar-agent-blocked",
+        AgentStatus::Working => "flowmux-sidebar-agent-working",
+        AgentStatus::Done if !seen => "flowmux-sidebar-agent-done",
+        AgentStatus::Done | AgentStatus::Idle => "flowmux-sidebar-agent-idle",
+        AgentStatus::Unknown => "flowmux-sidebar-agent-unknown",
+    }
 }
 
 #[cfg(test)]
@@ -1246,11 +1327,54 @@ mod tests {
 
         for n in 0..=3 {
             let lines: Vec<String> = (0..n).map(|i| format!(".../line{i}")).collect();
-            let _ = row_widget(&ws, &lines, on_close.clone(), bridge.clone());
+            let details = WorkspaceRowDetails::path_only(&lines);
+            let _ = row_widget(&ws, &details, on_close.clone(), bridge.clone());
         }
-        // Even with 4 lines, build_meta_column truncates to 3 via take(3).
+        // Even with 4 lines, WorkspaceRowDetails truncates to 3.
         let four = vec!["a".into(), "b".into(), "c".into(), "d-overflow".into()];
-        let _ = row_widget(&ws, &four, on_close, bridge);
+        let details = WorkspaceRowDetails::path_only(&four);
+        let _ = row_widget(&ws, &details, on_close, bridge);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[gtk::test]
+    fn row_widget_builds_with_agent_blocks_and_paths() {
+        if gtk::init().is_err() {
+            return;
+        }
+        let ws = ws_with_active_terminal_cwd(Some(PathBuf::from("/home/u/dev/os/flowmux")));
+        let bridge = crate::bridge::Bridge::new().0;
+        let on_close: Rc<dyn Fn(WorkspaceId)> = Rc::new(|_| {});
+        let details = WorkspaceRowDetails {
+            agent_blocks: vec![WorkspaceRowAgentBlock {
+                agent_name: "codex".into(),
+                status: AgentStatus::Working,
+                seen: true,
+                status_text: "running tests".into(),
+                path: Some(".../dev/os/flowmux".into()),
+                overflow_count: 1,
+            }],
+            path_lines: vec![".../fallback/path".into()],
+        };
+        let _ = row_widget(&ws, &details, on_close, bridge);
+    }
+
+    #[test]
+    fn agent_block_label_text_marks_overflow_count_with_agent_word() {
+        let mut block = WorkspaceRowAgentBlock {
+            agent_name: "claude".into(),
+            status: AgentStatus::Working,
+            seen: true,
+            status_text: "running tests".into(),
+            path: None,
+            overflow_count: 0,
+        };
+
+        assert_eq!(agent_block_label_text(&block), "claude");
+        block.overflow_count = 1;
+        assert_eq!(agent_block_label_text(&block), "claude +1 agent");
+        block.overflow_count = 3;
+        assert_eq!(agent_block_label_text(&block), "claude +3 agents");
     }
 
     #[gtk::test]

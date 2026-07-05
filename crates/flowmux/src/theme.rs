@@ -383,12 +383,31 @@ paned > separator {{
     animation: flowmux-breathe 2.6s ease-in-out infinite;
 }}
 .navigation-sidebar row.flowmux-agent-blocked {{
-    background-color: rgba(59, 130, 246, 0.16);
-    border-left: 3px solid rgba(59, 130, 246, 0.85);
+    background-color: rgba(239, 68, 68, 0.16);
+    border-left: 3px solid rgba(239, 68, 68, 0.85);
 }}
 .navigation-sidebar row.flowmux-agent-done {{
-    background-color: rgba(34, 197, 94, 0.14);
-    border-left: 3px solid rgba(34, 197, 94, 0.78);
+    background-color: rgba(59, 130, 246, 0.14);
+    border-left: 3px solid rgba(59, 130, 246, 0.78);
+}}
+.navigation-sidebar row label.flowmux-sidebar-agent-blocked,
+.navigation-sidebar row image.flowmux-sidebar-agent-blocked {{
+    color: rgba(239, 68, 68, 0.95);
+}}
+.navigation-sidebar row label.flowmux-sidebar-agent-working,
+.navigation-sidebar row image.flowmux-sidebar-agent-working {{
+    color: rgba(245, 158, 11, 0.95);
+}}
+.navigation-sidebar row label.flowmux-sidebar-agent-done,
+.navigation-sidebar row image.flowmux-sidebar-agent-done {{
+    color: rgba(59, 130, 246, 0.95);
+}}
+.navigation-sidebar row label.flowmux-sidebar-agent-idle,
+.navigation-sidebar row image.flowmux-sidebar-agent-idle,
+.navigation-sidebar row label.flowmux-sidebar-agent-unknown,
+.navigation-sidebar row image.flowmux-sidebar-agent-unknown {{
+    color: {fg};
+    opacity: 0.72;
 }}
 .navigation-sidebar row.flowmux-dragging {{
     opacity: 0.4;
@@ -622,6 +641,28 @@ mod tests {
         assert!(
             tail.contains("border-top: 2px solid"),
             "active-tab top stripe must use a 2px top border"
+        );
+    }
+
+    #[test]
+    fn sidebar_agent_state_colors_match_status_contract() {
+        let css = sample_css();
+        assert!(
+            css.contains(".navigation-sidebar row.flowmux-agent-blocked")
+                && css.contains("rgba(239, 68, 68, 0.16)")
+                && css.contains("rgba(239, 68, 68, 0.95)"),
+            "blocked agent state must use red row and inline status colors"
+        );
+        assert!(
+            css.contains(".navigation-sidebar row label.flowmux-sidebar-agent-working")
+                && css.contains("rgba(245, 158, 11, 0.95)"),
+            "working agent inline status must use yellow"
+        );
+        assert!(
+            css.contains(".navigation-sidebar row.flowmux-agent-done")
+                && css.contains("rgba(59, 130, 246, 0.14)")
+                && css.contains("rgba(59, 130, 246, 0.95)"),
+            "unseen done agent state must use blue row and inline status colors"
         );
     }
 }

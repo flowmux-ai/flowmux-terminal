@@ -138,7 +138,7 @@ async fn state_store_concurrent_churn_holds_invariants() {
         let store = Arc::clone(&store);
         let targets = Arc::clone(&targets);
         handles.push(tokio::spawn(async move {
-            let mut rng = Xs::new(0xA11CE_0000 ^ (task_idx as u64));
+            let mut rng = Xs::new(0x000A_11CE_0000 ^ (task_idx as u64));
             let mut splits_ok = 0u32;
             for op in 0..OPS_PER_TASK {
                 let pick_idx = (rng.next_u64() as usize) % targets.len();

@@ -12,9 +12,9 @@
 //! Supported targets (mirroring cmux):
 //! - **Claude Code** — `~/.claude/settings.json` `hooks.{Stop,Notification}`.
 //! - **Codex CLI**   — `~/.codex/hooks.json` `Stop`, plus
-//!                     `~/.codex/config.toml` `[features] codex_hooks = true`.
+//!   `~/.codex/config.toml` `[features] codex_hooks = true`.
 //! - **OpenCode**    — `~/.config/opencode/plugins/flowmux-session.mjs`
-//!                     plus `opencode.json` `plugin` entry.
+//!   plus `opencode.json` `plugin` entry.
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};

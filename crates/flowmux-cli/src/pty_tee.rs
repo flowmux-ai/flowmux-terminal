@@ -354,10 +354,8 @@ fn child_exec(slave: OwnedFd, argv: Vec<OsString>) -> ! {
     }
 
     for target in [libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO] {
-        if slave_fd != target {
-            if unsafe { libc::dup2(slave_fd, target) } < 0 {
-                unsafe { libc::_exit(125) };
-            }
+        if slave_fd != target && unsafe { libc::dup2(slave_fd, target) } < 0 {
+            unsafe { libc::_exit(125) };
         }
     }
     if slave_fd > libc::STDERR_FILENO {
@@ -477,14 +475,9 @@ fn flush_pending(pending: &Rc<RefCell<Vec<String>>>, tx: &mpsc::Sender<NotifyEve
 
 fn drain_inner<F: FnMut(&str)>(master_fd: RawFd, extractor: &mut OscExtractor<F>) {
     let mut buf = [0u8; 4096];
-    loop {
-        match read_some(master_fd, &mut buf) {
-            ReadOutcome::Data(slice) => {
-                extractor.feed(slice);
-                let _ = write_all(libc::STDOUT_FILENO, slice);
-            }
-            _ => break,
-        }
+    while let ReadOutcome::Data(slice) = read_some(master_fd, &mut buf) {
+        extractor.feed(slice);
+        let _ = write_all(libc::STDOUT_FILENO, slice);
     }
 }
 

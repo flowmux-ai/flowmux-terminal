@@ -209,6 +209,30 @@ impl Workspace {
                 .filter_map(|surface| surface.root_pane.agent_status_rollup()),
         )
     }
+
+    pub fn collect_agent_blocks(&self, mru: &[PaneId]) -> Vec<WorkspaceAgentBlock> {
+        let mut blocks = Vec::new();
+        for surface in &self.surfaces {
+            surface.root_pane.collect_agent_blocks(&mut blocks);
+        }
+        blocks.sort_by(|a, b| {
+            let a_mru = mru
+                .iter()
+                .position(|pane| *pane == a.pane)
+                .unwrap_or(usize::MAX);
+            let b_mru = mru
+                .iter()
+                .position(|pane| *pane == b.pane)
+                .unwrap_or(usize::MAX);
+            b.status
+                .rollup_rank()
+                .cmp(&a.status.rollup_rank())
+                .then_with(|| a_mru.cmp(&b_mru))
+                .then_with(|| a.agent_name.cmp(&b.agent_name))
+                .then_with(|| a.surface.to_string().cmp(&b.surface.to_string()))
+        });
+        blocks
+    }
 }
 
 pub fn rollup_agent_statuses(
@@ -488,6 +512,8 @@ impl Pane {
             } => {
                 let visible = workspace_visible && *active == surface_id;
                 let surface = surfaces.iter_mut().find(|s| s.id == surface_id)?;
+                let mut report = report;
+                normalize_agent_report_name_for_surface_title(&mut report, &surface.title);
                 match surface.agent.as_mut() {
                     Some(agent) => Some(agent.apply_report(report, visible)),
                     None => {
@@ -518,12 +544,14 @@ impl Pane {
             } => {
                 let visible = workspace_visible && *active == surface_id;
                 let surface = surfaces.iter_mut().find(|s| s.id == surface_id)?;
-                let name = surface
-                    .agent
-                    .as_ref()
-                    .map(|agent| agent.name.clone())
-                    .or_else(|| agent_name.map(str::to_string))?;
+                let title_agent_name = detect_agent_name_from_surface_title(&surface.title);
+                let incoming_name = title_agent_name.or(agent_name).map(str::to_string);
+                let existing_agent = surface.agent.as_ref();
+                let incoming_is_different_agent = incoming_name
+                    .as_deref()
+                    .is_some_and(|name| existing_agent.is_some_and(|agent| agent.name != name));
                 if source == "flowmux:screen"
+                    && !incoming_is_different_agent
                     && surface.agent.as_ref().is_some_and(|agent| {
                         agent.name == "claude" && agent.source.as_deref() == Some("flowmux:hook")
                     })
@@ -531,6 +559,7 @@ impl Pane {
                     return Some(false);
                 }
                 if source == "flowmux:screen"
+                    && !incoming_is_different_agent
                     && status == AgentStatus::Idle
                     && surface.agent.as_ref().is_some_and(|agent| {
                         matches!(agent.status, AgentStatus::Working | AgentStatus::Blocked)
@@ -539,6 +568,8 @@ impl Pane {
                 {
                     return Some(false);
                 }
+                let name = incoming_name
+                    .or_else(|| surface.agent.as_ref().map(|agent| agent.name.clone()))?;
                 let report = AgentStatusReport {
                     name,
                     status: Some(status),
@@ -658,6 +689,47 @@ impl Pane {
             Pane::Split { first, second, .. } => {
                 first.collect_agent_presences(out);
                 second.collect_agent_presences(out);
+            }
+        }
+    }
+
+    pub fn collect_agent_blocks(&self, out: &mut Vec<WorkspaceAgentBlock>) {
+        match self {
+            Pane::Leaf {
+                id,
+                content: PaneContent::Tabs { surfaces, .. },
+            } => {
+                for surface in surfaces {
+                    let Some(agent) = &surface.agent else {
+                        continue;
+                    };
+                    let status = agent.public_status();
+                    if status == AgentStatus::Unknown {
+                        continue;
+                    }
+                    let cwd = match &surface.kind {
+                        SurfaceKind::Terminal { cwd: Some(cwd), .. } => {
+                            Some(cwd.display().to_string())
+                        }
+                        SurfaceKind::Terminal { cwd: None, .. } | SurfaceKind::Browser { .. } => {
+                            None
+                        }
+                    };
+                    out.push(WorkspaceAgentBlock {
+                        pane: *id,
+                        surface: surface.id,
+                        agent_name: agent.name.clone(),
+                        status,
+                        seen: agent.seen,
+                        status_text: agent.status_text().map(str::to_string),
+                        cwd,
+                    });
+                }
+            }
+            Pane::Leaf { .. } => {}
+            Pane::Split { first, second, .. } => {
+                first.collect_agent_blocks(out);
+                second.collect_agent_blocks(out);
             }
         }
     }
@@ -1269,10 +1341,10 @@ fn split_leaf_descend(
                 },
             ) = (node, original)
             {
-                *first = Box::new(Pane::Leaf {
+                **first = Pane::Leaf {
                     id: target,
                     content: orig_content,
-                });
+                };
                 let new_id = match &**second {
                     Pane::Leaf { id, .. } => *id,
                     Pane::Split { .. } => unreachable!(),
@@ -1685,6 +1757,17 @@ impl AgentStatusReport {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceAgentBlock {
+    pub pane: PaneId,
+    pub surface: SurfaceId,
+    pub agent_name: String,
+    pub status: AgentStatus,
+    pub seen: bool,
+    pub status_text: Option<String>,
+    pub cwd: Option<String>,
+}
+
 /// An AI agent currently occupying a surface, with its live activity and
 /// (when known) the agent process PID used for liveness sweeps.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1753,6 +1836,17 @@ impl AgentPresence {
         }
     }
 
+    pub fn status_text(&self) -> Option<&str> {
+        self.custom_status
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+            .or_else(|| {
+                self.message
+                    .as_deref()
+                    .filter(|text| !text.trim().is_empty())
+            })
+    }
+
     /// Merge a hook/screen report into this presence. Returns `false` when the
     /// report was stale and should not be published.
     pub fn apply_report(&mut self, report: AgentStatusReport, visible: bool) -> bool {
@@ -1780,15 +1874,10 @@ impl AgentPresence {
         if report.session_id.is_some() {
             self.session_id = report.session_id;
         }
-        self.seen = if next != AgentStatus::Idle {
-            true
-        } else if AgentStatus::should_mark_unseen_on_idle(prev, next) && !visible {
-            false
-        } else if prev == AgentStatus::Idle && !self.seen && !visible {
-            false
-        } else {
-            true
-        };
+        let should_remain_unseen = !visible
+            && (AgentStatus::should_mark_unseen_on_idle(prev, next)
+                || (prev == AgentStatus::Idle && !self.seen));
+        self.seen = next != AgentStatus::Idle || !should_remain_unseen;
         true
     }
 
@@ -1860,6 +1949,9 @@ pub fn detect_agent_name_from_signals(
     screen_text: Option<&str>,
     osc_title: Option<&str>,
 ) -> Option<&'static str> {
+    if let Some(name) = osc_title.and_then(detect_agent_name_from_surface_title) {
+        return Some(name);
+    }
     let mut haystack = String::new();
     if let Some(title) = osc_title {
         haystack.push_str(title);
@@ -1878,9 +1970,36 @@ pub fn detect_agent_name_from_signals(
         Some("claude")
     } else if haystack.contains("codex") {
         Some("codex")
+    } else if contains_ascii_token(&haystack, "cline") {
+        Some("cline")
     } else {
         None
     }
+}
+
+fn normalize_agent_report_name_for_surface_title(report: &mut AgentStatusReport, title: &str) {
+    if let Some(name) = detect_agent_name_from_surface_title(title) {
+        report.name = name.to_string();
+    }
+}
+
+fn detect_agent_name_from_surface_title(title: &str) -> Option<&'static str> {
+    let lower = title.trim_start().to_ascii_lowercase();
+    if lower.starts_with("opencode")
+        || lower.starts_with("open code")
+        || lower.starts_with("oc |")
+        || lower.starts_with("oc|")
+    {
+        Some("opencode")
+    } else {
+        None
+    }
+}
+
+fn contains_ascii_token(haystack: &str, needle: &str) -> bool {
+    haystack
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .any(|part| part == needle)
 }
 
 fn is_braille_spinner(ch: char) -> bool {
@@ -3065,7 +3184,7 @@ mod tests {
         expected_active: SurfaceId,
         expected_order: &[SurfaceId],
     ) {
-        fn find_tabs<'a>(p: &'a Pane, target: PaneId) -> Option<&'a PaneContent> {
+        fn find_tabs(p: &Pane, target: PaneId) -> Option<&PaneContent> {
             match p {
                 Pane::Leaf { id, content } if *id == target => Some(content),
                 Pane::Leaf { .. } => None,
@@ -3529,6 +3648,185 @@ mod tests {
     }
 
     #[test]
+    fn hook_report_uses_opencode_name_when_surface_title_has_oc_prefix() {
+        let surface = PaneSurface::terminal("OC | greeting", None);
+        let surface_id = surface.id;
+        let mut pane = Pane::Leaf {
+            id: PaneId::new(),
+            content: PaneContent::Tabs {
+                active: surface_id,
+                surfaces: vec![surface],
+            },
+        };
+
+        assert_eq!(
+            pane.report_surface_agent(
+                surface_id,
+                AgentStatusReport {
+                    name: "claude".into(),
+                    status: Some(AgentStatus::Idle),
+                    activity: Some(AgentActivity::Idle),
+                    pid: None,
+                    source: Some("flowmux:hook".into()),
+                    seq: Some(1),
+                    message: None,
+                    custom_status: None,
+                    session_id: Some("ses-opencode".into()),
+                },
+                true,
+            ),
+            Some(true)
+        );
+        let Pane::Leaf {
+            content: PaneContent::Tabs { surfaces, .. },
+            ..
+        } = &pane
+        else {
+            panic!("expected leaf pane");
+        };
+        let agent = surfaces[0].agent.as_ref().unwrap();
+        assert_eq!(agent.name, "opencode");
+        assert_eq!(agent.source.as_deref(), Some("flowmux:hook"));
+    }
+
+    #[test]
+    fn agent_presence_status_text_prefers_custom_status_then_message() {
+        let mut presence = AgentPresence::new("codex", AgentActivity::Running, None);
+        presence.message = Some("running tests".into());
+        presence.custom_status = Some("reviewing patch".into());
+        assert_eq!(presence.status_text(), Some("reviewing patch"));
+
+        presence.custom_status = Some("   ".into());
+        assert_eq!(presence.status_text(), Some("running tests"));
+
+        presence.message = Some(" ".into());
+        assert_eq!(presence.status_text(), None);
+    }
+
+    fn terminal_surface_with_agent(
+        title: &str,
+        cwd: &str,
+        agent_name: &str,
+        status: AgentStatus,
+    ) -> PaneSurface {
+        let mut surface = PaneSurface::terminal(title, Some(std::path::PathBuf::from(cwd)));
+        let mut presence = AgentPresence::new(agent_name, status.to_activity(), None);
+        presence.status = status;
+        presence.custom_status = Some(format!("{agent_name} status"));
+        surface.agent = Some(presence);
+        surface
+    }
+
+    fn workspace_with_agent_leaves(leaves: Vec<(PaneId, PaneSurface)>) -> Workspace {
+        fn leaf(id: PaneId, surface: PaneSurface) -> Pane {
+            Pane::Leaf {
+                id,
+                content: PaneContent::Tabs {
+                    active: surface.id,
+                    surfaces: vec![surface],
+                },
+            }
+        }
+
+        let root = leaves
+            .into_iter()
+            .map(|(id, surface)| leaf(id, surface))
+            .reduce(|first, second| Pane::Split {
+                id: PaneId::new(),
+                direction: SplitDirection::Vertical,
+                ratio: 0.5,
+                first: Box::new(first),
+                second: Box::new(second),
+            })
+            .expect("workspace needs at least one leaf");
+
+        Workspace {
+            id: WorkspaceId::new(),
+            name: "agents".into(),
+            custom_title: None,
+            root_dir: "/tmp".into(),
+            git: None,
+            listening_ports: Vec::new(),
+            surfaces: vec![Surface {
+                id: SurfaceId::new(),
+                kind: SurfaceKind::Terminal {
+                    shell: None,
+                    cwd: None,
+                },
+                title: "main".into(),
+                root_pane: root,
+            }],
+            color: None,
+        }
+    }
+
+    #[test]
+    fn workspace_agent_blocks_sort_by_status_then_recent_focus() {
+        let working_old = PaneId::new();
+        let blocked = PaneId::new();
+        let working_recent = PaneId::new();
+        let ws = workspace_with_agent_leaves(vec![
+            (
+                working_old,
+                terminal_surface_with_agent("old", "/tmp/old", "codex", AgentStatus::Working),
+            ),
+            (
+                blocked,
+                terminal_surface_with_agent(
+                    "blocked",
+                    "/tmp/blocked",
+                    "claude",
+                    AgentStatus::Blocked,
+                ),
+            ),
+            (
+                working_recent,
+                terminal_surface_with_agent(
+                    "recent",
+                    "/tmp/recent",
+                    "opencode",
+                    AgentStatus::Working,
+                ),
+            ),
+        ]);
+
+        let blocks = ws.collect_agent_blocks(&[working_recent, working_old, blocked]);
+        assert_eq!(
+            blocks.iter().map(|block| block.pane).collect::<Vec<_>>(),
+            vec![blocked, working_recent, working_old]
+        );
+        assert_eq!(blocks[0].status, AgentStatus::Blocked);
+        assert_eq!(blocks[0].status_text.as_deref(), Some("claude status"));
+        assert_eq!(blocks[0].cwd.as_deref(), Some("/tmp/blocked"));
+    }
+
+    #[test]
+    fn workspace_agent_blocks_exclude_unknown_status() {
+        let unknown = PaneId::new();
+        let idle = PaneId::new();
+        let ws = workspace_with_agent_leaves(vec![
+            (
+                unknown,
+                terminal_surface_with_agent(
+                    "unknown",
+                    "/tmp/unknown",
+                    "codex",
+                    AgentStatus::Unknown,
+                ),
+            ),
+            (
+                idle,
+                terminal_surface_with_agent("idle", "/tmp/idle", "claude", AgentStatus::Idle),
+            ),
+        ]);
+
+        let blocks = ws.collect_agent_blocks(&[unknown, idle]);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].pane, idle);
+        assert_eq!(blocks[0].status, AgentStatus::Idle);
+    }
+
+    #[test]
     fn pane_mark_surface_seen_clears_done() {
         let mut surface = PaneSurface::terminal("agent", None);
         let surface_id = surface.id;
@@ -3578,6 +3876,87 @@ mod tests {
     }
 
     #[test]
+    fn screen_fallback_replaces_stale_claude_name_when_agent_signal_differs() {
+        for detected_agent in ["codex", "opencode", "cline"] {
+            let mut surface = PaneSurface::terminal("agent", None);
+            let surface_id = surface.id;
+            let mut presence = AgentPresence::new("claude", AgentActivity::Idle, None);
+            presence.source = Some("flowmux:hook".into());
+            presence.seq = Some(1);
+            surface.agent = Some(presence);
+            let mut pane = Pane::Leaf {
+                id: PaneId::new(),
+                content: PaneContent::Tabs {
+                    active: surface_id,
+                    surfaces: vec![surface],
+                },
+            };
+
+            assert_eq!(
+                pane.report_surface_agent_signal(
+                    surface_id,
+                    AgentStatus::Blocked,
+                    "flowmux:screen",
+                    Some(detected_agent),
+                    true,
+                ),
+                Some(true),
+                "{detected_agent} should replace stale claude presence"
+            );
+            let Pane::Leaf {
+                content: PaneContent::Tabs { surfaces, .. },
+                ..
+            } = &pane
+            else {
+                panic!("expected leaf pane");
+            };
+            let agent = surfaces[0].agent.as_ref().unwrap();
+            assert_eq!(agent.name, detected_agent);
+            assert_eq!(agent.status, AgentStatus::Blocked);
+            assert_eq!(agent.source.as_deref(), Some("flowmux:screen"));
+        }
+    }
+
+    #[test]
+    fn screen_fallback_uses_opencode_title_before_claude_screen_text() {
+        let mut surface = PaneSurface::terminal("OC | greeting", None);
+        let surface_id = surface.id;
+        let mut presence = AgentPresence::new("claude", AgentActivity::Idle, None);
+        presence.source = Some("flowmux:hook".into());
+        presence.seq = Some(1);
+        surface.agent = Some(presence);
+        let mut pane = Pane::Leaf {
+            id: PaneId::new(),
+            content: PaneContent::Tabs {
+                active: surface_id,
+                surfaces: vec![surface],
+            },
+        };
+
+        assert_eq!(
+            pane.report_surface_agent_signal(
+                surface_id,
+                AgentStatus::Blocked,
+                "flowmux:screen",
+                Some("claude"),
+                true,
+            ),
+            Some(true)
+        );
+        let Pane::Leaf {
+            content: PaneContent::Tabs { surfaces, .. },
+            ..
+        } = &pane
+        else {
+            panic!("expected leaf pane");
+        };
+        let agent = surfaces[0].agent.as_ref().unwrap();
+        assert_eq!(agent.name, "opencode");
+        assert_eq!(agent.status, AgentStatus::Blocked);
+        assert_eq!(agent.source.as_deref(), Some("flowmux:screen"));
+    }
+
+    #[test]
     fn agent_status_rollup_uses_blocked_done_working_idle_unknown_order() {
         assert_eq!(
             rollup_agent_statuses([
@@ -3622,6 +4001,10 @@ mod tests {
             Some("opencode")
         );
         assert_eq!(
+            detect_agent_name_from_signals(Some("Claude is thinking"), Some("OC | greeting")),
+            Some("opencode")
+        );
+        assert_eq!(
             detect_agent_name_from_signals(Some("Claude is thinking"), None),
             Some("claude")
         );
@@ -3629,6 +4012,11 @@ mod tests {
             detect_agent_name_from_signals(Some("Codex working"), None),
             Some("codex")
         );
+        assert_eq!(
+            detect_agent_name_from_signals(Some("Cline needs approval"), None),
+            Some("cline")
+        );
+        assert_eq!(detect_agent_name_from_signals(Some("decline"), None), None);
     }
 
     #[test]

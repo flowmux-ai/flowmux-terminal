@@ -1656,7 +1656,7 @@ fn move_to_trash(path: &Path) -> io::Result<()> {
     gio::File::for_path(path)
         .trash(None::<&gio::Cancellable>)
         .map(|_| ())
-        .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))
+        .map_err(|err| io::Error::other(err.to_string()))
 }
 
 fn permanently_delete_path(path: &Path) -> io::Result<()> {

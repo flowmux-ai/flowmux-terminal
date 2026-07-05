@@ -13,7 +13,7 @@ use crate::notifications::{
 use crate::theme::ResolvedTheme;
 use crate::ui::file_browser::{FileBrowserPaneState, FileBrowserPanel};
 use crate::ui::pane_terminal::PaneCallbacks;
-use crate::ui::sidebar::Sidebar;
+use crate::ui::sidebar::{Sidebar, WorkspaceRowAgentBlock, WorkspaceRowDetails};
 use crate::ui::workspace_view::{
     attach_surface_to_pane, build_surface, build_surface_tab_widget, solo_workspace_pane,
     split_pane_incremental, IncrementalSplitOutcome, MovingSurface, PaneRegistry, TornOffSurface,
@@ -22,13 +22,13 @@ use adw::prelude::*;
 use flowmux_config::cmux_json::{CmuxJson, CommandTarget, CustomCommand};
 use flowmux_core::{
     Pane, PaneContent, PaneId, PaneSurface, PlacementStrategy, SplitDirection, Surface, SurfaceId,
-    SurfaceKind, Workspace, WorkspaceId,
+    SurfaceKind, Workspace, WorkspaceAgentBlock, WorkspaceId,
 };
 use flowmux_daemon::StateStore;
 use flowmux_ipc::protocol::{BrowserWaitCondition, NotificationSummary};
 use gtk::glib;
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -1315,6 +1315,7 @@ impl WindowController {
                 self.apply_close_pane_incremental_or_rerender(workspace, pane)
                     .await;
                 self.focus_after_close(workspace, pane).await;
+                self.sync_workspace_label(workspace).await;
             }
         }
     }
@@ -2046,14 +2047,11 @@ impl WindowController {
             }
         }
 
-        // Subtitle lines: MRU first, then tree traversal fallback. Terminals use
-        // shortened cwd paths; browser tabs use "Browser-{tab name}".
-        let subtitle_lines = collect_subtitle_lines(&ws, &mru, 3);
-
         // Re-read the updated workspace from store before drawing the sidebar;
         // the local ws is stale after set_workspace_name.
         if let Some(ws) = self.store.get_workspace(ws_id).await {
-            self.sidebar.upsert_with_subtitles(&ws, &subtitle_lines);
+            let details = workspace_row_details(&ws, &mru);
+            self.sidebar.upsert_with_details(&ws, details);
         }
     }
 
@@ -2099,6 +2097,7 @@ impl WindowController {
             .await
         {
             self.sidebar.set_agent_status(ws_id, status);
+            self.sync_workspace_label(ws_id).await;
         }
     }
 
@@ -2580,6 +2579,7 @@ impl WindowController {
                         self.apply_close_pane_incremental_or_rerender(workspace, pane)
                             .await;
                         self.focus_after_close(workspace, pane).await;
+                        self.sync_workspace_label(workspace).await;
                         let _ = ack.send(Ok(()));
                     }
                     Some(flowmux_daemon::CloseOutcome::SurfaceRemoved { workspace }) => {
@@ -2590,6 +2590,7 @@ impl WindowController {
                         // not in the user's reset complaint scope.
                         if let Some(ws) = self.store.get_workspace(workspace).await {
                             self.rerender_workspace(&ws);
+                            self.sync_workspace_label(workspace).await;
                         }
                         let _ = ack.send(Ok(()));
                     }
@@ -2743,6 +2744,7 @@ impl WindowController {
                             self.refresh_workspace_solo(&ws);
                         }
                         self.refresh_window_title().await;
+                        self.sync_workspace_label(workspace).await;
                         let _ = ack.send(Ok(()));
                     }
                     Some(flowmux_daemon::CloseOutcome::PaneRemoved { workspace }) => {
@@ -2758,6 +2760,7 @@ impl WindowController {
                         // CloseFocused already calls focus_after_close in the
                         // same situation; keep the two close paths in sync.
                         self.focus_after_close(workspace, pane).await;
+                        self.sync_workspace_label(workspace).await;
                         let _ = ack.send(Ok(()));
                     }
                 }
@@ -3297,6 +3300,7 @@ impl WindowController {
             }
             GtkCommand::SetAgentStatus { workspace, status } => {
                 self.sidebar.set_agent_status(workspace, status);
+                self.sync_workspace_label(workspace).await;
             }
             GtkCommand::FocusWorkspaceAt { idx } => {
                 let snap = self.store.snapshot().await;
@@ -3356,7 +3360,8 @@ impl WindowController {
                     .terminals
                     .get(&surface)
                     .and_then(|t| t.current_dir());
-                let stored = match self.pane_registry.borrow().workspace_of_pane(pane) {
+                let workspace_for_pane = self.pane_registry.borrow().workspace_of_pane(pane);
+                let stored = match workspace_for_pane {
                     Some(workspace) => self
                         .store
                         .get_workspace(workspace)
@@ -3839,21 +3844,14 @@ impl WindowController {
         use gtk::graphene::Rect;
 
         let registry = self.pane_registry.borrow();
-        let from_widget = match registry.pane_frame(from) {
-            Some(p) => p,
-            None => return None,
-        };
+        let from_widget = registry.pane_frame(from)?;
         // Alt+arrow moves only within the same workspace. GtkStack can keep
         // inactive workspace widgets overlapping at the same coordinates, where
         // compute_bounds may return non-zero values; without the workspace
         // filter, focus could leak into another workspace.
-        let Some(workspace) = registry.workspace_of_pane(from) else {
-            return None;
-        };
+        let workspace = registry.workspace_of_pane(from)?;
         let stack = &self.stack;
-        let Some(from_bbox) = from_widget.compute_bounds(stack) else {
-            return None;
-        };
+        let from_bbox = from_widget.compute_bounds(stack)?;
         let from_center = (
             from_bbox.x() + from_bbox.width() / 2.0,
             from_bbox.y() + from_bbox.height() / 2.0,
@@ -3938,6 +3936,7 @@ impl WindowController {
         self.store.set_active_workspace(Some(id)).await;
         let status = self.store.workspace_agent_status(id).await;
         self.sidebar.set_agent_status(id, status);
+        self.sync_workspace_label(id).await;
         if let Some(ws) = self.store.get_workspace(id).await {
             // Selecting a workspace lands on the last tab of its first pane.
             if let Some(leaf) = ws
@@ -3959,6 +3958,7 @@ impl WindowController {
                     self.pane_registry.borrow_mut().activate_surface(leaf, last);
                     let status = self.store.workspace_agent_status(id).await;
                     self.sidebar.set_agent_status(id, status);
+                    self.sync_workspace_label(id).await;
                     self.refresh_agent_screen_status(last, None).await;
                 }
             }
@@ -4059,7 +4059,8 @@ impl WindowController {
             }
             CommandPaletteCommand::RenameTab => {
                 if let Some(pane) = self.focused_pane.get() {
-                    if let Some(surface) = self.pane_registry.borrow().active_surface(pane) {
+                    let surface = self.pane_registry.borrow().active_surface(pane);
+                    if let Some(surface) = surface {
                         self.dispatch(GtkCommand::ShowRenameSurfaceDialog { pane, surface })
                             .await;
                     }
@@ -4420,9 +4421,77 @@ fn focused_surface_full_title(
 ///   * Active terminal surfaces without cwd are skipped to avoid caching the
 ///     first-spawn race as a subtitle.
 ///   * Active browser tabs use `Browser-{tab name}`.
+///
 /// Result length never exceeds `cap`. If MRU is empty or short, DFS over tree
 /// leaves left-first to keep side-panel subtitles populated.
+const SIDEBAR_AGENT_BLOCK_LIMIT: usize = 4;
+const SIDEBAR_PATH_LINE_LIMIT: usize = 3;
+
+fn workspace_row_details(ws: &Workspace, mru: &[PaneId]) -> WorkspaceRowDetails {
+    let agent_blocks = ws.collect_agent_blocks(mru);
+    if agent_blocks.is_empty() {
+        return WorkspaceRowDetails::path_only(&collect_subtitle_lines(
+            ws,
+            mru,
+            SIDEBAR_PATH_LINE_LIMIT,
+        ));
+    }
+
+    let visible_count = agent_blocks.len().min(SIDEBAR_AGENT_BLOCK_LIMIT);
+    let overflow_count = agent_blocks.len().saturating_sub(visible_count);
+    let visible_agent_panes: HashSet<PaneId> = agent_blocks
+        .iter()
+        .take(visible_count)
+        .map(|block| block.pane)
+        .collect();
+    let mut row_agent_blocks: Vec<WorkspaceRowAgentBlock> = agent_blocks
+        .iter()
+        .take(visible_count)
+        .map(workspace_row_agent_block)
+        .collect();
+    if overflow_count > 0 {
+        if let Some(last) = row_agent_blocks.last_mut() {
+            last.overflow_count = overflow_count;
+        }
+    }
+    let path_lines =
+        collect_subtitle_lines_excluding(ws, mru, SIDEBAR_PATH_LINE_LIMIT, &visible_agent_panes);
+
+    WorkspaceRowDetails {
+        agent_blocks: row_agent_blocks,
+        path_lines,
+    }
+}
+
+fn workspace_row_agent_block(block: &WorkspaceAgentBlock) -> WorkspaceRowAgentBlock {
+    WorkspaceRowAgentBlock {
+        agent_name: block.agent_name.clone(),
+        status: block.status,
+        seen: block.seen,
+        status_text: block
+            .status_text
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| block.status.as_str().to_string()),
+        path: block
+            .cwd
+            .as_deref()
+            .map(|cwd| shorten_cwd_path(std::path::Path::new(cwd))),
+        overflow_count: 0,
+    }
+}
+
 fn collect_subtitle_lines(ws: &flowmux_core::Workspace, mru: &[PaneId], cap: usize) -> Vec<String> {
+    collect_subtitle_lines_excluding(ws, mru, cap, &HashSet::new())
+}
+
+fn collect_subtitle_lines_excluding(
+    ws: &flowmux_core::Workspace,
+    mru: &[PaneId],
+    cap: usize,
+    excluded_panes: &HashSet<PaneId>,
+) -> Vec<String> {
     use flowmux_core::SurfaceKind;
     let Some(root) = ws.surfaces.first().map(|s| &s.root_pane) else {
         return Vec::new();
@@ -4438,8 +4507,11 @@ fn collect_subtitle_lines(ws: &flowmux_core::Workspace, mru: &[PaneId], cap: usi
     };
 
     let mut out: Vec<String> = Vec::new();
-    let mut seen: std::collections::HashSet<PaneId> = std::collections::HashSet::new();
+    let mut seen: HashSet<PaneId> = HashSet::new();
     for pane in mru {
+        if excluded_panes.contains(pane) {
+            continue;
+        }
         if seen.contains(pane) {
             continue;
         }
@@ -4457,6 +4529,9 @@ fn collect_subtitle_lines(ws: &flowmux_core::Workspace, mru: &[PaneId], cap: usi
     for pane in all_leaves {
         if out.len() >= cap {
             break;
+        }
+        if excluded_panes.contains(&pane) {
+            continue;
         }
         if seen.contains(&pane) {
             continue;
@@ -7179,6 +7254,184 @@ mod tests {
         assert_eq!(lines, vec!["Browser-DocsHome".to_string()]);
     }
 
+    fn test_workspace_with_leaves(leaves: Vec<(PaneId, PaneSurface)>) -> Workspace {
+        use flowmux_core::{Pane, PaneContent, SplitDirection};
+
+        fn leaf(pane_id: PaneId, surface: PaneSurface) -> Pane {
+            Pane::Leaf {
+                id: pane_id,
+                content: PaneContent::Tabs {
+                    active: surface.id,
+                    surfaces: vec![surface],
+                },
+            }
+        }
+
+        let root_pane = leaves
+            .into_iter()
+            .map(|(pane_id, surface)| leaf(pane_id, surface))
+            .reduce(|first, second| Pane::Split {
+                id: PaneId::new(),
+                direction: SplitDirection::Vertical,
+                ratio: 0.5,
+                first: Box::new(first),
+                second: Box::new(second),
+            })
+            .expect("test workspace needs at least one leaf");
+
+        Workspace {
+            id: WorkspaceId::new(),
+            name: "any".into(),
+            custom_title: None,
+            root_dir: "/tmp".into(),
+            git: None,
+            listening_ports: vec![],
+            surfaces: vec![Surface {
+                id: SurfaceId::new(),
+                kind: SurfaceKind::Terminal {
+                    shell: None,
+                    cwd: None,
+                },
+                title: "main".into(),
+                root_pane,
+            }],
+            color: None,
+        }
+    }
+
+    fn test_terminal_surface(
+        title: &str,
+        cwd: &str,
+        agent: Option<(&str, flowmux_core::AgentActivity, Option<&str>)>,
+    ) -> PaneSurface {
+        let mut surface = PaneSurface::terminal(title, Some(std::path::PathBuf::from(cwd)));
+        if let Some((name, activity, message)) = agent {
+            let mut presence = flowmux_core::AgentPresence::new(name, activity, None);
+            presence.message = message.map(str::to_string);
+            surface.agent = Some(presence);
+        }
+        surface
+    }
+
+    #[test]
+    fn workspace_row_details_put_agent_blocks_before_deduped_mru_paths() {
+        let agent_pane = PaneId::new();
+        let shell_pane = PaneId::new();
+        let ws = test_workspace_with_leaves(vec![
+            (
+                agent_pane,
+                test_terminal_surface(
+                    "agent",
+                    "/home/u/dev/flowmux",
+                    Some((
+                        "codex",
+                        flowmux_core::AgentActivity::Running,
+                        Some("running tests"),
+                    )),
+                ),
+            ),
+            (
+                shell_pane,
+                test_terminal_surface("shell", "/home/u/dev/plain", None),
+            ),
+        ]);
+
+        let details = workspace_row_details(&ws, &[agent_pane, shell_pane]);
+        assert_eq!(details.agent_blocks.len(), 1);
+        assert_eq!(details.agent_blocks[0].agent_name, "codex");
+        assert_eq!(
+            details.agent_blocks[0].status,
+            flowmux_core::AgentStatus::Working
+        );
+        assert_eq!(details.agent_blocks[0].status_text, "running tests");
+        assert_eq!(
+            details.agent_blocks[0].path.as_deref(),
+            Some(".../u/dev/flowmux")
+        );
+        assert_eq!(details.path_lines, vec![".../u/dev/plain".to_string()]);
+    }
+
+    #[test]
+    fn workspace_row_details_limits_agent_blocks_and_marks_overflow() {
+        let first = PaneId::new();
+        let second = PaneId::new();
+        let third = PaneId::new();
+        let fourth = PaneId::new();
+        let fifth = PaneId::new();
+        let ws = test_workspace_with_leaves(vec![
+            (
+                first,
+                test_terminal_surface(
+                    "first",
+                    "/tmp/first",
+                    Some(("codex", flowmux_core::AgentActivity::Running, None)),
+                ),
+            ),
+            (
+                second,
+                test_terminal_surface(
+                    "second",
+                    "/tmp/second",
+                    Some(("claude", flowmux_core::AgentActivity::Running, None)),
+                ),
+            ),
+            (
+                third,
+                test_terminal_surface(
+                    "third",
+                    "/tmp/third",
+                    Some(("opencode", flowmux_core::AgentActivity::Running, None)),
+                ),
+            ),
+            (
+                fourth,
+                test_terminal_surface(
+                    "fourth",
+                    "/tmp/fourth",
+                    Some(("gemini", flowmux_core::AgentActivity::Running, None)),
+                ),
+            ),
+            (
+                fifth,
+                test_terminal_surface(
+                    "fifth",
+                    "/tmp/fifth",
+                    Some(("aider", flowmux_core::AgentActivity::Running, None)),
+                ),
+            ),
+        ]);
+
+        let details = workspace_row_details(&ws, &[fifth, fourth, third, second, first]);
+        assert_eq!(details.agent_blocks.len(), 4);
+        assert_eq!(details.agent_blocks[0].agent_name, "aider");
+        assert_eq!(details.agent_blocks[0].status_text, "working");
+        assert_eq!(details.agent_blocks[1].agent_name, "gemini");
+        assert_eq!(details.agent_blocks[2].agent_name, "opencode");
+        assert_eq!(details.agent_blocks[3].agent_name, "claude");
+        assert_eq!(details.agent_blocks[3].overflow_count, 1);
+    }
+
+    #[test]
+    fn workspace_row_details_without_agents_matches_existing_subtitles() {
+        let first = PaneId::new();
+        let second = PaneId::new();
+        let ws = test_workspace_with_leaves(vec![
+            (
+                first,
+                test_terminal_surface("first", "/home/u/dev/first", None),
+            ),
+            (
+                second,
+                test_terminal_surface("second", "/home/u/dev/second", None),
+            ),
+        ]);
+        let mru = vec![second, first];
+
+        let details = workspace_row_details(&ws, &mru);
+        assert!(details.agent_blocks.is_empty());
+        assert_eq!(details.path_lines, collect_subtitle_lines(&ws, &mru, 3));
+    }
+
     fn run_async<T>(future: impl std::future::Future<Output = T>) -> T {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -7667,6 +7920,37 @@ mod tests {
         controller
             .apply_split_incremental_or_rerender(ws_id, left, right, SplitDirection::Vertical)
             .await;
+        let right_surface = store.get_workspace(ws_id).await.unwrap().surfaces[0]
+            .root_pane
+            .active_surface_id(right)
+            .unwrap();
+        store
+            .report_agent_status(
+                right_surface,
+                flowmux_core::AgentStatusReport {
+                    name: "codex".into(),
+                    status: Some(flowmux_core::AgentStatus::Working),
+                    activity: Some(flowmux_core::AgentActivity::Running),
+                    pid: None,
+                    source: Some("flowmux:hook".into()),
+                    seq: Some(1),
+                    message: None,
+                    custom_status: None,
+                    session_id: None,
+                },
+            )
+            .await;
+        controller.sync_workspace_label(ws_id).await;
+        assert_eq!(
+            controller
+                .sidebar
+                .cached_details(ws_id)
+                .unwrap()
+                .agent_blocks
+                .len(),
+            1,
+            "precondition: closing pane starts with an agent block"
+        );
 
         {
             let r = controller.pane_registry.borrow();
@@ -7738,6 +8022,104 @@ mod tests {
             leaf_count,
             vec![left],
             "store collapsed the split correctly"
+        );
+        assert!(
+            controller
+                .sidebar
+                .cached_details(ws_id)
+                .unwrap()
+                .agent_blocks
+                .is_empty(),
+            "closing an agent pane must refresh sidebar details"
+        );
+    }
+
+    /// Regression: closing an agent tab inside a pane must also recalculate the
+    /// side-panel details. Otherwise a stale agent block remains under the
+    /// workspace even though the surface and its agent presence are gone.
+    #[cfg(not(target_os = "macos"))]
+    #[gtk::test]
+    async fn closing_agent_tab_refreshes_sidebar_details() {
+        adw::init().expect("libadwaita should initialize in GTK test");
+        let root = std::env::temp_dir().join("flowmux-ui-close-agent-tab-details");
+        std::fs::create_dir_all(&root).unwrap();
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("ui".into()), root.clone())
+            .await;
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        let pane = ws.surfaces[0].root_pane.first_leaf_id().unwrap();
+
+        let (bridge, _rx) = Bridge::new();
+        let app = adw::Application::builder()
+            .application_id("com.flowmux.App.UiTest.CloseAgentTabDetails")
+            .build();
+        app.register(None::<&gtk::gio::Cancellable>).unwrap();
+        let controller = WindowController::new(
+            &app,
+            store.clone(),
+            Arc::new(ResolvedTheme::load()),
+            bridge,
+            gtk::CssProvider::new(),
+            None,
+        );
+        controller.render_workspace(&ws);
+
+        let agent_dir = root.join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let (_, agent_surface) = store
+            .add_terminal_surface_to_pane(pane, Some(agent_dir))
+            .await
+            .expect("agent tab should be added");
+        controller
+            .attach_or_rerender_surface(ws_id, pane, agent_surface)
+            .await;
+        store
+            .report_agent_status(
+                agent_surface,
+                flowmux_core::AgentStatusReport {
+                    name: "codex".into(),
+                    status: Some(flowmux_core::AgentStatus::Working),
+                    activity: Some(flowmux_core::AgentActivity::Running),
+                    pid: None,
+                    source: Some("flowmux:hook".into()),
+                    seq: Some(1),
+                    message: None,
+                    custom_status: None,
+                    session_id: None,
+                },
+            )
+            .await;
+        controller.sync_workspace_label(ws_id).await;
+        assert_eq!(
+            controller
+                .sidebar
+                .cached_details(ws_id)
+                .unwrap()
+                .agent_blocks
+                .len(),
+            1,
+            "precondition: closing tab starts with an agent block"
+        );
+
+        let (ack_tx, ack_rx) = oneshot::channel();
+        controller
+            .dispatch(GtkCommand::CloseSurface {
+                pane,
+                surface: agent_surface,
+                ack: ack_tx,
+            })
+            .await;
+        ack_rx.await.unwrap().unwrap();
+
+        assert!(
+            controller
+                .sidebar
+                .cached_details(ws_id)
+                .unwrap()
+                .agent_blocks
+                .is_empty(),
+            "closing an agent tab must refresh sidebar details"
         );
     }
 

@@ -144,6 +144,7 @@ pub fn build_activity_update(
 }
 
 /// Build a live activity update with optional agent hook metadata.
+#[allow(clippy::too_many_arguments)]
 pub fn build_activity_update_with_metadata(
     agent: &str,
     activity: Option<AgentActivity>,

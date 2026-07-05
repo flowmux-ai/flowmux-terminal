@@ -140,7 +140,7 @@ fn comrak_options<'a>() -> Options<'a> {
 }
 
 fn wrap_html_document(body: &str, options: &RenderOptions) -> String {
-    let max_width = options.normalized_width().min(1012).max(320);
+    let max_width = options.normalized_width().clamp(320, 1012);
     let font_family = css_string(options.font_family());
     format!(
         r#"<!doctype html>
@@ -340,7 +340,12 @@ mod tests {
 
         let document = render_markdown_file(&path, &RenderOptions::default()).expect("render file");
 
-        assert_eq!(document.base_dir.as_deref(), path.parent());
+        let expected = path
+            .canonicalize()
+            .expect("canonical path")
+            .parent()
+            .map(Path::to_path_buf);
+        assert_eq!(document.base_dir, expected);
         assert!(document
             .html
             .contains(r#"<img src="image.png" alt="alt" />"#));

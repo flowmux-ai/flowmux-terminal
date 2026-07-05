@@ -1,19 +1,39 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::rc::Rc;
-use std::time::{Duration, SystemTime};
+#[cfg(target_os = "linux")]
+use std::time::Duration;
+#[cfg(any(test, target_os = "linux"))]
+use std::time::SystemTime;
 
+#[cfg(target_os = "linux")]
+use std::cell::{Cell, RefCell};
+#[cfg(target_os = "linux")]
+use std::rc::Rc;
+
+#[cfg(target_os = "linux")]
 use adw::prelude::*;
-use flowmux_md_viewer::{render_markdown_file, HtmlDocument, RenderOptions};
-use gtk::{gdk, gio, glib};
+#[cfg(target_os = "linux")]
+use flowmux_md_viewer::render_markdown_file;
+#[cfg(any(test, target_os = "linux"))]
+use flowmux_md_viewer::HtmlDocument;
+use flowmux_md_viewer::RenderOptions;
+#[cfg(any(test, target_os = "linux"))]
+use gtk::gio;
+#[cfg(any(test, target_os = "linux"))]
+use gtk::prelude::FileExt;
+#[cfg(target_os = "linux")]
+use gtk::{gdk, glib};
+#[cfg(target_os = "linux")]
 use webkit6::prelude::*;
 
+#[cfg(target_os = "linux")]
 const APP_ID: &str = "com.flowmux.MdViewer";
 const DEFAULT_WINDOW_HEIGHT: i32 = 700;
+#[cfg(any(test, target_os = "linux"))]
 const RENDER_TIMEOUT_SECS: u32 = 15;
+#[cfg(target_os = "linux")]
 const VIEWER_CHROME_CSS: &str = r#"
 window.flowmux-md-viewer {
   background: #282c34;
@@ -79,8 +99,10 @@ impl Args {
         I: IntoIterator<Item = String>,
     {
         let mut path = None;
-        let mut options = RenderOptions::default();
-        options.font_family = std::env::var("FLOWMUX_MD_VIEWER_FONT").ok();
+        let mut options = RenderOptions {
+            font_family: std::env::var("FLOWMUX_MD_VIEWER_FONT").ok(),
+            ..Default::default()
+        };
         let mut window_height = DEFAULT_WINDOW_HEIGHT;
         let mut watch = true;
         let mut render_png = None;
@@ -157,6 +179,7 @@ fn print_help() {
     );
 }
 
+#[cfg(target_os = "linux")]
 fn render_png(input: &Path, output: &Path, options: &RenderOptions) -> ExitCode {
     let document = match render_markdown_file(input, options) {
         Ok(document) => document,
@@ -246,6 +269,13 @@ fn render_png(input: &Path, output: &Path, options: &RenderOptions) -> ExitCode 
     }
 }
 
+#[cfg(not(target_os = "linux"))]
+fn render_png(_input: &Path, _output: &Path, _options: &RenderOptions) -> ExitCode {
+    eprintln!("flowmux-md-viewer --render-png requires the Linux WebKitGTK build.");
+    ExitCode::from(1)
+}
+
+#[cfg(target_os = "linux")]
 fn run_app(args: Args) {
     let app = adw::Application::builder()
         .application_id(APP_ID)
@@ -256,6 +286,13 @@ fn run_app(args: Args) {
     app.run_with_args(&[APP_ID]);
 }
 
+#[cfg(not(target_os = "linux"))]
+fn run_app(args: Args) {
+    let _ = (args.window_height, args.watch);
+    eprintln!("flowmux-md-viewer requires the Linux WebKitGTK build.");
+}
+
+#[cfg(target_os = "linux")]
 fn install_viewer_chrome_theme() {
     adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
     let provider = gtk::CssProvider::new();
@@ -269,6 +306,7 @@ fn install_viewer_chrome_theme() {
     }
 }
 
+#[cfg(target_os = "linux")]
 struct ViewerState {
     path: PathBuf,
     options: RenderOptions,
@@ -278,6 +316,7 @@ struct ViewerState {
     last_signature: Option<FileSignature>,
 }
 
+#[cfg(target_os = "linux")]
 impl ViewerState {
     fn render(&mut self) {
         self.zoom_label
@@ -301,6 +340,7 @@ impl ViewerState {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Clone)]
 struct NavigationState {
     back: gtk::Button,
@@ -309,6 +349,7 @@ struct NavigationState {
     loading_markdown_home: Rc<Cell<bool>>,
 }
 
+#[cfg(target_os = "linux")]
 impl NavigationState {
     fn new() -> Self {
         let back = gtk::Button::from_icon_name("go-previous-symbolic");
@@ -354,6 +395,7 @@ impl NavigationState {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn build_window(app: &adw::Application, args: Args) {
     let title = args
         .path
@@ -416,6 +458,7 @@ fn build_window(app: &adw::Application, args: Args) {
     window.present();
 }
 
+#[cfg(target_os = "linux")]
 fn markdown_web_view(options: &RenderOptions) -> webkit6::WebView {
     let web_view = webkit6::WebView::new();
     web_view.set_zoom_level(options.normalized_zoom() as f64);
@@ -429,11 +472,13 @@ fn markdown_web_view(options: &RenderOptions) -> webkit6::WebView {
     web_view
 }
 
+#[cfg(target_os = "linux")]
 fn load_document(web_view: &webkit6::WebView, document: &HtmlDocument) {
     let base_uri = document_base_uri(document);
     web_view.load_html(&document.html, base_uri.as_deref());
 }
 
+#[cfg(target_os = "linux")]
 fn install_navigation_controls(
     header: &adw::HeaderBar,
     state: &Rc<RefCell<ViewerState>>,
@@ -479,6 +524,7 @@ fn install_navigation_controls(
     header.pack_start(&navigation.forward);
 }
 
+#[cfg(target_os = "linux")]
 fn go_back_or_home(state: &Rc<RefCell<ViewerState>>, navigation: &NavigationState) {
     let web_view = state.borrow().web_view.clone();
     if web_view.can_go_back() {
@@ -488,6 +534,7 @@ fn go_back_or_home(state: &Rc<RefCell<ViewerState>>, navigation: &NavigationStat
     }
 }
 
+#[cfg(target_os = "linux")]
 fn go_forward(state: &Rc<RefCell<ViewerState>>) {
     let web_view = state.borrow().web_view.clone();
     if web_view.can_go_forward() {
@@ -495,6 +542,7 @@ fn go_forward(state: &Rc<RefCell<ViewerState>>) {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn install_viewer_keys(
     window: &adw::ApplicationWindow,
     state: &Rc<RefCell<ViewerState>>,
@@ -544,6 +592,7 @@ fn install_viewer_keys(
     window.add_controller(key);
 }
 
+#[cfg(any(test, target_os = "linux"))]
 fn document_base_uri(document: &HtmlDocument) -> Option<String> {
     let dir = document.base_dir.as_ref()?;
     let mut uri = gio::File::for_path(dir).uri().to_string();
@@ -553,6 +602,7 @@ fn document_base_uri(document: &HtmlDocument) -> Option<String> {
     Some(uri)
 }
 
+#[cfg(target_os = "linux")]
 fn error_html(message: &str) -> String {
     format!(
         "<!doctype html><meta charset=\"utf-8\"><body style=\"font: 14px monospace; padding: 24px\"><h1>Markdown render error</h1><pre>{}</pre></body>",
@@ -560,6 +610,7 @@ fn error_html(message: &str) -> String {
     )
 }
 
+#[cfg(target_os = "linux")]
 fn html_escape(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -567,6 +618,7 @@ fn html_escape(value: &str) -> String {
         .replace('>', "&gt;")
 }
 
+#[cfg(target_os = "linux")]
 fn zoom_controls(state: &Rc<RefCell<ViewerState>>, zoom_label: &gtk::Label) -> gtk::Box {
     let controls = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     controls.add_css_class("toolbar");
@@ -603,6 +655,7 @@ fn zoom_controls(state: &Rc<RefCell<ViewerState>>, zoom_label: &gtk::Label) -> g
     controls
 }
 
+#[cfg(target_os = "linux")]
 fn install_live_reload(state: &Rc<RefCell<ViewerState>>) -> Option<gio::FileMonitor> {
     let file = gio::File::for_path(&state.borrow().path);
     let monitor = file
@@ -623,6 +676,7 @@ fn install_live_reload(state: &Rc<RefCell<ViewerState>>) -> Option<gio::FileMoni
     Some(monitor)
 }
 
+#[cfg(any(test, target_os = "linux"))]
 fn should_reload_for_event(event: gio::FileMonitorEvent) -> bool {
     matches!(
         event,
@@ -637,12 +691,14 @@ fn should_reload_for_event(event: gio::FileMonitorEvent) -> bool {
     )
 }
 
+#[cfg(any(test, target_os = "linux"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct FileSignature {
     modified: Option<SystemTime>,
     len: u64,
 }
 
+#[cfg(any(test, target_os = "linux"))]
 fn file_signature(path: &Path) -> Option<FileSignature> {
     let metadata = std::fs::metadata(path).ok()?;
     Some(FileSignature {

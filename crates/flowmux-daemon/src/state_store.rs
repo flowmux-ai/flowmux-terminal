@@ -10,7 +10,7 @@ use flowmux_core::{
     detect_agent_name_from_signals, detect_agent_status_from_signals, terminal_tab_title_for_cwd,
     AgentPresence, AgentStatus, AgentStatusReport, CloseSurfaceOutcome, Pane, PaneContent, PaneId,
     PaneSurface, RemoveOutcome, SplitDirection, Surface, SurfaceId, SurfaceKind, Workspace,
-    WorkspaceId,
+    WorkspaceAgentBlock, WorkspaceId,
 };
 use flowmux_state::{State, WindowLayout};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -663,6 +663,7 @@ impl StateStore {
     ///   * If trimming both ends yields an empty value, reset to
     ///     `custom_title = None` and return to automatic mode, showing `name`.
     ///   * Otherwise store `custom_title = Some(trimmed)`.
+    ///
     /// The automatic value `name` is never modified here, so separate automatic
     /// signals such as folder rename or OSC can update it. Returns `false` when
     /// no workspace matches or nothing changes.
@@ -824,6 +825,19 @@ impl StateStore {
             .iter()
             .find(|ws| ws.id == workspace)
             .and_then(Workspace::agent_status_rollup)
+    }
+
+    pub async fn workspace_agent_blocks(
+        &self,
+        workspace: WorkspaceId,
+        mru: &[PaneId],
+    ) -> Vec<WorkspaceAgentBlock> {
+        let s = self.inner.lock().await;
+        s.workspaces
+            .iter()
+            .find(|ws| ws.id == workspace)
+            .map(|ws| ws.collect_agent_blocks(mru))
+            .unwrap_or_default()
     }
 
     fn mark_active_agents_seen_locked(ws: &mut Workspace) -> bool {
@@ -1666,6 +1680,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn report_agent_status_keeps_opencode_name_for_oc_titled_surface() {
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("demo".into()), std::path::PathBuf::from("/tmp/demo"))
+            .await;
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        let pane = first_pane(&ws);
+        let surface = first_pane_active_surface(&ws);
+        assert_eq!(
+            store
+                .rename_surface(pane, surface, "OC | greeting".into())
+                .await,
+            Some(ws_id)
+        );
+
+        let result = store
+            .report_agent_status(
+                surface,
+                AgentStatusReport {
+                    name: "claude".into(),
+                    status: Some(AgentStatus::Idle),
+                    activity: Some(flowmux_core::AgentActivity::Idle),
+                    pid: None,
+                    source: Some("flowmux:hook".into()),
+                    seq: Some(1),
+                    message: None,
+                    custom_status: None,
+                    session_id: Some("ses-opencode".into()),
+                },
+            )
+            .await;
+        assert_eq!(result, Some((ws_id, Some(AgentStatus::Idle))));
+
+        let state = store.snapshot().await;
+        let tree = flowmux_ipc::protocol::describe_workspaces(&state.workspaces);
+        let agent = tree[0].panes[0].tabs[0].agent.as_ref().unwrap();
+        assert_eq!(agent.name, "opencode");
+        assert_eq!(agent.status, AgentStatus::Idle);
+        assert_eq!(agent.source.as_deref(), Some("flowmux:hook"));
+    }
+
+    #[tokio::test]
     async fn report_agent_screen_signals_can_create_fallback_presence() {
         let store = StateStore::new_lazy(State::default());
         let ws_id = store
@@ -1683,6 +1739,48 @@ mod tests {
         let tree = flowmux_ipc::protocol::describe_workspaces(&state.workspaces);
         let agent = tree[0].panes[0].tabs[0].agent.as_ref().unwrap();
         assert_eq!(agent.name, "codex");
+        assert_eq!(agent.status, AgentStatus::Blocked);
+        assert_eq!(agent.source.as_deref(), Some("flowmux:screen"));
+    }
+
+    #[tokio::test]
+    async fn report_agent_screen_signals_can_replace_stale_claude_presence_name() {
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("demo".into()), std::path::PathBuf::from("/tmp/demo"))
+            .await;
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        let surface = first_pane_active_surface(&ws);
+
+        assert_eq!(
+            store
+                .report_agent_status(
+                    surface,
+                    AgentStatusReport {
+                        name: "claude".into(),
+                        status: Some(AgentStatus::Idle),
+                        activity: Some(flowmux_core::AgentActivity::Idle),
+                        pid: Some(42),
+                        source: Some("flowmux:hook".into()),
+                        seq: Some(1),
+                        message: None,
+                        custom_status: None,
+                        session_id: None,
+                    },
+                )
+                .await,
+            Some((ws_id, Some(AgentStatus::Idle)))
+        );
+
+        let result = store
+            .report_agent_screen_signals(surface, None, Some("Cline Action Required"))
+            .await;
+        assert_eq!(result, Some((ws_id, Some(AgentStatus::Blocked))));
+
+        let state = store.snapshot().await;
+        let tree = flowmux_ipc::protocol::describe_workspaces(&state.workspaces);
+        let agent = tree[0].panes[0].tabs[0].agent.as_ref().unwrap();
+        assert_eq!(agent.name, "cline");
         assert_eq!(agent.status, AgentStatus::Blocked);
         assert_eq!(agent.source.as_deref(), Some("flowmux:screen"));
     }

@@ -495,7 +495,7 @@ impl Handler for GuiHandler {
                 }
 
                 Request::ClaudeTeams { count, args, root } => {
-                    let count = count.max(1).min(8);
+                    let count = count.clamp(1, 8);
                     let store = self.inner.store();
                     let root_for_ui = root.clone();
                     // Create a fresh workspace.
@@ -1348,6 +1348,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "current_thread")]
     async fn import_cookies_dispatches_inject_for_firefox_fixture() {
         let _guard = home_env_lock();

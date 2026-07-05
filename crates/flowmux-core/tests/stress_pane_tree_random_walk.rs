@@ -116,7 +116,7 @@ fn pane_tree_random_walk_holds_invariants() {
 
     // Two seeds, run sequentially. Different seeds explore different op
     // distributions; both should pass.
-    for &seed in &[0xC0FFEE_DEADBEEFu64, 0x12345_6789_ABCDEF] {
+    for &seed in &[0x00C0_FFEE_DEAD_BEEFu64, 0x0123_4567_89AB_CDEF] {
         let mut rng = Xs::new(seed);
         let mut root = Pane::Leaf {
             id: PaneId::new(),
