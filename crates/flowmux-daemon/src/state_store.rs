@@ -2028,6 +2028,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn report_agent_screen_signals_ignores_codegraph_installer_agent_list() {
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("demo".into()), std::path::PathBuf::from("/tmp/demo"))
+            .await;
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        let surface = first_pane_active_surface(&ws);
+        let codegraph_screen = "\
+Which agents should CodeGraph configure?
+Claude Code (detected), Codex CLI (detected), opencode (detected)
+Do you want to continue?";
+
+        assert_eq!(
+            store
+                .report_agent_screen_signals(surface, Some(codegraph_screen), None)
+                .await,
+            None
+        );
+
+        let state = store.snapshot().await;
+        let tree = flowmux_ipc::protocol::describe_workspaces(&state.workspaces);
+        assert!(tree[0].panes[0].tabs[0].agent.is_none());
+    }
+
+    #[tokio::test]
+    async fn report_agent_screen_signals_clears_stale_screen_presence_without_agent_name() {
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("demo".into()), std::path::PathBuf::from("/tmp/demo"))
+            .await;
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        let surface = first_pane_active_surface(&ws);
+        let codegraph_screen = "\
+Which agents should CodeGraph configure?
+Claude Code (detected), Codex CLI (detected), opencode (detected)
+Do you want to continue?";
+
+        assert_eq!(
+            store
+                .report_agent_screen_signals(surface, Some("OpenCode Action Required"), None)
+                .await,
+            Some((ws_id, Some(AgentStatus::Blocked)))
+        );
+
+        assert_eq!(
+            store
+                .report_agent_screen_signals(surface, Some(codegraph_screen), None)
+                .await,
+            Some((ws_id, None))
+        );
+
+        let state = store.snapshot().await;
+        let tree = flowmux_ipc::protocol::describe_workspaces(&state.workspaces);
+        assert!(tree[0].panes[0].tabs[0].agent.is_none());
+    }
+
+    #[tokio::test]
     async fn report_agent_screen_signals_clears_screen_presence_when_signal_disappears() {
         let store = StateStore::new_lazy(State::default());
         let ws_id = store

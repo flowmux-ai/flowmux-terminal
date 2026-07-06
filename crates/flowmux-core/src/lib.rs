@@ -581,6 +581,17 @@ impl Pane {
                 {
                     return Some(false);
                 }
+                if source == "flowmux:screen"
+                    && incoming_name.is_none()
+                    && surface
+                        .agent
+                        .as_ref()
+                        .is_some_and(|agent| agent.source.as_deref() == Some("flowmux:screen"))
+                {
+                    surface.agent = None;
+                    return Some(true);
+                }
+
                 let name = incoming_name
                     .or_else(|| surface.agent.as_ref().map(|agent| agent.name.clone()))?;
                 let report = AgentStatusReport {
@@ -2349,25 +2360,52 @@ pub fn detect_agent_name_from_signals(
     if let Some(name) = osc_title.and_then(detect_agent_name_from_surface_title) {
         return Some(name);
     }
-    let mut haystack = String::new();
-    if let Some(title) = osc_title {
-        haystack.push_str(title);
-        haystack.push('\n');
-    }
     if let Some(text) = screen_text {
         for line in text.lines().rev().take(80) {
-            haystack.push_str(line);
-            haystack.push('\n');
+            if let Some(name) = detect_agent_name_from_screen_status_line(line) {
+                return Some(name);
+            }
         }
     }
-    let haystack = haystack.to_ascii_lowercase();
-    if haystack.contains("opencode") || haystack.contains("open code") {
+    None
+}
+
+fn detect_agent_name_from_screen_status_line(line: &str) -> Option<&'static str> {
+    let lower = line.to_ascii_lowercase();
+    if !line_has_agent_status_cue(&lower) {
+        return None;
+    }
+    agent_name_in_text(&lower)
+}
+
+fn line_has_agent_status_cue(line: &str) -> bool {
+    line.contains("action required")
+        || line.contains("needs input")
+        || line.contains("permission required")
+        || line.contains("needs permission")
+        || line.contains("approve this")
+        || line.contains("approve command")
+        || line.contains("requires approval")
+        || line.contains("waiting for approval")
+        || line.contains("awaiting approval")
+        || line.contains("needs approval")
+        || line.contains("permission prompt")
+        || line.contains("requires permission")
+        || line.contains("working")
+        || line.contains("thinking")
+        || line.contains("running tool")
+        || line.contains("executing")
+        || line.contains("idle")
+}
+
+fn agent_name_in_text(text: &str) -> Option<&'static str> {
+    if text.contains("opencode") || text.contains("open code") {
         Some("opencode")
-    } else if haystack.contains("claude") {
+    } else if contains_ascii_token(text, "claude") {
         Some("claude")
-    } else if haystack.contains("codex") {
+    } else if contains_ascii_token(text, "codex") {
         Some("codex")
-    } else if contains_ascii_token(&haystack, "cline") {
+    } else if contains_ascii_token(text, "cline") {
         Some("cline")
     } else {
         None
@@ -2397,10 +2435,12 @@ pub fn detect_agent_idle_name_from_signals(
             .then_some(title_agent_name)
             .flatten();
     }
-    detect_agent_name_from_signals(Some(&recent), osc_title).or_else(|| {
-        (recent.contains("ask anything") && recent.contains("ctrl+p commands"))
-            .then_some("opencode")
-    })
+    title_agent_name
+        .or_else(|| agent_name_in_text(&recent))
+        .or_else(|| {
+            (recent.contains("ask anything") && recent.contains("ctrl+p commands"))
+                .then_some("opencode")
+        })
 }
 
 fn is_agent_idle_prompt_line(line: &str) -> bool {
@@ -5080,6 +5120,21 @@ mod tests {
             Some("cline")
         );
         assert_eq!(detect_agent_name_from_signals(Some("decline"), None), None);
+        assert_eq!(
+            detect_agent_name_from_signals(
+                Some(
+                    "Which agents should CodeGraph configure?\n\
+                     Claude Code (detected), Codex CLI (detected), opencode (detected)\n\
+                     Do you want to continue?"
+                ),
+                None
+            ),
+            None
+        );
+        assert_eq!(
+            detect_agent_name_from_signals(Some("OpenCode needs input"), None),
+            Some("opencode")
+        );
     }
 
     #[test]
