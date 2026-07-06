@@ -116,6 +116,73 @@ fn match_agent_comm(comm: &str) -> Option<&'static str> {
     KNOWN_AGENT_COMMS.iter().copied().find(|name| *name == c)
 }
 
+/// Script interpreters that host an agent as a file argument, so the kernel
+/// `comm` is the interpreter (`node`, `python`, …) rather than the agent. For
+/// these, the agent identity lives in the script path inside
+/// `/proc/<pid>/cmdline`. Cline ships as a Node CLI (`node …/cline --tui`) that
+/// never sets `process.title`, so its `comm` stays `node` and
+/// [`match_agent_comm`] can't see it — unlike `claude` (sets `process.title`)
+/// or `codex` (native binary). Lowercase for case-insensitive comparison.
+#[cfg(target_os = "linux")]
+const AGENT_SCRIPT_INTERPRETERS: &[&str] = &["node", "bun", "deno", "python", "python3"];
+
+/// Resolve an agent name from a process's argv when `argv[0]` is a known script
+/// interpreter: the first non-flag argument is the script path, whose basename
+/// (minus a `.js`/`.mjs`/`.cjs` suffix) is matched against [`KNOWN_AGENT_COMMS`]
+/// — e.g. `["node", "/home/u/.local/bin/cline", "--tui"]` → `Some("cline")`.
+/// A non-interpreter `argv[0]` returns `None`: native binaries are matched by
+/// `comm` instead, so a shell merely touching a file named `cline` can't
+/// false-match.
+#[cfg(target_os = "linux")]
+fn agent_from_argv(argv: &[String]) -> Option<&'static str> {
+    let interpreter = std::path::Path::new(argv.first()?)
+        .file_name()?
+        .to_str()?
+        .to_ascii_lowercase();
+    if !AGENT_SCRIPT_INTERPRETERS.contains(&interpreter.as_str()) {
+        return None;
+    }
+    argv.iter().skip(1).find_map(|arg| {
+        if arg.starts_with('-') {
+            return None;
+        }
+        let stem = std::path::Path::new(arg).file_name()?.to_str()?;
+        let stem = stem
+            .strip_suffix(".js")
+            .or_else(|| stem.strip_suffix(".mjs"))
+            .or_else(|| stem.strip_suffix(".cjs"))
+            .unwrap_or(stem)
+            .to_ascii_lowercase();
+        KNOWN_AGENT_COMMS.iter().copied().find(|name| *name == stem)
+    })
+}
+
+/// The argv of a process from `/proc/<pid>/cmdline` (NUL-separated fields), or
+/// an empty vec when it can't be read (the process exited, or permissions).
+#[cfg(target_os = "linux")]
+fn cmdline_of(pid: u32) -> Vec<String> {
+    fs::read(format!("/proc/{pid}/cmdline"))
+        .map(|raw| {
+            raw.split(|b| *b == 0)
+                .filter(|s| !s.is_empty())
+                .map(|s| String::from_utf8_lossy(s).into_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Canonical agent name for a single PID: the kernel `comm` first (covers
+/// native binaries and agents that set `process.title`), falling back to the
+/// argv script name for interpreter-hosted agents like Cline. See
+/// [`agent_from_argv`].
+#[cfg(target_os = "linux")]
+fn agent_of_pid(pid: u32) -> Option<&'static str> {
+    if let Some(name) = comm_of(pid).as_deref().and_then(match_agent_comm) {
+        return Some(name);
+    }
+    agent_from_argv(&cmdline_of(pid))
+}
+
 /// Direct child PIDs of `pid`, unioned across **every** thread of the
 /// process via `/proc/<pid>/task/<tid>/children`, or `None` when the feature
 /// is unavailable (kernel built without `CONFIG_PROC_CHILDREN`, or the process
@@ -168,10 +235,7 @@ pub fn agent_name_in_tree(root: u32) -> Option<&'static str> {
         // Feature unavailable: one full scan, matching the old behaviour.
         let mut pids: Vec<u32> = descendants(root).ok()?.into_iter().collect();
         pids.sort_unstable();
-        return pids
-            .iter()
-            .filter_map(|pid| comm_of(*pid))
-            .find_map(|comm| match_agent_comm(&comm));
+        return pids.iter().copied().find_map(agent_of_pid);
     }
     let mut stack = vec![root];
     let mut seen = HashSet::new();
@@ -179,10 +243,8 @@ pub fn agent_name_in_tree(root: u32) -> Option<&'static str> {
         if !seen.insert(pid) || seen.len() > AGENT_TREE_NODE_CAP {
             continue;
         }
-        if let Some(comm) = comm_of(pid) {
-            if let Some(name) = match_agent_comm(&comm) {
-                return Some(name);
-            }
+        if let Some(name) = agent_of_pid(pid) {
+            return Some(name);
         }
         stack.extend(read_children(pid).unwrap_or_default());
     }
@@ -315,6 +377,34 @@ mod tests {
         assert_eq!(match_agent_comm("node"), None);
         assert_eq!(match_agent_comm("bash"), None);
         assert_eq!(match_agent_comm("python"), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn agent_from_argv_resolves_interpreter_hosted_agents() {
+        let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // Cline: a Node CLI whose script basename is the agent name.
+        assert_eq!(
+            agent_from_argv(&argv(&["node", "/home/u/.local/bin/cline", "--tui"])),
+            Some("cline")
+        );
+        // Interpreter flags before the script path are skipped.
+        assert_eq!(
+            agent_from_argv(&argv(&["node", "--enable-source-maps", "/x/codex"])),
+            Some("codex")
+        );
+        // A `.js`/`.mjs`/`.cjs` script suffix is stripped before matching.
+        assert_eq!(agent_from_argv(&argv(&["node", "/opt/aider.js"])), Some("aider"));
+        // python-hosted agent, argv[0] as a full path.
+        assert_eq!(
+            agent_from_argv(&argv(&["/usr/bin/python3", "/usr/bin/aider"])),
+            Some("aider")
+        );
+        // Non-interpreter argv[0]: native binaries go through `comm`, so a shell
+        // merely touching a file named `cline` must not false-match.
+        assert_eq!(agent_from_argv(&argv(&["bash", "cline"])), None);
+        // An interpreter running an unrelated script matches nothing.
+        assert_eq!(agent_from_argv(&argv(&["node", "/srv/server.js"])), None);
     }
 
     #[test]

@@ -2106,9 +2106,18 @@ fn reconcile_surface_process_agent(
             }
         }
         (Some(existing), Some(name)) => {
-            // Same pane, different agent, and we own the slot: follow the swap.
-            if existing.source.as_deref() == Some(AGENT_SOURCE_PROC) && existing.name != name {
+            // Process truth is authoritative on *identity*. Correct a proc-owned
+            // presence whose agent swapped, and reclaim one a screen-text scan
+            // mislabeled — terminal scrollback that merely *mentions* another
+            // agent must not leave the pane renamed. Hook-owned presences are
+            // left to the hook's own lifecycle.
+            let reclaimable = matches!(
+                existing.source.as_deref(),
+                Some(AGENT_SOURCE_PROC) | Some("flowmux:screen")
+            );
+            if reclaimable && existing.name != name {
                 existing.name = name.to_string();
+                existing.source = Some(AGENT_SOURCE_PROC.to_string());
                 true
             } else {
                 false
@@ -2211,7 +2220,19 @@ impl AgentPresence {
         let next = report.effective_status().unwrap_or(self.status);
         let prev = self.status;
         let same_agent = self.name == report.name;
-        self.name = report.name;
+        // Process-tree truth owns *identity*: a screen-text scan must not rename
+        // (or re-own) a proc-owned presence. Terminal scrollback routinely
+        // *mentions* other agents — a log line, a file listing, or an AI chat
+        // about agents — so the name heuristic would otherwise relabel a running
+        // `claude` pane as `cline`. The 2s proc sweep, not the screen, corrects a
+        // pane whose agent genuinely swapped. Hook-owned presences stay
+        // screen-replaceable so a stale hook can be superseded (see
+        // `screen_fallback_replaces_stale_claude_name_when_agent_signal_differs`).
+        let screen_defers_to_proc = report.source.as_deref() == Some("flowmux:screen")
+            && self.source.as_deref() == Some(AGENT_SOURCE_PROC);
+        if !screen_defers_to_proc {
+            self.name = report.name;
+        }
         self.status = next;
         self.activity = next.to_activity();
         if report.pid.is_some() {
@@ -2219,16 +2240,19 @@ impl AgentPresence {
         }
         if let Some(source) = report.source {
             // A screen scan may refine the *status* of a presence owned by a
-            // stronger source (a hook, or the process-tree sweep), but must not
+            // stronger source (a hook, or the process-tree sweep) but must not
             // steal *ownership*: otherwise the screen-cleared path would later
-            // drop a presence whose existence is guaranteed by a live process
-            // or an active hook session.
-            let keep_ownership = same_agent
-                && matches!(
-                    self.source.as_deref(),
-                    Some("flowmux:hook") | Some(AGENT_SOURCE_PROC)
-                )
-                && source == "flowmux:screen";
+            // drop a presence whose existence is guaranteed by a live process or
+            // an active hook session. `screen_defers_to_proc` also covers the
+            // case where the scan named a *different* agent than a proc-owned
+            // presence (the scrollback false-positive above).
+            let keep_ownership = screen_defers_to_proc
+                || (same_agent
+                    && matches!(
+                        self.source.as_deref(),
+                        Some("flowmux:hook") | Some(AGENT_SOURCE_PROC)
+                    )
+                    && source == "flowmux:screen");
             if !keep_ownership {
                 self.source = Some(source);
             }
@@ -4020,6 +4044,33 @@ mod tests {
     }
 
     #[test]
+    fn apply_report_screen_scan_keeps_proc_owned_identity() {
+        // Regression: a `claude` pane whose scrollback mentions another agent
+        // (e.g. an AI chat *about* `cline`) must not be relabeled. Process truth
+        // owns the identity; a screen scan may only refine the status.
+        let mut presence = AgentPresence::new("claude", AgentActivity::Idle, None);
+        presence.source = Some(AGENT_SOURCE_PROC.to_string());
+        let applied = presence.apply_report(
+            AgentStatusReport {
+                name: "cline".into(),
+                status: Some(AgentStatus::Working),
+                activity: Some(AgentActivity::Running),
+                pid: None,
+                source: Some("flowmux:screen".into()),
+                seq: None,
+                message: None,
+                custom_status: None,
+                session_id: None,
+            },
+            true,
+        );
+        assert!(applied);
+        assert_eq!(presence.name, "claude", "screen must not rename a proc-owned presence");
+        assert_eq!(presence.source.as_deref(), Some(AGENT_SOURCE_PROC));
+        assert_eq!(presence.status, AgentStatus::Working, "status still refines");
+    }
+
+    #[test]
     fn working_to_idle_in_hidden_surface_becomes_done_until_seen() {
         let mut presence = AgentPresence::new("claude", AgentActivity::Running, None);
         presence.seq = Some(1);
@@ -4678,6 +4729,19 @@ mod tests {
         let mut slot = Some(p);
         assert!(reconcile_surface_process_agent(&mut slot, Some("claude")));
         assert_eq!(slot.as_ref().unwrap().name, "claude");
+    }
+
+    #[test]
+    fn reconcile_reclaims_screen_owned_presence_mislabeled_by_scrollback() {
+        // A screen scan mislabeled a pane because its scrollback *mentioned*
+        // another agent; the process sweep reclaims the true identity.
+        let mut p = AgentPresence::new("cline", AgentActivity::Idle, None);
+        p.source = Some("flowmux:screen".into());
+        let mut slot = Some(p);
+        assert!(reconcile_surface_process_agent(&mut slot, Some("claude")));
+        let agent = slot.as_ref().unwrap();
+        assert_eq!(agent.name, "claude");
+        assert_eq!(agent.source.as_deref(), Some(AGENT_SOURCE_PROC));
     }
 
     #[test]
