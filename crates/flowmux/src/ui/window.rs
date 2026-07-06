@@ -2499,9 +2499,9 @@ impl WindowController {
         if self.pane_registry.borrow().active_surface(pane) != Some(surface) {
             self.activate_surface_now(pane, surface).await;
         }
-        self.focus_pane(pane);
         self.acknowledge_source_notifications(Some(workspace), Some(pane), Some(surface));
         self.window.present();
+        self.focus_pane(pane);
     }
 
     /// Inline copy of the `GtkCommand::ActivateSurface` arm — used by
@@ -9257,6 +9257,8 @@ mod tests {
         store.set_active_workspace(Some(ws_a)).await;
         controller.stack.set_visible_child_name(&ws_a.to_string());
         controller.focused_pane.set(Some(pane_a));
+        controller.window.present();
+        glib::timeout_future(std::time::Duration::from_millis(50)).await;
 
         store
             .set_agent_activity(
@@ -9289,11 +9291,19 @@ mod tests {
         });
         let _ = idle_rx.await;
 
-        assert_eq!(store.active_workspace().await, Some(ws_b));
+        assert_eq!(store.snapshot().await.active_workspace, Some(ws_b));
         assert_eq!(controller.focused_pane.get(), Some(pane_b));
         assert_eq!(
             controller.pane_registry.borrow().active_surface(pane_b),
             Some(surface_b)
+        );
+        assert!(
+            controller
+                .pane_registry
+                .borrow()
+                .active_terminal(pane_b)
+                .is_some_and(|terminal| terminal.widget.has_focus()),
+            "Agent Bar activation should leave keyboard focus on the target terminal"
         );
         assert_eq!(
             controller
