@@ -405,13 +405,26 @@ impl GhosttyPane {
         {
             let cb = callbacks.on_terminal_title_changed.clone();
             let pane_id = pane_id.clone();
-            let last_title: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
+            let coalesce: Rc<TitleCoalesce> = Rc::new(TitleCoalesce::default());
             term.connect_window_title_notify(move |t| {
                 let title = t.window_title().map(|g| g.to_string()).unwrap_or_default();
-                if !title.is_empty() && *last_title.borrow() != title {
-                    *last_title.borrow_mut() = title.clone();
-                    (cb.borrow_mut())(pane_id.get(), surface, title);
+                if title.is_empty() {
+                    return;
                 }
+                if coalesce.window_open.get() {
+                    // Quiet window open: keep only the newest title; the
+                    // window timer delivers it (or drops it if it settled
+                    // back to the last delivered value).
+                    *coalesce.pending.borrow_mut() = Some(title);
+                    return;
+                }
+                if *coalesce.last_sent.borrow() == title {
+                    return;
+                }
+                *coalesce.last_sent.borrow_mut() = title.clone();
+                (cb.borrow_mut())(pane_id.get(), surface, title);
+                coalesce.window_open.set(true);
+                arm_title_coalesce_window(coalesce.clone(), cb.clone(), pane_id.clone(), surface);
             });
         }
 
@@ -846,6 +859,49 @@ fn terminal_current_dir(term: &vte::Terminal, pid: &Rc<Cell<Option<i32>>>) -> Op
 
     pid.get()
         .and_then(|pid| std::fs::read_link(format!("/proc/{pid}/cwd")).ok())
+}
+
+/// AI-agent TUIs (Claude Code and friends) animate the OSC 0 window title
+/// with a spinner, so VTE's `window-title` can change hundreds of times per
+/// second. Every delivered change fans out into a bridge command plus
+/// side-panel, agent-bar, and window-title refreshes on the GTK side, and
+/// each label redraw leaks live heap on the GSK GL renderer (observed with
+/// NVIDIA; the cairo renderer is flat), which is how days of agent use
+/// ratcheted flowmux to 20+ GB resident. Deliver the first change of a
+/// burst immediately, then open a quiet window: while it is open only the
+/// newest title is kept, and the window re-arms for as long as titles keep
+/// changing, so a storm collapses to at most one delivery per window.
+const TITLE_COALESCE_WINDOW_MS: u64 = 200;
+
+#[derive(Default)]
+struct TitleCoalesce {
+    /// Last title actually delivered to the callback.
+    last_sent: RefCell<String>,
+    /// Newest title seen while the quiet window is open.
+    pending: RefCell<Option<String>>,
+    window_open: Cell<bool>,
+}
+
+fn arm_title_coalesce_window(
+    coalesce: Rc<TitleCoalesce>,
+    cb: Rc<RefCell<dyn FnMut(PaneId, SurfaceId, String)>>,
+    pane_id: Rc<Cell<PaneId>>,
+    surface: SurfaceId,
+) {
+    glib::timeout_add_local_once(
+        std::time::Duration::from_millis(TITLE_COALESCE_WINDOW_MS),
+        move || {
+            let pending = coalesce.pending.borrow_mut().take();
+            match pending {
+                Some(title) if title != *coalesce.last_sent.borrow() => {
+                    *coalesce.last_sent.borrow_mut() = title.clone();
+                    (cb.borrow_mut())(pane_id.get(), surface, title);
+                    arm_title_coalesce_window(coalesce, cb, pane_id, surface);
+                }
+                _ => coalesce.window_open.set(false),
+            }
+        },
+    );
 }
 
 fn install_url_link_handling(
