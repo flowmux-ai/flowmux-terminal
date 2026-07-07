@@ -1633,7 +1633,7 @@ fn find_active_title_prefix(tree: &Pane, needle_lower: &str) -> Option<(PaneId, 
             PaneContent::Tabs { active, surfaces } => surfaces
                 .iter()
                 .find(|s| s.id == *active)
-                .filter(|s| s.title.to_ascii_lowercase().starts_with(needle_lower))
+                .filter(|s| active_title_matches_needle(&s.title, needle_lower))
                 .map(|s| (*id, s.id)),
             // Legacy leaf shapes carry no per-tab title; they should
             // have been normalised on load, but stay defensive.
@@ -1647,6 +1647,18 @@ fn find_active_title_prefix(tree: &Pane, needle_lower: &str) -> Option<(PaneId, 
 /// Count the tab surfaces inside the leaf identified by `target` in
 /// the given pane tree. Returns `None` when `target` is not a
 /// `PaneContent::Tabs` leaf (Terminal/Browser leaves with no tabs).
+fn active_title_matches_needle(title: &str, needle_lower: &str) -> bool {
+    let title_lower = title.to_ascii_lowercase();
+    let Some(rest) = title_lower.strip_prefix(needle_lower) else {
+        return false;
+    };
+    match rest.chars().next() {
+        None => true,
+        Some('|' | ':') => true,
+        Some(ch) => ch.is_whitespace(),
+    }
+}
+
 fn pane_tab_count(tree: &Pane, target: PaneId) -> Option<usize> {
     match tree {
         Pane::Leaf { id, content } if *id == target => match content {
@@ -4403,6 +4415,51 @@ Do you want to continue?";
             .find_pane_by_active_title_prefix("OPENcode")
             .await
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn title_prefix_resolver_rejects_hyphenated_path_prefix() {
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("demo".into()), std::path::PathBuf::from("/tmp/demo"))
+            .await;
+        let pane = first_pane(&store.get_workspace(ws_id).await.unwrap());
+        let surface = first_pane_active_surface(&store.get_workspace(ws_id).await.unwrap());
+        store
+            .rename_surface(pane, surface, "opencode-anycli".into())
+            .await;
+
+        assert!(store
+            .find_pane_by_active_title_prefix("OpenCode")
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn screen_signal_rejects_hyphenated_path_title_as_idle_agent() {
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(
+                Some("opencode-anycli".into()),
+                std::path::PathBuf::from("/tmp/opencode-anycli"),
+            )
+            .await;
+        let pane = first_pane(&store.get_workspace(ws_id).await.unwrap());
+        let surface = first_pane_active_surface(&store.get_workspace(ws_id).await.unwrap());
+        store
+            .rename_surface(pane, surface, "opencode-anycli".into())
+            .await;
+
+        assert!(store
+            .report_agent_screen_signals(surface, None, Some("opencode-anycli"))
+            .await
+            .is_none());
+        assert!(store
+            .get_workspace(ws_id)
+            .await
+            .unwrap()
+            .collect_agent_bar_items()
+            .is_empty());
     }
 
     #[tokio::test]

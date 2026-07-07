@@ -2441,7 +2441,7 @@ fn line_has_agent_status_cue(line: &str) -> bool {
 }
 
 fn agent_name_in_text(text: &str) -> Option<&'static str> {
-    if text.contains("opencode") || text.contains("open code") {
+    if contains_ascii_token(text, "opencode") || contains_ascii_phrase(text, "open code") {
         Some("opencode")
     } else if contains_ascii_token(text, "claude") {
         Some("claude")
@@ -2508,31 +2508,54 @@ fn normalize_agent_report_name_for_surface_title(report: &mut AgentStatusReport,
 
 fn detect_agent_name_from_surface_title(title: &str) -> Option<&'static str> {
     let lower = title.trim_start().to_ascii_lowercase();
-    let first = lower
-        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '|'))
-        .find(|part| !part.is_empty())
-        .unwrap_or_default();
-    if first == "opencode"
-        || lower.starts_with("open code")
+    if starts_with_agent_title_token(&lower, "opencode")
+        || starts_with_agent_title_token(&lower, "open code")
         || lower.starts_with("oc |")
         || lower.starts_with("oc|")
     {
         Some("opencode")
-    } else if first == "claude" {
+    } else if starts_with_agent_title_token(&lower, "claude") {
         Some("claude")
-    } else if first == "codex" {
+    } else if starts_with_agent_title_token(&lower, "codex") {
         Some("codex")
-    } else if first == "cline" {
+    } else if starts_with_agent_title_token(&lower, "cline") {
         Some("cline")
     } else {
         None
     }
 }
 
+fn starts_with_agent_title_token(title: &str, token: &str) -> bool {
+    let Some(rest) = title.strip_prefix(token) else {
+        return false;
+    };
+    match rest.chars().next() {
+        None => true,
+        Some('|' | ':') => true,
+        Some(ch) => ch.is_whitespace(),
+    }
+}
+
 fn contains_ascii_token(haystack: &str, needle: &str) -> bool {
-    haystack
-        .split(|ch: char| !ch.is_ascii_alphanumeric())
-        .any(|part| part == needle)
+    contains_ascii_phrase(haystack, needle)
+}
+
+fn contains_ascii_phrase(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    haystack.match_indices(needle).any(|(idx, _)| {
+        let before = haystack[..idx].chars().next_back();
+        let after = haystack[idx + needle.len()..].chars().next();
+        is_agent_name_boundary(before) && is_agent_name_boundary(after)
+    })
+}
+
+fn is_agent_name_boundary(ch: Option<char>) -> bool {
+    match ch {
+        None => true,
+        Some(ch) => !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '_'),
+    }
 }
 
 fn is_braille_spinner(ch: char) -> bool {
@@ -5262,6 +5285,26 @@ mod tests {
                 Some(r#"printf "Codex\\npress / for commands\\n""#),
                 None
             ),
+            None
+        );
+    }
+
+    #[test]
+    fn detector_rejects_hyphenated_agent_name_prefixes() {
+        assert_eq!(
+            detect_agent_name_from_signals(None, Some("opencode-anycli")),
+            None
+        );
+        assert_eq!(
+            detect_agent_idle_name_from_signals(None, Some("opencode-anycli")),
+            None
+        );
+        assert_eq!(
+            detect_agent_name_from_signals(Some("idle /tmp/opencode-anycli"), None),
+            None
+        );
+        assert_eq!(
+            detect_agent_idle_name_from_signals(Some("Ask anything\n/tmp/opencode-anycli"), None),
             None
         );
     }
