@@ -5,7 +5,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "SSH workspace support: russh shell + scp upload + remote port forwarding."
+description = "SSH workspace support: target parser for the GUI's system-ssh injection; optional russh native transport (unimplemented, behind the native-ssh feature)."
+
+[features]
+# Off by default. Compiles in the russh-based native SSH client scaffolding
+# (`SshClient`), which is currently unimplemented (connect returns
+# Unimplemented) and unused by the GUI/daemon. Kept for future native transport.
+native-ssh = ["dep:russh", "dep:russh-keys", "dep:async-trait"]
 
 [dependencies]
 flowmux-core = { workspace = true }
@@ -13,6 +19,6 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-async-trait = "0.1"
-russh = "0.46"
-russh-keys = "0.46"
+async-trait = { version = "0.1", optional = true }
+russh = { version = "0.46", optional = true }
+russh-keys = { version = "0.46", optional = true }

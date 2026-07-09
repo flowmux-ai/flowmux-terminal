@@ -1,26 +1,27 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! SSH workspaces for flowmux.
+//! SSH workspace support for flowmux.
 //!
-//! Mirrors cmux's documented behavior:
+//! What actually ships today:
 //!
-//! * `flowmux ssh user@host` opens a workspace whose terminal is a remote
-//!   shell over an SSH channel.
-//! * Browser panes inside an SSH workspace route their localhost
-//!   requests through a remote port forward, so dev servers on the
-//!   remote box "just work" from the in-app browser.
-//! * Dragging an image into the terminal pane uploads it to the remote
-//!   over SFTP and pastes the remote path.
+//! * [`SshTarget::parse`] turns a `[user@]host[:port]` spec into a target, and
+//!   [`SshTarget::command_line`] builds the equivalent OpenSSH invocation.
+//! * The GUI's `flowmux ssh user@host` creates a workspace and *types that
+//!   OpenSSH command line into the pane as keystrokes*, so the remote shell runs
+//!   through the host's system `ssh` client — see
+//!   `flowmux::ipc_handler::GuiHandler::open_ssh_workspace`. This works.
 //!
-//! This crate is the transport layer. Authentication, channel I/O,
-//! port forwarding, and SFTP are landed in follow-on commits — the
-//! current code provides the target parser and the connection
-//! scaffolding so the IPC verbs can already be wired through to it.
+//! Runtime divergence: the headless `flowmux-daemon` handles the same
+//! `SshConnect` verb by creating the workspace *only* — it does not inject the
+//! `ssh` command line — so the verb's observable effect differs between the GUI
+//! (workspace + remote shell) and the headless daemon (workspace only).
 //!
-//! TODO(SSH): replace [`SshClient::connect`] with a real russh handshake
-//! once the host-key store and ssh-agent flow are designed.
-
-use std::sync::Arc;
-use std::time::Duration;
+//! What is **not** implemented (earlier revisions of this doc overstated it):
+//! there is no in-crate SSH transport, no remote port forwarding, and no SFTP
+//! upload. A russh-based native client (`SshClient`) exists only as scaffolding,
+//! is gated behind the off-by-default `native-ssh` feature, and its `connect`
+//! returns `SshError::Unimplemented`. Building the native transport (russh
+//! handshake + `known_hosts` + ssh-agent auth) is future work, not a current
+//! capability.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SshTarget {
@@ -90,60 +91,77 @@ fn shell_quote(value: &str) -> String {
 pub enum SshError {
     #[error("invalid ssh target: {0}")]
     ParseTarget(String),
+    #[cfg(feature = "native-ssh")]
     #[error("ssh handshake failed: {0}")]
     Handshake(String),
+    #[cfg(feature = "native-ssh")]
     #[error("auth failed for {0}")]
     AuthFailed(String),
+    #[cfg(feature = "native-ssh")]
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    #[cfg(feature = "native-ssh")]
     #[error("not yet implemented: {0}")]
     Unimplemented(&'static str),
 }
 
-pub struct ClientHandler;
+/// russh-based native SSH transport scaffolding. Gated behind `native-ssh`
+/// (off by default) and unused by the GUI/daemon, which drive SSH through the
+/// host's system `ssh` client. Unimplemented: `connect` returns
+/// `SshError::Unimplemented`.
+#[cfg(feature = "native-ssh")]
+mod native {
+    use super::{SshError, SshTarget};
+    use std::sync::Arc;
+    use std::time::Duration;
 
-#[async_trait::async_trait]
-impl russh::client::Handler for ClientHandler {
-    type Error = russh::Error;
-    async fn check_server_key(
-        &mut self,
-        _server_public_key: &russh::keys::key::PublicKey,
-    ) -> Result<bool, Self::Error> {
-        // TODO(SSH): consult ~/.ssh/known_hosts and prompt user on
-        // unknown / changed keys. Skeleton accepts everything so the
-        // GUI flow can be exercised end-to-end against test boxes.
-        Ok(true)
+    pub struct ClientHandler;
+
+    #[async_trait::async_trait]
+    impl russh::client::Handler for ClientHandler {
+        type Error = russh::Error;
+        async fn check_server_key(
+            &mut self,
+            _server_public_key: &russh::keys::key::PublicKey,
+        ) -> Result<bool, Self::Error> {
+            // TODO(SSH): consult ~/.ssh/known_hosts and prompt user on
+            // unknown / changed keys. Skeleton accepts everything so the
+            // GUI flow can be exercised end-to-end against test boxes.
+            Ok(true)
+        }
+    }
+
+    pub struct SshClient {
+        pub session: russh::client::Handle<ClientHandler>,
+        pub target: SshTarget,
+    }
+
+    impl SshClient {
+        /// Connect and complete the SSH handshake. Authentication is future
+        /// work; today this returns `SshError::Unimplemented` so the type
+        /// exists but does not yet open a usable session.
+        pub async fn connect(target: SshTarget) -> Result<Self, SshError> {
+            let cfg = Arc::new(russh::client::Config {
+                inactivity_timeout: Some(Duration::from_secs(60)),
+                ..Default::default()
+            });
+            let session =
+                russh::client::connect(cfg, (target.host.as_str(), target.port), ClientHandler)
+                    .await
+                    .map_err(|e| SshError::Handshake(e.to_string()))?;
+
+            // Authentication path lands once we have a host-key store + agent
+            // integration. Holding the open session here is intentional so
+            // we surface a clean Unimplemented error rather than leaking a
+            // half-authenticated channel.
+            drop(session);
+            Err(SshError::Unimplemented("ssh authentication"))
+        }
     }
 }
 
-pub struct SshClient {
-    pub session: russh::client::Handle<ClientHandler>,
-    pub target: SshTarget,
-}
-
-impl SshClient {
-    /// Connect and complete the SSH handshake. Authentication is left
-    /// to a follow-on commit; today this returns [`SshError::Unimplemented`]
-    /// so the verb is wired through the IPC surface but does not yet
-    /// open a usable session.
-    pub async fn connect(target: SshTarget) -> Result<Self, SshError> {
-        let cfg = Arc::new(russh::client::Config {
-            inactivity_timeout: Some(Duration::from_secs(60)),
-            ..Default::default()
-        });
-        let session =
-            russh::client::connect(cfg, (target.host.as_str(), target.port), ClientHandler)
-                .await
-                .map_err(|e| SshError::Handshake(e.to_string()))?;
-
-        // Authentication path lands once we have a host-key store + agent
-        // integration. Holding the open session here is intentional so
-        // we surface a clean Unimplemented error rather than leaking a
-        // half-authenticated channel.
-        drop(session);
-        Err(SshError::Unimplemented("ssh authentication"))
-    }
-}
+#[cfg(feature = "native-ssh")]
+pub use native::{ClientHandler, SshClient};
 
 #[cfg(test)]
 mod tests {
