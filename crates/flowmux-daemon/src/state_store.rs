@@ -402,7 +402,13 @@ impl StateStore {
         'split: for ws in s.workspaces.iter_mut() {
             for sf in ws.surfaces.iter_mut() {
                 if sf.root_pane.find_leaf_content(dst_pane).is_some() {
-                    let surface = pending.take().expect("surface pending split");
+                    let Some(surface) = pending.take() else {
+                        // `pending` is Some until this single match, guarded by the
+                        // `dst_exists` check above — unreachable. Degrade to a no-op
+                        // rather than panicking the embedded daemon (and the GUI).
+                        error!(pane = %dst_pane, "split_surface_into_pane: pending surface already taken");
+                        return None;
+                    };
                     let content = PaneContent::Tabs {
                         active: surface.id,
                         surfaces: vec![surface],
@@ -569,7 +575,12 @@ impl StateStore {
         'insert: for ws in s.workspaces.iter_mut() {
             for sf in ws.surfaces.iter_mut() {
                 if sf.root_pane.find_leaf_content(dst_pane).is_some() {
-                    let surface = pending.take().expect("surface pending insert");
+                    let Some(surface) = pending.take() else {
+                        // Unreachable: `pending` is Some until this single match.
+                        // Degrade rather than panic the embedded daemon.
+                        error!(pane = %dst_pane, "move_surface_to_pane: pending surface already taken");
+                        return None;
+                    };
                     sf.root_pane
                         .insert_surface_into_leaf(dst_pane, surface, target_index);
                     dst_workspace = Some(ws.id);
@@ -577,7 +588,12 @@ impl StateStore {
                 }
             }
         }
-        let dst_workspace = dst_workspace.expect("destination existed before take");
+        let Some(dst_workspace) = dst_workspace else {
+            // Unreachable: `dst_exists` was verified before taking the source
+            // surface. Degrade rather than panic the embedded daemon.
+            error!(pane = %dst_pane, "move_surface_to_pane: destination vanished after take");
+            return None;
+        };
 
         // Collapse the source leaf if it emptied.
         let mut src_pane_removed = false;
@@ -4716,6 +4732,35 @@ Do you want to continue?";
             .is_none());
         // Surface still present in the source pane.
         assert!(pane_tab_ids(&store, ws, src).await.contains(&moved));
+    }
+
+    #[tokio::test]
+    async fn move_surface_to_pane_in_other_workspace_reassigns_dst_workspace() {
+        // Drives the take -> insert -> dst_workspace assignment that the newly
+        // hardened invariant guards protect: a cross-workspace move must land the
+        // surface in the destination workspace's tree, report that workspace, and
+        // (crucially) never panic the embedded daemon on the take/insert path.
+        let store = StateStore::new_lazy(State::default());
+        let ws1 = store
+            .create_workspace(Some("one".into()), std::path::PathBuf::from("/tmp/one"))
+            .await;
+        let ws2 = store
+            .create_workspace(Some("two".into()), std::path::PathBuf::from("/tmp/two"))
+            .await;
+        let src = first_pane(&store.get_workspace(ws1).await.unwrap());
+        let moved = store.get_workspace(ws1).await.unwrap().surfaces[0]
+            .root_pane
+            .active_surface_id(src)
+            .unwrap();
+        let dst = first_pane(&store.get_workspace(ws2).await.unwrap());
+
+        let out = store
+            .move_surface_to_pane(src, moved, dst, usize::MAX)
+            .await
+            .expect("cross-workspace move must succeed, not degrade or panic");
+        assert_eq!(out.dst_workspace, ws2);
+        assert_eq!(out.src_workspace, ws1);
+        assert!(pane_tab_ids(&store, ws2, dst).await.contains(&moved));
     }
 
     // ---- split_surface_into_pane ----
