@@ -202,11 +202,7 @@ impl BrowserPane {
         zoom_in.set_tooltip_text(Some("Zoom in"));
         let zoom = Rc::new(Cell::new(1.0));
         let zoom_label = zoom_reset.clone();
-        let session_status = gtk::Button::from_icon_name(if persist_session {
-            "document-save-symbolic"
-        } else {
-            "changes-prevent-symbolic"
-        });
+        let session_status = gtk::Button::from_icon_name("avatar-default-symbolic");
         session_status.add_css_class("flat");
         session_status.set_tooltip_text(Some(&format!(
             "Profile: {}\n{}",
@@ -227,6 +223,21 @@ impl BrowserPane {
         let inspector = gtk::Button::from_icon_name("applications-utilities-symbolic");
         inspector.add_css_class("flat");
         inspector.set_tooltip_text(Some("Open Web Inspector"));
+        let downloads = gtk::MenuButton::builder()
+            .icon_name("folder-download-symbolic")
+            .tooltip_text("Downloads")
+            .build();
+        let downloads_list = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        downloads_list.set_margin_top(8);
+        downloads_list.set_margin_bottom(8);
+        downloads_list.set_margin_start(8);
+        downloads_list.set_margin_end(8);
+        let downloads_empty = gtk::Label::new(Some("No downloads yet"));
+        downloads_empty.add_css_class("dim-label");
+        downloads_list.append(&downloads_empty);
+        let downloads_popover = gtk::Popover::new();
+        downloads_popover.set_child(Some(&downloads_list));
+        downloads.set_popover(Some(&downloads_popover));
 
         let chrome = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         chrome.set_margin_top(4);
@@ -242,7 +253,92 @@ impl BrowserPane {
         chrome.append(&zoom_out);
         chrome.append(&zoom_reset);
         chrome.append(&zoom_in);
+        chrome.append(&downloads);
         chrome.append(&inspector);
+
+        {
+            let downloads = downloads.clone();
+            let downloads_list = downloads_list.clone();
+            let downloads_empty = downloads_empty.clone();
+            let download_directory = download_directory();
+            network_session.connect_download_started(move |_, download| {
+                downloads_empty.set_visible(false);
+                downloads.set_tooltip_text(Some("Downloads in progress"));
+
+                let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+                let details = gtk::Box::new(gtk::Orientation::Vertical, 4);
+                details.set_hexpand(true);
+                let name = gtk::Label::new(Some("Preparing download…"));
+                name.set_halign(gtk::Align::Start);
+                name.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+                let progress = gtk::ProgressBar::new();
+                progress.set_hexpand(true);
+                let cancel = gtk::Button::from_icon_name("process-stop-symbolic");
+                cancel.set_tooltip_text(Some("Cancel download"));
+                details.append(&name);
+                details.append(&progress);
+                row.append(&details);
+                row.append(&cancel);
+                downloads_list.append(&row);
+
+                {
+                    let download = download.clone();
+                    cancel.connect_clicked(move |button| {
+                        download.cancel();
+                        button.set_sensitive(false);
+                    });
+                }
+                {
+                    let directory = download_directory.clone();
+                    let name = name.clone();
+                    download.connect_decide_destination(move |download, suggested| {
+                        if let Err(error) = std::fs::create_dir_all(&directory) {
+                            name.set_text(&format!("Download failed: {error}"));
+                            return false;
+                        }
+                        let destination = available_download_path(&directory, suggested);
+                        name.set_text(
+                            destination
+                                .file_name()
+                                .and_then(|value| value.to_str())
+                                .unwrap_or("download"),
+                        );
+                        name.set_tooltip_text(Some(&destination.display().to_string()));
+                        download.set_destination(&destination.to_string_lossy());
+                        true
+                    });
+                }
+                {
+                    let progress = progress.clone();
+                    download.connect_estimated_progress_notify(move |download| {
+                        progress.set_fraction(download.estimated_progress());
+                    });
+                }
+                {
+                    let downloads = downloads.clone();
+                    let cancel = cancel.clone();
+                    let progress = progress.clone();
+                    download.connect_finished(move |_| {
+                        progress.set_fraction(1.0);
+                        progress.set_text(Some("Complete"));
+                        progress.set_show_text(true);
+                        cancel.set_visible(false);
+                        downloads.set_tooltip_text(Some("Downloads"));
+                    });
+                }
+                {
+                    let downloads = downloads.clone();
+                    let cancel = cancel.clone();
+                    let progress = progress.clone();
+                    download.connect_failed(move |_, error| {
+                        progress.set_text(Some(&format!("Failed: {error}")));
+                        progress.set_show_text(true);
+                        cancel.set_visible(false);
+                        downloads.set_tooltip_text(Some("Download failed"));
+                    });
+                }
+            });
+        }
 
         let find_entry = gtk::SearchEntry::builder()
             .placeholder_text("Find in page…")
@@ -560,6 +656,44 @@ fn set_webkit_zoom(
     web_view.set_zoom_level(level);
 }
 
+fn download_directory() -> std::path::PathBuf {
+    gtk::glib::user_special_dir(gtk::glib::UserDirectory::Downloads)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join("Downloads"))
+        })
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+fn available_download_path(directory: &std::path::Path, suggested: &str) -> std::path::PathBuf {
+    let file_name = std::path::Path::new(suggested)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("download");
+    let candidate = directory.join(file_name);
+    if !candidate.exists() {
+        return candidate;
+    }
+
+    let path = std::path::Path::new(file_name);
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("download");
+    let extension = path.extension().and_then(|value| value.to_str());
+    for number in 1.. {
+        let numbered = match extension {
+            Some(extension) => format!("{stem} ({number}).{extension}"),
+            None => format!("{stem} ({number})"),
+        };
+        let candidate = directory.join(numbered);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!()
+}
+
 fn urlencode(s: &str) -> String {
     s.bytes()
         .map(|b| match b {
@@ -756,6 +890,21 @@ mod tests {
         assert_eq!(
             normalize_uri("hello world"),
             "https://duckduckgo.com/?q=hello+world"
+        );
+    }
+
+    #[test]
+    fn download_path_stays_in_directory_and_avoids_overwrite() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("report.txt"), "existing").unwrap();
+
+        assert_eq!(
+            available_download_path(directory.path(), "../report.txt"),
+            directory.path().join("report (1).txt")
+        );
+        assert_eq!(
+            available_download_path(directory.path(), "../../"),
+            directory.path().join("download")
         );
     }
 }

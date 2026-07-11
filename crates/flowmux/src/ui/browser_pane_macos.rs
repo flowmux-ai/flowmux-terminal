@@ -198,11 +198,7 @@ impl BrowserPane {
         let zoom_in = gtk::Button::from_icon_name("zoom-in-symbolic");
         zoom_in.set_tooltip_text(Some("Zoom in"));
         let zoom_label = zoom_reset.clone();
-        let session_status = gtk::Button::from_icon_name(if persist_session {
-            "document-save-symbolic"
-        } else {
-            "changes-prevent-symbolic"
-        });
+        let session_status = gtk::Button::from_icon_name("avatar-default-symbolic");
         session_status.add_css_class("flat");
         session_status.set_tooltip_text(Some(&format!(
             "Profile: {}\n{}",
