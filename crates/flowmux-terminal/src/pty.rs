@@ -55,7 +55,7 @@ impl Pty {
             None => None,
         };
 
-        let ws = libc::winsize {
+        let mut ws = libc::winsize {
             ws_row: rows,
             ws_col: cols,
             ws_xpixel: 0,
@@ -65,8 +65,14 @@ impl Pty {
         let mut master: RawFd = -1;
         // SAFETY: forkpty allocates a PTY pair and forks. We pass a valid
         // master-out pointer and winsize; name/termios default to NULL.
-        let pid =
-            unsafe { libc::forkpty(&mut master, std::ptr::null_mut(), std::ptr::null_mut(), &ws) };
+        let pid = unsafe {
+            libc::forkpty(
+                &mut master,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut ws,
+            )
+        };
 
         if pid < 0 {
             return Err(io::Error::last_os_error());
