@@ -35,6 +35,11 @@ fn palette_button(label: &str, shortcut: Option<&str>) -> gtk::Button {
     button
 }
 
+fn accelerator_label(accelerator: &str) -> Option<String> {
+    gtk::accelerator_parse(accelerator)
+        .map(|(key, modifiers)| gtk::accelerator_get_label(key, modifiers).to_string())
+}
+
 impl WindowController {
     /// Connect (lazily) to the `org.gtk.Notifications` service and ask
     /// it to withdraw the given `desktop_id`s. Used by the bell popover
@@ -99,6 +104,30 @@ impl WindowController {
             });
             list.append(&button);
             entries.push((label.to_string(), button));
+        }
+
+        for (action, accelerators) in self.options.borrow().keybindings.resolve() {
+            if action == flowmux_config::keybindings::ActionId::CommandPalette {
+                continue;
+            }
+            let label = action.label();
+            let shortcut = accelerators
+                .first()
+                .and_then(|accelerator| accelerator_label(accelerator));
+            let button = palette_button(label, shortcut.as_deref());
+            let controller = self.clone();
+            let dialog_for_click = dialog.clone();
+            button.connect_clicked(move |_| {
+                dialog_for_click.close();
+                let controller = controller.clone();
+                glib::MainContext::default().spawn_local(async move {
+                    controller
+                        .run_command_palette_command(CommandPaletteCommand::Keybinding(action))
+                        .await;
+                });
+            });
+            list.append(&button);
+            entries.push((format!("{} {}", label, action.as_str()), button));
         }
 
         if let Some((base_dir, config)) = self.command_palette_project_config() {
@@ -196,6 +225,18 @@ impl WindowController {
                     .map(|entry| entry.id);
                 if let Some(id) = id {
                     self.open_notification_id(id).await;
+                }
+            }
+            CommandPaletteCommand::Keybinding(action) => {
+                let detailed_action = format!("win.{}", action.as_str());
+                if let Err(error) =
+                    gtk::prelude::WidgetExt::activate_action(&self.window, &detailed_action, None)
+                {
+                    tracing::warn!(
+                        action = action.as_str(),
+                        error = %error,
+                        "command palette action failed"
+                    );
                 }
             }
         }
@@ -343,5 +384,13 @@ mod tests {
     fn empty_fuzzy_query_matches_every_command() {
         assert!(fuzzy_matches("", "Open browser"));
         assert!(fuzzy_matches("   ", "Project test"));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[gtk::test]
+    fn accelerator_labels_are_human_readable() {
+        let label = super::accelerator_label("<Ctrl><Shift>b").unwrap();
+        assert!(label.contains("Ctrl"));
+        assert!(label.to_lowercase().contains('b'));
     }
 }

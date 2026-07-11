@@ -81,6 +81,7 @@ enum CommandPaletteCommand {
     RenameTab,
     ReloadConfig,
     OpenUnread,
+    Keybinding(flowmux_config::keybindings::ActionId),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -131,6 +132,7 @@ fn command_palette_label(command: CommandPaletteCommand) -> &'static str {
         CommandPaletteCommand::RenameTab => "Rename tab",
         CommandPaletteCommand::ReloadConfig => "Reload config",
         CommandPaletteCommand::OpenUnread => "Open unread notification",
+        CommandPaletteCommand::Keybinding(action) => action.label(),
     }
 }
 
