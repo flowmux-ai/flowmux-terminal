@@ -773,10 +773,39 @@ fn trim_url_trailing(s: &str) -> String {
     .to_string()
 }
 
+#[derive(Debug, PartialEq, Eq)]
 enum TerminalClickTarget {
     Url(String),
     Image(PathBuf),
     Markdown(PathBuf),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PendingTerminalClick {
+    target: TerminalClickTarget,
+    open_in_system_browser: bool,
+}
+
+#[derive(Default)]
+struct TerminalClickActivation {
+    pending: Option<PendingTerminalClick>,
+}
+
+impl TerminalClickActivation {
+    fn press(&mut self, target: TerminalClickTarget, open_in_system_browser: bool) {
+        self.pending = Some(PendingTerminalClick {
+            target,
+            open_in_system_browser,
+        });
+    }
+
+    fn release(&mut self) -> Option<PendingTerminalClick> {
+        self.pending.take()
+    }
+
+    fn clear(&mut self) {
+        self.pending = None;
+    }
 }
 
 fn terminal_image_path(raw: &str, cwd: Option<&std::path::Path>) -> Option<PathBuf> {
@@ -969,9 +998,12 @@ fn install_url_link_handling(
     let click = gtk::GestureClick::new();
     click.set_button(gtk::gdk::BUTTON_PRIMARY);
     click.set_propagation_phase(gtk::PropagationPhase::Bubble);
+    let activation = Rc::new(RefCell::new(TerminalClickActivation::default()));
 
     let term_widget = term.clone();
+    let activation_for_press = activation.clone();
     click.connect_pressed(move |gesture, _n_press, x, y| {
+        activation_for_press.borrow_mut().clear();
         // A new primary press starts a fresh interaction: drop the stale
         // selection snapshot so Copy never resurrects text from a selection the
         // user has moved on from. A drag re-populates it via `selection-changed`.
@@ -1003,8 +1035,7 @@ fn install_url_link_handling(
                     terminal_image_path(&raw, cwd.as_deref()).map(TerminalClickTarget::Image)
                 } else if tag == markdown_tag {
                     let cwd = terminal_current_dir(&term_widget, &pid);
-                    terminal_markdown_path(&raw, cwd.as_deref())
-                        .map(TerminalClickTarget::Markdown)
+                    terminal_markdown_path(&raw, cwd.as_deref()).map(TerminalClickTarget::Markdown)
                 } else if tag == url_tag {
                     Some(TerminalClickTarget::Url(raw))
                 } else {
@@ -1019,7 +1050,32 @@ fn install_url_link_handling(
             gesture.set_state(gtk::EventSequenceState::Denied);
             return;
         };
-        match link {
+        let link = match link {
+            TerminalClickTarget::Url(raw) => {
+                let url = trim_url_trailing(&raw);
+                if url.is_empty() {
+                    gesture.set_state(gtk::EventSequenceState::Denied);
+                    return;
+                }
+                TerminalClickTarget::Url(url)
+            }
+            other => other,
+        };
+        activation_for_press
+            .borrow_mut()
+            .press(link, modifiers.contains(gtk::gdk::ModifierType::SHIFT_MASK));
+        // Claim now so VTE does not begin a selection, but defer opening until
+        // button release. On macOS, presenting a viewer during button press
+        // lets the matching release return focus to the terminal window.
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+    });
+
+    let term_widget = term.clone();
+    click.connect_released(move |gesture, _n_press, _x, _y| {
+        let Some(pending) = activation.borrow_mut().release() else {
+            return;
+        };
+        match pending.target {
             TerminalClickTarget::Image(path) => {
                 tracing::info!(%pane_id, path = %path.display(), "Ctrl+click on terminal image path");
                 (on_open_image.borrow_mut())(pane_id, path);
@@ -1028,13 +1084,8 @@ fn install_url_link_handling(
                 tracing::info!(%pane_id, path = %path.display(), "Ctrl+click on terminal markdown path");
                 (on_open_markdown.borrow_mut())(pane_id, path);
             }
-            TerminalClickTarget::Url(raw) => {
-                let url = trim_url_trailing(&raw);
-                if url.is_empty() {
-                    gesture.set_state(gtk::EventSequenceState::Denied);
-                    return;
-                }
-                if modifiers.contains(gtk::gdk::ModifierType::SHIFT_MASK) {
+            TerminalClickTarget::Url(url) => {
+                if pending.open_in_system_browser {
                     // Ctrl+Shift+click → open in the system default browser instead of
                     // an in-app browser tab.
                     tracing::info!(%pane_id, %url, "Ctrl+Shift+click on terminal URL → open in system browser");
@@ -1055,7 +1106,8 @@ fn install_url_link_handling(
                 }
             }
         }
-        // We handled the URL, so claim the sequence to prevent VTE selection.
+        // The press already claimed this sequence; keep it claimed through
+        // release so the underlying terminal does not also handle the click.
         gesture.set_state(gtk::EventSequenceState::Claimed);
     });
     term.add_controller(click);
@@ -2190,6 +2242,24 @@ mod tests {
     fn image_path_regex_compiles() {
         vte::Regex::for_match(IMAGE_PATH_REGEX_PATTERN, URL_REGEX_COMPILE_FLAGS)
             .expect("image path regex compiles");
+    }
+
+    #[test]
+    fn terminal_click_activation_waits_for_release_and_runs_once() {
+        let mut activation = TerminalClickActivation::default();
+        activation.press(
+            TerminalClickTarget::Image(PathBuf::from("/tmp/render.png")),
+            false,
+        );
+
+        assert_eq!(
+            activation.release(),
+            Some(PendingTerminalClick {
+                target: TerminalClickTarget::Image(PathBuf::from("/tmp/render.png")),
+                open_in_system_browser: false,
+            })
+        );
+        assert_eq!(activation.release(), None);
     }
 
     #[test]
