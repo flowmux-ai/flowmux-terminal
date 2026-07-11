@@ -106,6 +106,50 @@ fn remove_pane_leaf_locked(s: &mut State, target: PaneId) -> Option<CloseOutcome
     None
 }
 
+struct TakenPaneSurface {
+    surface: PaneSurface,
+    workspace: WorkspaceId,
+    leaf_empty: bool,
+}
+
+/// Remove one tab from a pane while the state lock is already held. Keeping
+/// this search in one helper makes move and split-move use the same active-tab
+/// fix-up and source-workspace bookkeeping.
+fn take_surface_locked(
+    s: &mut State,
+    pane: PaneId,
+    surface: SurfaceId,
+) -> Option<TakenPaneSurface> {
+    for workspace in &mut s.workspaces {
+        for workspace_surface in &mut workspace.surfaces {
+            if let Some((surface, leaf_empty)) = workspace_surface
+                .root_pane
+                .take_surface_from_leaf(pane, surface)
+            {
+                return Some(TakenPaneSurface {
+                    surface,
+                    workspace: workspace.id,
+                    leaf_empty,
+                });
+            }
+        }
+    }
+    None
+}
+
+/// Collapse a source pane after its last tab moved away. The booleans match
+/// the public move outcomes: pane removed, then workspace removed.
+fn collapse_empty_source_locked(s: &mut State, pane: PaneId, leaf_empty: bool) -> (bool, bool) {
+    if !leaf_empty {
+        return (false, false);
+    }
+    match remove_pane_leaf_locked(s, pane) {
+        Some(CloseOutcome::WorkspaceRemoved { .. }) => (true, true),
+        Some(_) => (true, false),
+        None => (false, false),
+    }
+}
+
 /// Return every live workspace id exactly once in sidebar order. Persisted
 /// states from older releases may have no `workspace_order`, while a damaged
 /// state can contain stale or duplicate ids; append any missing live ids in
@@ -429,32 +473,16 @@ impl StateStore {
                     .map(|surface_idx| (ws_idx, surface_idx))
             })?;
 
-        // Take from the source.
-        let mut taken = None;
-        let mut src_workspace = None;
-        let mut src_leaf_empty = false;
-        'take: for ws in s.workspaces.iter_mut() {
-            for sf in ws.surfaces.iter_mut() {
-                if let Some((surface, empty)) =
-                    sf.root_pane.take_surface_from_leaf(src_pane, surface_id)
-                {
-                    taken = Some(surface);
-                    src_workspace = Some(ws.id);
-                    src_leaf_empty = empty;
-                    break 'take;
-                }
-            }
-        }
-        let taken = taken?;
-        let src_workspace = src_workspace?;
+        let taken = take_surface_locked(&mut s, src_pane, surface_id)?;
+        let src_workspace = taken.workspace;
 
         // Split the prevalidated destination, placing the moved tab in the new
         // sibling. There is no second tree search or pending payload state that
         // can diverge after the source mutation.
         let dst_workspace = s.workspaces[dst_ws_idx].id;
         let content = PaneContent::Tabs {
-            active: taken.id,
-            surfaces: vec![taken],
+            active: taken.surface.id,
+            surfaces: vec![taken.surface],
         };
         let Some(new_pane) = s.workspaces[dst_ws_idx].surfaces[dst_surface_idx]
             .root_pane
@@ -464,18 +492,8 @@ impl StateStore {
             return None;
         };
 
-        let mut src_pane_removed = false;
-        let mut src_workspace_removed = false;
-        if src_leaf_empty {
-            match remove_pane_leaf_locked(&mut s, src_pane) {
-                Some(CloseOutcome::WorkspaceRemoved { .. }) => {
-                    src_pane_removed = true;
-                    src_workspace_removed = true;
-                }
-                Some(_) => src_pane_removed = true,
-                None => {}
-            }
-        }
+        let (src_pane_removed, src_workspace_removed) =
+            collapse_empty_source_locked(&mut s, src_pane, taken.leaf_empty);
 
         drop(s);
         self.mark_dirty();
@@ -625,24 +643,8 @@ impl StateStore {
                     .map(|surface_idx| (ws_idx, surface_idx))
             })?;
 
-        // Take from the source.
-        let mut taken = None;
-        let mut src_workspace = None;
-        let mut src_leaf_empty = false;
-        'take: for ws in s.workspaces.iter_mut() {
-            for sf in ws.surfaces.iter_mut() {
-                if let Some((surface, empty)) =
-                    sf.root_pane.take_surface_from_leaf(src_pane, surface_id)
-                {
-                    taken = Some(surface);
-                    src_workspace = Some(ws.id);
-                    src_leaf_empty = empty;
-                    break 'take;
-                }
-            }
-        }
-        let taken = taken?;
-        let src_workspace = src_workspace?;
+        let taken = take_surface_locked(&mut s, src_pane, surface_id)?;
+        let src_workspace = taken.workspace;
 
         // Insert directly into the prevalidated destination. Capturing its
         // location before the take removes the old pending/destination expect
@@ -650,26 +652,15 @@ impl StateStore {
         let dst_workspace = s.workspaces[dst_ws_idx].id;
         if s.workspaces[dst_ws_idx].surfaces[dst_surface_idx]
             .root_pane
-            .insert_surface_into_leaf(dst_pane, taken, target_index)
+            .insert_surface_into_leaf(dst_pane, taken.surface, target_index)
             .is_none()
         {
             error!(pane = %dst_pane, "move_surface_to_pane: verified destination rejected insert");
             return None;
         }
 
-        // Collapse the source leaf if it emptied.
-        let mut src_pane_removed = false;
-        let mut src_workspace_removed = false;
-        if src_leaf_empty {
-            match remove_pane_leaf_locked(&mut s, src_pane) {
-                Some(CloseOutcome::WorkspaceRemoved { .. }) => {
-                    src_pane_removed = true;
-                    src_workspace_removed = true;
-                }
-                Some(_) => src_pane_removed = true,
-                None => {}
-            }
-        }
+        let (src_pane_removed, src_workspace_removed) =
+            collapse_empty_source_locked(&mut s, src_pane, taken.leaf_empty);
 
         drop(s);
         self.mark_dirty();
@@ -1683,6 +1674,7 @@ impl StateStore {
 
     pub async fn close_surface(&self, pane: PaneId, surface_id: SurfaceId) -> Option<CloseOutcome> {
         let mut s = self.inner.lock().await;
+        let mut result = None;
         for ws_idx in 0..s.workspaces.len() {
             for surf_idx in 0..s.workspaces[ws_idx].surfaces.len() {
                 let outcome = s.workspaces[ws_idx].surfaces[surf_idx]
@@ -1691,19 +1683,25 @@ impl StateStore {
                 match outcome {
                     CloseSurfaceOutcome::SurfaceRemoved => {
                         let ws_id = s.workspaces[ws_idx].id;
-                        drop(s);
-                        self.mark_dirty();
-                        return Some(CloseOutcome::SurfaceRemoved { workspace: ws_id });
+                        result = Some(CloseOutcome::SurfaceRemoved { workspace: ws_id });
+                        break;
                     }
                     CloseSurfaceOutcome::LastSurfaceRemoved => {
-                        drop(s);
-                        return self.close_pane(pane).await;
+                        result = remove_pane_leaf_locked(&mut s, pane);
+                        break;
                     }
                     CloseSurfaceOutcome::NotFound => {}
                 }
             }
+            if result.is_some() {
+                break;
+            }
         }
-        None
+        drop(s);
+        if result.is_some() {
+            self.mark_dirty();
+        }
+        result
     }
 
     pub fn mark_dirty(&self) {
