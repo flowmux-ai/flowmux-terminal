@@ -173,7 +173,7 @@ impl Sidebar {
         let bell_for_show = bell_button.clone();
         bell_popover.connect_show(move |_| {
             // Render BEFORE the ack sweep so unread entries still look
-            // unread (full opacity, accent on AttentionNeeded titles)
+            // unread (full opacity, accent on NeedsInput titles)
             // the moment the popover appears. The previous order
             // marked everything read first, so the user saw every row
             // dimmed even on first open — the exact symptom this
@@ -621,7 +621,7 @@ fn notification_row(
     }
     if matches!(
         entry.level,
-        NotificationLevel::AttentionNeeded | NotificationLevel::Error
+        NotificationLevel::NeedsInput | NotificationLevel::Error
     ) {
         title.add_css_class("accent");
     }

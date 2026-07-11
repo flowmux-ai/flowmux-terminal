@@ -123,7 +123,7 @@ enum Cmd {
     },
 
     /// Friendly helper for AI-agent hooks (Claude Code, OpenCode,
-    /// Codex). Fires an `AttentionNeeded` toast titled with the agent
+    /// Codex). Fires a `TurnCompleted` toast titled with the agent
     /// name so flowmux's bell popover and the OS notification both say
     /// "Claude is ready" without the caller having to spell every flag.
     /// Like `Notify`, falls back to `FLOWMUX_PANE_ID` when `--pane` is

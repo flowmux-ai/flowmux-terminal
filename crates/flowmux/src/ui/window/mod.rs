@@ -51,6 +51,17 @@ fn notification_summary(entry: NotificationEntry) -> NotificationSummary {
     }
 }
 
+fn should_suppress_notification(
+    level: flowmux_core::NotificationLevel,
+    source_focused: bool,
+) -> bool {
+    source_focused
+        && !matches!(
+            level,
+            flowmux_core::NotificationLevel::NeedsInput | flowmux_core::NotificationLevel::Error
+        )
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CommandPaletteCommand {
     OpenBrowser,
@@ -1854,7 +1865,7 @@ impl WindowController {
                 // toast or grow the bell list for an event the user is
                 // literally watching.
                 //
-                // Exception: AttentionNeeded (agent paused, waiting for
+                // Exception: NeedsInput (agent paused, waiting for
                 // the user) and Error notifications always pierce the
                 // suppression. "Same pane focused" is not the same as
                 // "user is reading right now" — they may have scrolled
@@ -1866,10 +1877,11 @@ impl WindowController {
                 let focused = self.focused_pane.get();
                 let pierces_focus = matches!(
                     level,
-                    flowmux_core::NotificationLevel::AttentionNeeded
+                    flowmux_core::NotificationLevel::NeedsInput
                         | flowmux_core::NotificationLevel::Error
                 );
-                let suppress = !pierces_focus && self.is_source_focused(pane, surface);
+                let suppress =
+                    should_suppress_notification(level, self.is_source_focused(pane, surface));
                 tracing::info!(
                     ?pane,
                     ?surface,
@@ -1917,7 +1929,7 @@ impl WindowController {
                 };
                 self.sidebar.bump_notification_badge();
                 let mut marked_attention = false;
-                if matches!(level, flowmux_core::NotificationLevel::AttentionNeeded) {
+                if matches!(level, flowmux_core::NotificationLevel::NeedsInput) {
                     let flags = AgentNotificationVisualFlags::for_unread(
                         self.options.borrow().agent_notification_target,
                         false,
@@ -7698,7 +7710,7 @@ mod tests {
                 workspace,
                 title: title.into(),
                 body: String::new(),
-                level: flowmux_core::NotificationLevel::AttentionNeeded,
+                level: flowmux_core::NotificationLevel::NeedsInput,
                 ack: ack_tx,
             })
             .await;
@@ -7720,6 +7732,26 @@ mod tests {
                 "Open unread notification"
             ]
         );
+    }
+
+    #[test]
+    fn focused_source_suppresses_completed_but_not_blocking_notifications() {
+        assert!(should_suppress_notification(
+            flowmux_core::NotificationLevel::TurnCompleted,
+            true
+        ));
+        assert!(!should_suppress_notification(
+            flowmux_core::NotificationLevel::TurnCompleted,
+            false
+        ));
+        assert!(!should_suppress_notification(
+            flowmux_core::NotificationLevel::NeedsInput,
+            true
+        ));
+        assert!(!should_suppress_notification(
+            flowmux_core::NotificationLevel::Error,
+            true
+        ));
     }
 
     #[test]
@@ -7841,7 +7873,7 @@ mod tests {
         assert_eq!(
             controller.notifications.unread_count(),
             2,
-            "two AttentionNeeded notifications must inflate unread_count to 2",
+            "two NeedsInput notifications must inflate unread_count to 2",
         );
 
         // Side-panel click goes through `GtkCommand::ActivateWorkspace`.
@@ -8268,7 +8300,7 @@ mod tests {
     // We exercise the same three-step sequence here so the dispatch arms
     // get covered without driving real GTK signals from a headless test.
 
-    /// One AttentionNeeded notification arrives. The user opens the bell
+    /// One NeedsInput notification arrives. The user opens the bell
     /// popover. The popover-open sequence (mark_all_unread_read +
     /// CloseDesktopNotifications + RefreshLauncherBadge) must drain
     /// `unread_count()` to 0 and surface the matching desktop_id so the

@@ -109,7 +109,7 @@ impl NotificationStore {
         // the diff") at the heuristic-inferred level (Info when the
         // text lacks "waiting"/"approval"/…), while the lifecycle
         // hook path carries our formatted summary ("Codex ready /
-        // task complete") at hard-coded AttentionNeeded. Both fire
+        // task complete") as TurnCompleted. Both fire
         // for the same Stop event, so matching on pane+surface is
         // the only key that catches the duplicate; including level
         // re-introduced the 2× toast we are trying to suppress.
@@ -506,7 +506,7 @@ mod tests {
             .push(
                 "claude".into(),
                 "ready".into(),
-                NotificationLevel::AttentionNeeded,
+                NotificationLevel::NeedsInput,
                 Some(pane),
                 Some(surface),
                 Some(ws),
@@ -516,7 +516,7 @@ mod tests {
         assert_eq!(e.pane, Some(pane));
         assert_eq!(e.surface, Some(surface));
         assert_eq!(e.workspace, Some(ws));
-        assert_eq!(e.level, NotificationLevel::AttentionNeeded);
+        assert_eq!(e.level, NotificationLevel::NeedsInput);
     }
 
     #[test]
@@ -584,7 +584,7 @@ mod tests {
             .push(
                 "Claude".into(),
                 "ready".into(),
-                NotificationLevel::AttentionNeeded,
+                NotificationLevel::NeedsInput,
                 None,
                 None,
                 None,
@@ -621,7 +621,7 @@ mod tests {
             .push(
                 "Claude".into(),
                 "ready".into(),
-                NotificationLevel::AttentionNeeded,
+                NotificationLevel::NeedsInput,
                 None,
                 None,
                 None,
@@ -644,7 +644,7 @@ mod tests {
             .push(
                 "a".into(),
                 "".into(),
-                NotificationLevel::AttentionNeeded,
+                NotificationLevel::NeedsInput,
                 None,
                 None,
                 None,
@@ -654,7 +654,7 @@ mod tests {
             .push(
                 "b".into(),
                 "".into(),
-                NotificationLevel::AttentionNeeded,
+                NotificationLevel::NeedsInput,
                 None,
                 None,
                 None,
@@ -664,7 +664,7 @@ mod tests {
             .push(
                 "c".into(),
                 "".into(),
-                NotificationLevel::AttentionNeeded,
+                NotificationLevel::NeedsInput,
                 None,
                 None,
                 None,
@@ -697,7 +697,7 @@ mod tests {
             .push(
                 "claude".into(),
                 "step 1".into(),
-                NotificationLevel::AttentionNeeded,
+                NotificationLevel::NeedsInput,
                 None,
                 None,
                 Some(ws_a),
@@ -707,7 +707,7 @@ mod tests {
             .push(
                 "claude".into(),
                 "step 2".into(),
-                NotificationLevel::AttentionNeeded,
+                NotificationLevel::NeedsInput,
                 None,
                 None,
                 Some(ws_a),
@@ -717,7 +717,7 @@ mod tests {
             .push(
                 "codex".into(),
                 "step 1".into(),
-                NotificationLevel::AttentionNeeded,
+                NotificationLevel::NeedsInput,
                 None,
                 None,
                 Some(ws_b),
@@ -780,7 +780,7 @@ mod tests {
             .push(
                 "codex".into(),
                 "a".into(),
-                NotificationLevel::AttentionNeeded,
+                NotificationLevel::NeedsInput,
                 Some(pane_a),
                 Some(surface_a),
                 Some(ws),
@@ -790,7 +790,7 @@ mod tests {
             .push(
                 "claude".into(),
                 "b".into(),
-                NotificationLevel::AttentionNeeded,
+                NotificationLevel::NeedsInput,
                 Some(pane_b),
                 Some(surface_b),
                 Some(ws),
@@ -824,7 +824,7 @@ mod tests {
             .push(
                 "codex".into(),
                 "a".into(),
-                NotificationLevel::AttentionNeeded,
+                NotificationLevel::NeedsInput,
                 Some(pane),
                 Some(surface_a),
                 Some(ws),
@@ -834,7 +834,7 @@ mod tests {
             .push(
                 "claude".into(),
                 "b".into(),
-                NotificationLevel::AttentionNeeded,
+                NotificationLevel::NeedsInput,
                 Some(pane),
                 Some(surface_b),
                 Some(ws),
@@ -884,7 +884,7 @@ mod tests {
             .push(
                 "a".into(),
                 "".into(),
-                NotificationLevel::AttentionNeeded,
+                NotificationLevel::NeedsInput,
                 None,
                 None,
                 None,
@@ -894,7 +894,7 @@ mod tests {
             .push(
                 "b".into(),
                 "".into(),
-                NotificationLevel::AttentionNeeded,
+                NotificationLevel::NeedsInput,
                 None,
                 None,
                 None,
@@ -1048,7 +1048,7 @@ mod tests {
             .push(
                 "a".into(),
                 "".into(),
-                NotificationLevel::AttentionNeeded,
+                NotificationLevel::NeedsInput,
                 None,
                 None,
                 None,

@@ -221,7 +221,7 @@ pub fn build_stop_notify(
         pane,
         title: format!("{agent} ready"),
         body: body_line,
-        level: NotificationLevel::AttentionNeeded,
+        level: NotificationLevel::TurnCompleted,
     }
 }
 
@@ -242,7 +242,7 @@ pub fn build_notification_notify(
         surface,
         title: format!("{agent} needs your input"),
         body: body_line,
-        level: NotificationLevel::AttentionNeeded,
+        level: NotificationLevel::NeedsInput,
     }
 }
 
@@ -559,7 +559,7 @@ mod tests {
             } => {
                 assert!(title.contains("Claude"));
                 assert_eq!(body, "task complete");
-                assert_eq!(level, NotificationLevel::AttentionNeeded);
+                assert_eq!(level, NotificationLevel::TurnCompleted);
             }
             other => panic!("expected Notify, got {other:?}"),
         }
@@ -591,7 +591,7 @@ mod tests {
             title, body, level, ..
         } = req
         {
-            assert_eq!(level, NotificationLevel::AttentionNeeded);
+            assert_eq!(level, NotificationLevel::NeedsInput);
             assert!(title.contains("Claude"));
             assert!(body.contains("permission"));
         } else {

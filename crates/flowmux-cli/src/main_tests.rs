@@ -6,7 +6,9 @@ use super::*;
 #[test]
 fn maps_notify_level_strings_to_core_levels() {
     assert_eq!(parse_level("info"), NotificationLevel::Info);
-    assert_eq!(parse_level("attention"), NotificationLevel::AttentionNeeded);
+    assert_eq!(parse_level("complete"), NotificationLevel::TurnCompleted);
+    assert_eq!(parse_level("attention"), NotificationLevel::NeedsInput);
+    assert_eq!(parse_level("needs_input"), NotificationLevel::NeedsInput);
     assert_eq!(parse_level("error"), NotificationLevel::Error);
     assert_eq!(parse_level("unknown"), NotificationLevel::Info);
 }
@@ -48,7 +50,7 @@ fn notify_parses_to_gui_routed_request_with_surface_env() {
 }
 
 #[test]
-fn notify_complete_uses_attention_ready_payload_and_env_pane() {
+fn notify_complete_uses_completed_ready_payload_and_env_pane() {
     let _g = flowmux_pane_env_lock();
     let pane = PaneId::new();
     unsafe {
@@ -77,7 +79,7 @@ fn notify_complete_uses_attention_ready_payload_and_env_pane() {
         } if got_pane == Some(pane)
             && title == "Codex ready"
             && body == "done"
-            && level == NotificationLevel::AttentionNeeded
+            && level == NotificationLevel::TurnCompleted
     ));
 }
 
@@ -1046,7 +1048,7 @@ fn notify_falls_back_to_flowmux_pane_id_env() {
     }
     assert!(matches!(
         req,
-        Request::Notify { pane: Some(got), level: NotificationLevel::AttentionNeeded, .. }
+        Request::Notify { pane: Some(got), level: NotificationLevel::NeedsInput, .. }
             if got == pane
     ));
 }
@@ -1102,7 +1104,7 @@ fn notify_unknown_level_string_falls_back_to_info_not_panic() {
 // -- NotifyComplete (claude / opencode / codex hook helper) ---------
 
 #[test]
-fn notify_complete_default_message_uses_attention_level() {
+fn notify_complete_default_message_uses_completed_level() {
     let _g = flowmux_pane_env_lock();
     unsafe {
         std::env::remove_var("FLOWMUX_PANE_ID");
@@ -1117,7 +1119,7 @@ fn notify_complete_default_message_uses_attention_level() {
         req,
         Request::Notify {
             pane: None,
-            level: NotificationLevel::AttentionNeeded,
+            level: NotificationLevel::TurnCompleted,
             ..
         }
     ));
@@ -1209,7 +1211,7 @@ fn notify_complete_handles_empty_agent_string_without_panic() {
     assert!(matches!(
         req,
         Request::Notify {
-            level: NotificationLevel::AttentionNeeded,
+            level: NotificationLevel::TurnCompleted,
             ..
         }
     ));

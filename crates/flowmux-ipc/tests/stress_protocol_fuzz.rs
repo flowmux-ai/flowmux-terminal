@@ -95,7 +95,7 @@ fn requests_for_round_trip(rng: &mut Xs) -> Vec<Request> {
             surface: None,
             title: String::new(),
             body: String::new(),
-            level: NotificationLevel::AttentionNeeded,
+            level: NotificationLevel::NeedsInput,
         },
         Request::SshConnect {
             target: "user@host:22".into(),

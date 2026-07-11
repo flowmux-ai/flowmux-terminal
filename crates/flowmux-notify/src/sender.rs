@@ -94,7 +94,7 @@ impl DesktopNotifier {
         notif.insert("body", Value::Str(n.body.as_str().into()));
         // GApplication notification priority maps cleanly to our levels:
         //   * Info            → "normal"
-        //   * AttentionNeeded → "high"   (lifts the banner above the rest)
+        //   * NeedsInput     → "high"   (lifts the banner above the rest)
         //   * Error           → "urgent" (sticky on GNOME — keeps the toast
         //                       visible until the user clicks).
         notif.insert("priority", Value::Str(priority_for(n.level).into()));
@@ -154,8 +154,8 @@ impl DesktopNotifier {
 
 fn priority_for(level: NotificationLevel) -> &'static str {
     match level {
-        NotificationLevel::Info => "normal",
-        NotificationLevel::AttentionNeeded => "high",
+        NotificationLevel::Info | NotificationLevel::TurnCompleted => "normal",
+        NotificationLevel::NeedsInput => "high",
         NotificationLevel::Error => "urgent",
     }
 }
@@ -178,12 +178,13 @@ mod tests {
     }
 
     /// Pin the level→priority mapping so a future refactor that flips
-    /// Info ↔ AttentionNeeded does not silently downgrade agent toasts
+    /// Info/TurnCompleted ↔ NeedsInput does not silently downgrade agent toasts
     /// to "normal" and lose the elevated banner placement on GNOME.
     #[test]
     fn priority_for_levels_maps_to_gtk_notifications_strings() {
         assert_eq!(priority_for(NotificationLevel::Info), "normal");
-        assert_eq!(priority_for(NotificationLevel::AttentionNeeded), "high");
+        assert_eq!(priority_for(NotificationLevel::TurnCompleted), "normal");
+        assert_eq!(priority_for(NotificationLevel::NeedsInput), "high");
         assert_eq!(priority_for(NotificationLevel::Error), "urgent");
     }
 }

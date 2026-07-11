@@ -96,7 +96,7 @@ fn infer_level(text: &str) -> NotificationLevel {
         || t.contains("attention")
         || t.contains("approval")
     {
-        NotificationLevel::AttentionNeeded
+        NotificationLevel::NeedsInput
     } else {
         NotificationLevel::Info
     }
@@ -117,7 +117,7 @@ mod tests {
     fn osc_99_konsole_with_opts() {
         let n = parse_osc("99;urgency=critical;Claude is waiting for your input").unwrap();
         assert_eq!(n.body, "Claude is waiting for your input");
-        assert_eq!(n.level, NotificationLevel::AttentionNeeded);
+        assert_eq!(n.level, NotificationLevel::NeedsInput);
     }
 
     #[test]
@@ -125,7 +125,7 @@ mod tests {
         let n = parse_osc("777;notify;Codex;needs approval").unwrap();
         assert_eq!(n.title, "Codex");
         assert_eq!(n.body, "needs approval");
-        assert_eq!(n.level, NotificationLevel::AttentionNeeded);
+        assert_eq!(n.level, NotificationLevel::NeedsInput);
     }
 
     #[test]
@@ -146,7 +146,7 @@ mod tests {
     #[test]
     fn osc_9_promotes_attention_when_body_says_waiting() {
         let n = parse_osc("9;Codex is waiting for your review").unwrap();
-        assert_eq!(n.level, NotificationLevel::AttentionNeeded);
+        assert_eq!(n.level, NotificationLevel::NeedsInput);
     }
 
     #[test]

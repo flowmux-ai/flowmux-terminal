@@ -543,7 +543,7 @@ pub enum Request {
     /// `org.gtk.Notifications.AddNotification` — flowmux echoes it back
     /// via `Response::Notified` so the GUI can later ask the daemon to
     /// withdraw the entry once the user reads it through the in-app
-    /// bell popover. Without this, `AttentionNeeded` toasts accumulate
+    /// bell popover. Without this, `NeedsInput` toasts accumulate
     /// in the GNOME message tray and the dock badge stays pinned.
     CloseDesktopNotification {
         desktop_id: String,

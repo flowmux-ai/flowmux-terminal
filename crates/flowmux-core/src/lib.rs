@@ -1702,9 +1702,11 @@ pub struct Notification {
 pub enum NotificationLevel {
     /// Generic info — no badge.
     Info,
-    /// Agent is waiting for the user; pane gets the blue ring, tab badges,
-    /// and the workspace bumps to the top of the unread list.
-    AttentionNeeded,
+    /// An agent turn finished. The agent's `Done` state carries the
+    /// acknowledgement affordance when the source was not visible.
+    TurnCompleted,
+    /// Agent is blocked waiting for user input or approval.
+    NeedsInput,
     Error,
 }
 

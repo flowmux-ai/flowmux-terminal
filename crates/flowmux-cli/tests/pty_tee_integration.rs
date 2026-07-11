@@ -353,7 +353,7 @@ fn osc_9_round_trips_to_daemon_notify_request() {
 }
 
 #[test]
-fn osc_99_promotes_to_attention_needed_when_body_says_waiting() {
+fn osc_99_promotes_to_needs_input_when_body_says_waiting() {
     let envelopes = run_tee_with_osc(&["99;urgency=critical;Claude is waiting for your input"]);
     assert!(
         !envelopes.is_empty(),
@@ -368,7 +368,7 @@ fn osc_99_promotes_to_attention_needed_when_body_says_waiting() {
         "missing OSC 99 body: {notify}"
     );
     assert!(
-        notify.contains("\"level\":\"attention_needed\"")
+        notify.contains("\"level\":\"needs_input\"")
             || notify.contains("\"level\":\"error\""),
         "OSC 99 with explicit critical urgency or 'waiting' marker should escalate above info: {notify}"
     );

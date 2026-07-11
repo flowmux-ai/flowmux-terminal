@@ -169,7 +169,7 @@ pub(crate) fn build_request(cmd: Cmd) -> anyhow::Result<Request> {
                 surface: hooks::surface_from_env(),
                 title: format!("{agent} ready"),
                 body,
-                level: NotificationLevel::AttentionNeeded,
+                level: NotificationLevel::TurnCompleted,
             }
         }
         Cmd::Notifications { op } => match op {
@@ -275,7 +275,8 @@ pub(crate) fn build_request(cmd: Cmd) -> anyhow::Result<Request> {
 }
 pub(crate) fn parse_level(s: &str) -> NotificationLevel {
     match s {
-        "attention" => NotificationLevel::AttentionNeeded,
+        "complete" => NotificationLevel::TurnCompleted,
+        "attention" | "needs_input" => NotificationLevel::NeedsInput,
         "error" => NotificationLevel::Error,
         _ => NotificationLevel::Info,
     }
