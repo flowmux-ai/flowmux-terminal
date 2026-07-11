@@ -15,6 +15,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
+use std::time::Instant;
 
 #[derive(Clone)]
 pub struct FileBrowserPanel {
@@ -31,6 +32,7 @@ pub struct FileBrowserPanel {
     on_escape: Rc<RefCell<Option<Box<dyn Fn()>>>>,
     on_focus_changed: Rc<RefCell<Option<Box<dyn Fn(bool)>>>>,
     open: Rc<Cell<bool>>,
+    file_operation_in_progress: Rc<Cell<bool>>,
     #[cfg(all(test, not(target_os = "macos")))]
     rebuild_count: Rc<Cell<usize>>,
 }
@@ -107,6 +109,17 @@ struct FileClipboard {
     paths: Vec<PathBuf>,
 }
 
+struct PasteRequest {
+    clipboard: FileClipboard,
+    target_dir: PathBuf,
+}
+
+struct PasteOutcome {
+    pasted: Vec<PathBuf>,
+    moved: Vec<(PathBuf, PathBuf)>,
+    clear_clipboard: bool,
+}
+
 impl FileBrowserPanel {
     pub fn new() -> Self {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -178,6 +191,7 @@ impl FileBrowserPanel {
             on_escape: Rc::new(RefCell::new(None)),
             on_focus_changed: Rc::new(RefCell::new(None)),
             open: Rc::new(Cell::new(false)),
+            file_operation_in_progress: Rc::new(Cell::new(false)),
             #[cfg(all(test, not(target_os = "macos")))]
             rebuild_count: Rc::new(Cell::new(0)),
         };
@@ -279,6 +293,10 @@ impl FileBrowserPanel {
 
     pub fn refresh(&self) {
         let scroll_value = self.scroll.vadjustment().value();
+        self.refresh_with_scroll_value(scroll_value);
+    }
+
+    fn refresh_with_scroll_value(&self, scroll_value: f64) {
         self.rebuild_rows();
         self.restore_scroll_value(scroll_value);
     }
@@ -573,12 +591,38 @@ impl FileBrowserPanel {
     }
 
     fn paste_from_clipboard(&self) {
-        let result = { self.model.borrow_mut().paste_from_clipboard() };
-        match result {
-            Ok(true) => self.refresh(),
-            Ok(false) => {}
-            Err(err) => self.show_status(&format!("Paste failed: {err}")),
+        let Some(request) = self.model.borrow_mut().paste_request() else {
+            return;
+        };
+        if self.file_operation_in_progress.replace(true) {
+            return;
         }
+        let scroll_value = self.scroll.vadjustment().value();
+        self.show_status("Pasting…");
+        let panel = self.clone();
+        glib::MainContext::default().spawn_local(async move {
+            let started = Instant::now();
+            let result = gio::spawn_blocking(move || execute_paste(request)).await;
+            match result {
+                Ok(Ok(outcome)) => {
+                    let pasted = outcome.pasted.len();
+                    if panel.model.borrow_mut().apply_paste_outcome(outcome) {
+                        panel.refresh_with_scroll_value(scroll_value);
+                    } else {
+                        panel.show_status("Nothing to paste");
+                    }
+                    tracing::info!(
+                        operation = "paste",
+                        pasted,
+                        elapsed_ms = started.elapsed().as_millis(),
+                        "file browser operation completed"
+                    );
+                }
+                Ok(Err(err)) => panel.show_status(&format!("Paste failed: {err}")),
+                Err(_) => panel.show_status("Paste failed: worker panicked"),
+            }
+            panel.file_operation_in_progress.set(false);
+        });
     }
 
     fn delete_focused_to_trash(&self) {
@@ -1305,49 +1349,31 @@ impl FileBrowserModel {
         true
     }
 
+    #[cfg(test)]
     fn paste_from_clipboard(&mut self) -> io::Result<bool> {
-        let Some(clipboard) = self.clipboard.clone() else {
+        let Some(request) = self.paste_request() else {
             return Ok(false);
         };
-        let Some(target_dir) = self.paste_target_dir() else {
-            return Ok(false);
-        };
+        let outcome = execute_paste(request)?;
+        Ok(self.apply_paste_outcome(outcome))
+    }
 
-        let mut pasted = Vec::new();
-        for source in &clipboard.paths {
-            if !source.exists() {
-                continue;
-            }
-            if source.is_dir() && target_dir.starts_with(source) {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "cannot paste a directory into itself",
-                ));
-            }
+    fn paste_request(&mut self) -> Option<PasteRequest> {
+        Some(PasteRequest {
+            clipboard: self.clipboard.clone()?,
+            target_dir: self.paste_target_dir()?,
+        })
+    }
 
-            if clipboard.operation == ClipboardOperation::Cut
-                && source.parent() == Some(target_dir.as_path())
-            {
-                pasted.push(source.clone());
-                continue;
-            }
-
-            let destination = unique_destination(&target_dir, source)?;
-            match clipboard.operation {
-                ClipboardOperation::Copy => copy_path(source, &destination)?,
-                ClipboardOperation::Cut => {
-                    move_path(source, &destination)?;
-                    self.rewrite_tracked_paths(source, &destination);
-                }
-            }
-            pasted.push(destination);
+    fn apply_paste_outcome(&mut self, outcome: PasteOutcome) -> bool {
+        for (source, destination) in outcome.moved {
+            self.rewrite_tracked_paths(&source, &destination);
         }
-
-        if clipboard.operation == ClipboardOperation::Cut {
+        if outcome.clear_clipboard {
             self.clipboard = None;
         }
         self.sync_focus();
-        Ok(!pasted.is_empty())
+        !outcome.pasted.is_empty()
     }
 
     fn paste_target_dir(&mut self) -> Option<PathBuf> {
@@ -1368,6 +1394,49 @@ impl FileBrowserModel {
             _ => HashSet::new(),
         }
     }
+}
+
+fn execute_paste(request: PasteRequest) -> io::Result<PasteOutcome> {
+    let PasteRequest {
+        clipboard,
+        target_dir,
+    } = request;
+    let mut pasted = Vec::new();
+    let mut moved = Vec::new();
+    for source in &clipboard.paths {
+        if !source.exists() {
+            continue;
+        }
+        if source.is_dir() && target_dir.starts_with(source) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "cannot paste a directory into itself",
+            ));
+        }
+
+        if clipboard.operation == ClipboardOperation::Cut
+            && source.parent() == Some(target_dir.as_path())
+        {
+            pasted.push(source.clone());
+            continue;
+        }
+
+        let destination = unique_destination(&target_dir, source)?;
+        match clipboard.operation {
+            ClipboardOperation::Copy => copy_path(source, &destination)?,
+            ClipboardOperation::Cut => {
+                move_path(source, &destination)?;
+                moved.push((source.clone(), destination.clone()));
+            }
+        }
+        pasted.push(destination);
+    }
+
+    Ok(PasteOutcome {
+        pasted,
+        moved,
+        clear_clipboard: clipboard.operation == ClipboardOperation::Cut,
+    })
 }
 
 fn read_dir_entries(dir: &Path) -> std::io::Result<Vec<FsEntry>> {
@@ -1712,7 +1781,26 @@ mod tests {
 
     use super::*;
     use std::cell::Cell;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    #[cfg(not(target_os = "macos"))]
+    fn wait_until(mut predicate: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let context = glib::MainContext::default();
+        loop {
+            while context.pending() {
+                context.iteration(false);
+            }
+            if predicate() {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for async file operation"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
 
     #[test]
     fn markdown_file_extensions_route_to_markdown_viewer() {
@@ -2310,6 +2398,7 @@ mod tests {
 
         panel.paste_from_clipboard();
 
+        wait_until(|| !panel.file_operation_in_progress.get());
         assert!(tmp.path.join("a copy.txt").exists());
         assert_eq!(
             panel.model.borrow().focused.as_ref(),
@@ -2617,6 +2706,7 @@ mod tests {
             glib::Propagation::Stop
         );
 
+        wait_until(|| !panel.file_operation_in_progress.get());
         assert!(tmp.path.join("a copy.txt").exists());
         assert_eq!(panel_row_names(&panel), ["a copy.txt", "a.txt"]);
     }
@@ -2644,6 +2734,7 @@ mod tests {
             glib::Propagation::Stop
         );
 
+        wait_until(|| !panel.file_operation_in_progress.get());
         assert!(!file.exists());
         assert!(dest.join("a.txt").exists());
         assert!(panel.model.borrow().rows().iter().all(|row| !row.cut));
@@ -2683,6 +2774,7 @@ mod tests {
 
         panel.paste_from_clipboard();
 
+        wait_until(|| !panel.file_operation_in_progress.get());
         assert!(target.join("source.txt").exists());
         assert_eq!(panel_focused_path(&panel), Some(target));
         assert_eq!(panel.scroll.vadjustment().value(), 260.0);
