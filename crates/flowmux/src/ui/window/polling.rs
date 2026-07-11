@@ -96,7 +96,43 @@ impl WindowController {
         }
     }
     pub(super) async fn poll_terminal_cwds(&self) {
-        let cwd_entries = self.pane_registry.borrow().terminal_cwds();
+        let inputs = self.pane_registry.borrow().terminal_cwd_poll_inputs();
+        let generation = self.cwd_poll_generation.get().wrapping_add(1);
+        self.cwd_poll_generation.set(generation);
+        let started = Instant::now();
+        let results = match gtk::gio::spawn_blocking(move || {
+            inputs
+                .into_iter()
+                .map(|(pane, surface, announced, pid)| {
+                    let cwd = announced.or_else(|| {
+                        pid.and_then(|pid| std::fs::read_link(format!("/proc/{pid}/cwd")).ok())
+                    });
+                    (pane, surface, cwd)
+                })
+                .collect::<Vec<_>>()
+        })
+        .await
+        {
+            Ok(results) => results,
+            Err(_) => {
+                tracing::warn!(generation, "terminal cwd poll worker panicked");
+                return;
+            }
+        };
+        if self.cwd_poll_generation.get() != generation {
+            tracing::debug!(generation, "discarding stale terminal cwd poll");
+            return;
+        }
+        let cwd_entries = self
+            .pane_registry
+            .borrow()
+            .apply_terminal_cwd_poll_results(results);
+        tracing::debug!(
+            generation,
+            changed = cwd_entries.len(),
+            elapsed_ms = started.elapsed().as_millis(),
+            "terminal cwd poll completed"
+        );
         let mut changed_workspaces: std::collections::HashSet<WorkspaceId> =
             std::collections::HashSet::new();
         for (pane, surface, cwd) in cwd_entries {

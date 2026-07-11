@@ -268,6 +268,38 @@ impl PaneRegistry {
             .collect()
     }
 
+    pub fn terminal_cwd_poll_inputs(
+        &self,
+    ) -> Vec<(PaneId, SurfaceId, Option<std::path::PathBuf>, Option<i32>)> {
+        self.terminals
+            .iter()
+            .map(|(surface, terminal)| {
+                (
+                    terminal.id(),
+                    *surface,
+                    terminal.announced_current_dir(),
+                    terminal.pid.get(),
+                )
+            })
+            .collect()
+    }
+
+    pub fn apply_terminal_cwd_poll_results(
+        &self,
+        results: Vec<(PaneId, SurfaceId, Option<std::path::PathBuf>)>,
+    ) -> Vec<(PaneId, SurfaceId, std::path::PathBuf)> {
+        results
+            .into_iter()
+            .filter_map(|(pane, surface, cwd)| {
+                let terminal = self.terminals.get(&surface)?;
+                (terminal.id() == pane)
+                    .then(|| terminal.record_polled_cwd(cwd))
+                    .flatten()
+                    .map(|cwd| (pane, surface, cwd))
+            })
+            .collect()
+    }
+
     /// (surface, shell child PID) for every live terminal. The PID is the
     /// pty-tee/shell wrapper spawned for the pane; the agent process (if any)
     /// is a descendant. Feeds the Agent Bar's process-truth detection sweep.

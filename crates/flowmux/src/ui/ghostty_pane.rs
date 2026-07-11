@@ -97,6 +97,10 @@ impl GhosttyPane {
     /// Return the cwd only if it changed since the last poll.
     pub fn poll_cwd_if_changed(&self) -> Option<PathBuf> {
         let cur = self.current_dir();
+        self.record_polled_cwd(cur)
+    }
+
+    pub fn record_polled_cwd(&self, cur: Option<PathBuf>) -> Option<PathBuf> {
         let mut last = self.last_polled_cwd.borrow_mut();
         if *last != cur {
             *last = cur.clone();
@@ -137,17 +141,24 @@ impl GhosttyPane {
     ///   2. `/proc/<pid>/cwd` symlink target — works for any spawned
     ///      shell on Linux even without OSC 7 support.
     pub fn current_dir(&self) -> Option<PathBuf> {
+        if let Some(path) = self.announced_current_dir() {
+            return Some(path);
+        }
+        if let Some(pid) = self.pid.get() {
+            if let Ok(p) = std::fs::read_link(format!("/proc/{pid}/cwd")) {
+                return Some(p);
+            }
+        }
+        None
+    }
+
+    pub fn announced_current_dir(&self) -> Option<PathBuf> {
         if let Some(uri) = self.widget.current_directory_uri() {
             let s: String = uri.into();
             if !s.is_empty() {
                 if let Some(p) = uri_to_path(&s) {
                     return Some(p);
                 }
-            }
-        }
-        if let Some(pid) = self.pid.get() {
-            if let Ok(p) = std::fs::read_link(format!("/proc/{pid}/cwd")) {
-                return Some(p);
             }
         }
         None
