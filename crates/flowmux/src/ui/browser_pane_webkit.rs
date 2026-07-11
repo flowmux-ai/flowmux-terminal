@@ -30,6 +30,8 @@ pub struct BrowserPane {
     pane_id: Rc<Cell<PaneId>>,
     pub root: gtk::Box,
     pub web_view: webkit6::WebView,
+    zoom: Rc<Cell<f64>>,
+    zoom_label: gtk::Button,
     /// cmux-style server-side ref store. Each snapshot clears + repopulates
     /// the entry for this pane; subsequent click/fill/etc. resolve their
     /// `eN` ref through this map to a CSS selector before injecting JS.
@@ -192,8 +194,29 @@ impl BrowserPane {
         let reload = gtk::Button::from_icon_name("view-refresh-symbolic");
         let find = gtk::Button::from_icon_name("edit-find-symbolic");
         find.set_tooltip_text(Some("Find in page"));
-        let zoom_reset = gtk::Button::from_icon_name("zoom-original-symbolic");
+        let zoom_out = gtk::Button::from_icon_name("zoom-out-symbolic");
+        zoom_out.set_tooltip_text(Some("Zoom out"));
+        let zoom_reset = gtk::Button::with_label("100%");
         zoom_reset.set_tooltip_text(Some("Reset page zoom"));
+        let zoom_in = gtk::Button::from_icon_name("zoom-in-symbolic");
+        zoom_in.set_tooltip_text(Some("Zoom in"));
+        let zoom = Rc::new(Cell::new(1.0));
+        let zoom_label = zoom_reset.clone();
+        let session_status = gtk::Button::from_icon_name(if persist_session {
+            "document-save-symbolic"
+        } else {
+            "changes-prevent-symbolic"
+        });
+        session_status.add_css_class("flat");
+        session_status.set_tooltip_text(Some(&format!(
+            "Profile: {}\n{}",
+            profile.display_name(),
+            if persist_session {
+                "Cookies and site data are saved in this browser profile"
+            } else {
+                "Cookies and site data are discarded when flowmux exits"
+            }
+        )));
         let address = gtk::Entry::new();
         address.set_hexpand(true);
         address.set_placeholder_text(Some("Enter URL — e.g. http://localhost:3000"));
@@ -214,8 +237,11 @@ impl BrowserPane {
         chrome.append(&forward);
         chrome.append(&reload);
         chrome.append(&address);
+        chrome.append(&session_status);
         chrome.append(&find);
+        chrome.append(&zoom_out);
         chrome.append(&zoom_reset);
+        chrome.append(&zoom_in);
         chrome.append(&inspector);
 
         let find_entry = gtk::SearchEntry::builder()
@@ -266,7 +292,25 @@ impl BrowserPane {
         }
         {
             let v = web_view.clone();
-            zoom_reset.connect_clicked(move |_| v.set_zoom_level(1.0));
+            let zoom = zoom.clone();
+            let label = zoom_label.clone();
+            zoom_out.connect_clicked(move |_| {
+                set_webkit_zoom(&v, &zoom, &label, zoom.get() - 0.1);
+            });
+        }
+        {
+            let v = web_view.clone();
+            let zoom = zoom.clone();
+            let label = zoom_label.clone();
+            zoom_reset.connect_clicked(move |_| set_webkit_zoom(&v, &zoom, &label, 1.0));
+        }
+        {
+            let v = web_view.clone();
+            let zoom = zoom.clone();
+            let label = zoom_label.clone();
+            zoom_in.connect_clicked(move |_| {
+                set_webkit_zoom(&v, &zoom, &label, zoom.get() + 0.1);
+            });
         }
         {
             let v = web_view.clone();
@@ -368,6 +412,8 @@ impl BrowserPane {
             pane_id,
             root,
             web_view,
+            zoom,
+            zoom_label,
             refs: Rc::new(RefCell::new(RefStore::new())),
             ref_scope: ref_scope_for_surface(surface_id),
         }
@@ -432,7 +478,7 @@ impl BrowserPane {
     }
 
     pub fn set_zoom_level(&self, zoom: f64) {
-        self.web_view.set_zoom_level(zoom);
+        set_webkit_zoom(&self.web_view, &self.zoom, &self.zoom_label, zoom);
     }
 
     pub fn snapshot_to_png<F: FnOnce(Result<String, String>) + 'static>(
@@ -500,6 +546,18 @@ fn normalize_uri(raw: &str) -> String {
         return format!("https://{raw}");
     }
     format!("https://duckduckgo.com/?q={}", urlencode(raw))
+}
+
+fn set_webkit_zoom(
+    web_view: &webkit6::WebView,
+    zoom: &Cell<f64>,
+    label: &gtk::Button,
+    requested: f64,
+) {
+    let level = requested.clamp(0.5, 2.0);
+    zoom.set(level);
+    label.set_label(&format!("{:.0}%", level * 100.0));
+    web_view.set_zoom_level(level);
 }
 
 fn urlencode(s: &str) -> String {

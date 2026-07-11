@@ -43,6 +43,7 @@ pub struct BrowserPane {
     pub web_view: gtk::Widget,
     native: Rc<NativeBrowserView>,
     address: gtk::Entry,
+    zoom_label: gtk::Button,
     pub refs: Rc<RefCell<RefStore>>,
     pub ref_scope: RefScope,
 }
@@ -190,8 +191,28 @@ impl BrowserPane {
         let reload = gtk::Button::from_icon_name("view-refresh-symbolic");
         let find = gtk::Button::from_icon_name("edit-find-symbolic");
         find.set_tooltip_text(Some("Find in page"));
-        let zoom_reset = gtk::Button::from_icon_name("zoom-original-symbolic");
+        let zoom_out = gtk::Button::from_icon_name("zoom-out-symbolic");
+        zoom_out.set_tooltip_text(Some("Zoom out"));
+        let zoom_reset = gtk::Button::with_label("100%");
         zoom_reset.set_tooltip_text(Some("Reset page zoom"));
+        let zoom_in = gtk::Button::from_icon_name("zoom-in-symbolic");
+        zoom_in.set_tooltip_text(Some("Zoom in"));
+        let zoom_label = zoom_reset.clone();
+        let session_status = gtk::Button::from_icon_name(if persist_session {
+            "document-save-symbolic"
+        } else {
+            "changes-prevent-symbolic"
+        });
+        session_status.add_css_class("flat");
+        session_status.set_tooltip_text(Some(&format!(
+            "Profile: {}\n{}",
+            profile.display_name(),
+            if persist_session {
+                "Cookies and site data are saved in this browser profile"
+            } else {
+                "Cookies and site data are discarded when flowmux exits"
+            }
+        )));
         let address = gtk::Entry::new();
         address.set_hexpand(true);
         address.set_placeholder_text(Some("Enter URL — e.g. http://localhost:3000"));
@@ -210,8 +231,11 @@ impl BrowserPane {
         chrome.append(&forward);
         chrome.append(&reload);
         chrome.append(&address);
+        chrome.append(&session_status);
         chrome.append(&find);
+        chrome.append(&zoom_out);
         chrome.append(&zoom_reset);
+        chrome.append(&zoom_in);
         chrome.append(&inspector);
 
         let find_entry = gtk::SearchEntry::builder()
@@ -286,9 +310,23 @@ impl BrowserPane {
         }
         {
             let native = native.clone();
+            let label = zoom_label.clone();
+            zoom_out.connect_clicked(move |_| {
+                set_native_zoom(&native, &label, native.zoom.get() - 0.1);
+            });
+        }
+        {
+            let native = native.clone();
+            let label = zoom_label.clone();
             zoom_reset.connect_clicked(move |_| {
-                native.zoom.set(1.0);
-                unsafe { native.web_view.setPageZoom(1.0) };
+                set_native_zoom(&native, &label, 1.0);
+            });
+        }
+        {
+            let native = native.clone();
+            let label = zoom_label.clone();
+            zoom_in.connect_clicked(move |_| {
+                set_native_zoom(&native, &label, native.zoom.get() + 0.1);
             });
         }
         {
@@ -387,6 +425,7 @@ impl BrowserPane {
             web_view: web_widget,
             native,
             address,
+            zoom_label,
             refs: Rc::new(RefCell::new(RefStore::new())),
             ref_scope: ref_scope_for_surface(surface_id),
         }
@@ -455,10 +494,7 @@ impl BrowserPane {
     }
 
     pub fn set_zoom_level(&self, zoom: f64) {
-        self.native.zoom.set(zoom);
-        unsafe {
-            self.native.web_view.setPageZoom(zoom);
-        }
+        set_native_zoom(&self.native, &self.zoom_label, zoom);
     }
 
     pub fn snapshot_to_png<F: FnOnce(Result<String, String>) + 'static>(
@@ -783,6 +819,15 @@ fn urlencode(s: &str) -> String {
             other => format!("%{:02X}", other),
         })
         .collect()
+}
+
+fn set_native_zoom(native: &NativeBrowserView, label: &gtk::Button, requested: f64) {
+    let level = requested.clamp(0.5, 2.0);
+    native.zoom.set(level);
+    label.set_label(&format!("{:.0}%", level * 100.0));
+    unsafe {
+        native.web_view.setPageZoom(level);
+    }
 }
 
 fn engine_to_profile(engine: &BrowserEngine) -> BrowserProfile {
