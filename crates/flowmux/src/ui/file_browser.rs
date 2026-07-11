@@ -9,7 +9,7 @@ use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -36,6 +36,9 @@ pub struct FileBrowserPanel {
     on_focus_changed: Rc<RefCell<Option<Box<dyn Fn(bool)>>>>,
     open: Rc<Cell<bool>>,
     file_operation_in_progress: Rc<Cell<bool>>,
+    #[cfg_attr(test, allow(dead_code))]
+    directory_generation: Rc<Cell<u64>>,
+    directory_error: Rc<RefCell<Option<String>>>,
     #[cfg(all(test, not(target_os = "macos")))]
     rebuild_count: Rc<Cell<usize>>,
 }
@@ -91,6 +94,7 @@ struct FileBrowserModel {
     selected: HashSet<PathBuf>,
     selection_anchor: Option<PathBuf>,
     clipboard: Option<FileClipboard>,
+    entries_by_dir: HashMap<PathBuf, Vec<FsEntry>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -200,6 +204,8 @@ impl FileBrowserPanel {
             on_focus_changed: Rc::new(RefCell::new(None)),
             open: Rc::new(Cell::new(false)),
             file_operation_in_progress: Rc::new(Cell::new(false)),
+            directory_generation: Rc::new(Cell::new(0)),
+            directory_error: Rc::new(RefCell::new(None)),
             #[cfg(all(test, not(target_os = "macos")))]
             rebuild_count: Rc::new(Cell::new(0)),
         };
@@ -260,8 +266,7 @@ impl FileBrowserPanel {
         let scroll_value = self.model.borrow_mut().set_root_with_state(root, state);
         self.open.set(true);
         self.root.set_visible(true);
-        self.rebuild_rows();
-        self.restore_scroll_value(scroll_value);
+        self.refresh_with_scroll_value(scroll_value);
     }
 
     pub(crate) fn is_open(&self) -> bool {
@@ -305,8 +310,79 @@ impl FileBrowserPanel {
     }
 
     fn refresh_with_scroll_value(&self, scroll_value: f64) {
-        self.rebuild_rows();
-        self.restore_scroll_value(scroll_value);
+        #[cfg(test)]
+        {
+            let result = self.model.borrow_mut().reload_entries_sync();
+            *self.directory_error.borrow_mut() = result.err().map(|error| error.to_string());
+            self.rebuild_rows();
+            self.restore_scroll_value(scroll_value);
+        }
+        #[cfg(not(test))]
+        self.reload_directories(scroll_value);
+    }
+
+    #[cfg(not(test))]
+    fn reload_directories(&self, scroll_value: f64) {
+        let (root, expanded) = {
+            let model = self.model.borrow();
+            (model.root.clone(), model.expanded.clone())
+        };
+        let Some(root) = root else {
+            self.rebuild_rows();
+            return;
+        };
+        let generation = self.directory_generation.get().wrapping_add(1);
+        self.directory_generation.set(generation);
+        self.directory_error.borrow_mut().take();
+        self.status.set_text("Loading…");
+        self.status.set_visible(true);
+
+        let panel = self.clone();
+        glib::MainContext::default().spawn_local(async move {
+            let started = Instant::now();
+            let root_for_worker = root.clone();
+            let loaded =
+                gio::spawn_blocking(move || load_directory_snapshot(&root_for_worker, &expanded))
+                    .await;
+            if panel.directory_generation.get() != generation
+                || panel.model.borrow().root.as_ref() != Some(&root)
+            {
+                return;
+            }
+
+            match loaded {
+                Ok(Ok(entries)) => {
+                    let directory_count = entries.len();
+                    let entry_count = entries.values().map(Vec::len).sum::<usize>();
+                    panel.model.borrow_mut().entries_by_dir = entries;
+                    panel.directory_error.borrow_mut().take();
+                    tracing::info!(
+                        operation = "file_browser_read_dir",
+                        directory_count,
+                        entry_count,
+                        elapsed_ms = started.elapsed().as_millis(),
+                        "file browser directory snapshot loaded"
+                    );
+                }
+                Ok(Err(error)) => {
+                    tracing::warn!(
+                        operation = "file_browser_read_dir",
+                        %error,
+                        elapsed_ms = started.elapsed().as_millis(),
+                        "file browser directory snapshot failed"
+                    );
+                    panel.model.borrow_mut().entries_by_dir.clear();
+                    *panel.directory_error.borrow_mut() = Some(error.to_string());
+                }
+                Err(_) => {
+                    panel.model.borrow_mut().entries_by_dir.clear();
+                    *panel.directory_error.borrow_mut() =
+                        Some("Directory worker panicked".to_string());
+                }
+            }
+            panel.rebuild_rows();
+            panel.restore_scroll_value(scroll_value);
+        });
     }
 
     #[cfg(all(test, not(target_os = "macos")))]
@@ -339,8 +415,14 @@ impl FileBrowserPanel {
         self.path_label
             .set_tooltip_text(Some(root.to_string_lossy().as_ref()));
 
-        if !root.is_dir() {
-            self.status.set_text("Focused path is not a directory");
+        if let Some(error) = self.directory_error.borrow().as_deref() {
+            self.status.set_text(error);
+            self.status.set_visible(true);
+            return;
+        }
+
+        if !self.model.borrow().entries_by_dir.contains_key(&root) {
+            self.status.set_text("Loading…");
             self.status.set_visible(true);
             return;
         }
@@ -998,6 +1080,7 @@ impl FileBrowserModel {
     #[cfg(test)]
     fn set_root(&mut self, root: PathBuf) {
         self.set_root_with_state(root, None);
+        let _ = self.reload_entries_sync();
     }
 
     fn set_root_with_state(&mut self, root: PathBuf, state: Option<FileBrowserPaneState>) -> f64 {
@@ -1016,6 +1099,7 @@ impl FileBrowserModel {
             self.focused = None;
             self.selected.clear();
             self.selection_anchor = None;
+            self.entries_by_dir.clear();
         }
         self.root = Some(root);
         0.0
@@ -1063,7 +1147,7 @@ impl FileBrowserModel {
     }
 
     fn collect_rows(&self, dir: &Path, depth: usize, rows: &mut Vec<FileBrowserRow>) {
-        let Ok(entries) = read_dir_entries(dir) else {
+        let Some(entries) = self.entries_by_dir.get(dir) else {
             return;
         };
 
@@ -1083,6 +1167,16 @@ impl FileBrowserModel {
                 self.collect_rows(&entry.path, depth + 1, rows);
             }
         }
+    }
+
+    #[cfg(test)]
+    fn reload_entries_sync(&mut self) -> io::Result<()> {
+        let Some(root) = self.root.clone() else {
+            self.entries_by_dir.clear();
+            return Ok(());
+        };
+        self.entries_by_dir = load_directory_snapshot(&root, &self.expanded)?;
+        Ok(())
     }
 
     fn focus_path(&mut self, path: &Path) -> bool {
@@ -1499,6 +1593,33 @@ fn read_dir_entries(dir: &Path) -> std::io::Result<Vec<FsEntry>> {
     });
 
     Ok(entries)
+}
+
+fn load_directory_snapshot(
+    root: &Path,
+    expanded: &HashSet<PathBuf>,
+) -> io::Result<HashMap<PathBuf, Vec<FsEntry>>> {
+    fn collect(
+        directory: &Path,
+        expanded: &HashSet<PathBuf>,
+        snapshot: &mut HashMap<PathBuf, Vec<FsEntry>>,
+    ) -> io::Result<()> {
+        let entries = read_dir_entries(directory)?;
+        let children = entries
+            .iter()
+            .filter(|entry| entry.is_dir && expanded.contains(&entry.path))
+            .map(|entry| entry.path.clone())
+            .collect::<Vec<_>>();
+        snapshot.insert(directory.to_path_buf(), entries);
+        for child in children {
+            collect(&child, expanded, snapshot)?;
+        }
+        Ok(())
+    }
+
+    let mut snapshot = HashMap::new();
+    collect(root, expanded, &mut snapshot)?;
+    Ok(snapshot)
 }
 
 fn unique_destination(target_dir: &Path, source: &Path) -> io::Result<PathBuf> {
@@ -2092,6 +2213,25 @@ mod tests {
     }
 
     #[test]
+    fn directory_snapshot_reads_only_expanded_subtrees() {
+        let tmp = TestDir::new("snapshot-expanded");
+        let expanded_dir = tmp.dir("expanded");
+        let collapsed_dir = tmp.dir("collapsed");
+        let nested_dir = tmp.dir("expanded/nested");
+        tmp.file("expanded/visible.txt");
+        tmp.file("expanded/nested/hidden.txt");
+        tmp.file("collapsed/hidden.txt");
+        let expanded = HashSet::from([expanded_dir.clone()]);
+
+        let snapshot = load_directory_snapshot(&tmp.path, &expanded).unwrap();
+
+        assert!(snapshot.contains_key(&tmp.path));
+        assert!(snapshot.contains_key(&expanded_dir));
+        assert!(!snapshot.contains_key(&collapsed_dir));
+        assert!(!snapshot.contains_key(&nested_dir));
+    }
+
+    #[test]
     fn up_down_move_internal_focus_without_wrapping() {
         let tmp = TestDir::new("move");
         tmp.file("a.txt");
@@ -2125,11 +2265,13 @@ mod tests {
 
         assert_eq!(row_names(&model), ["src", "top.txt"]);
         assert!(model.expand_focused());
+        model.reload_entries_sync().unwrap();
         assert_eq!(row_names(&model), ["src", "main.rs", "top.txt"]);
         assert!(!model.expand_focused());
         assert!(model.collapse_focused());
         assert_eq!(row_names(&model), ["src", "top.txt"]);
         assert_eq!(model.activate_focused(), FileBrowserActivation::Refresh);
+        model.reload_entries_sync().unwrap();
         assert_eq!(row_names(&model), ["src", "main.rs", "top.txt"]);
         assert_eq!(model.activate_focused(), FileBrowserActivation::Refresh);
         assert_eq!(row_names(&model), ["src", "top.txt"]);
@@ -2155,6 +2297,7 @@ mod tests {
         model.set_root(tmp.path.clone());
 
         let renamed = model.rename_focused("new.txt").unwrap();
+        model.reload_entries_sync().unwrap();
 
         assert_eq!(renamed, tmp.path.join("new.txt"));
         assert!(!tmp.path.join("old.txt").exists());
@@ -2174,6 +2317,7 @@ mod tests {
         assert!(model.expand_focused());
 
         let renamed = model.rename_focused("new").unwrap();
+        model.reload_entries_sync().unwrap();
 
         assert_eq!(renamed, tmp.path.join("new"));
         assert_eq!(model.focused.as_ref(), Some(&tmp.path.join("new")));
@@ -2211,6 +2355,7 @@ mod tests {
 
         assert!(model.copy_focused());
         assert!(model.paste_from_clipboard().unwrap());
+        model.reload_entries_sync().unwrap();
 
         let copied = tmp.path.join("a copy.txt");
         assert!(tmp.path.join("a.txt").exists());
@@ -2272,11 +2417,13 @@ mod tests {
         model.set_root(tmp.path.clone());
         assert!(model.focus_path(&dest));
         assert!(model.expand_focused());
+        model.reload_entries_sync().unwrap();
         assert!(model.focus_path(&file));
         assert!(model.copy_focused());
         assert!(model.focus_path(&dest));
 
         assert!(model.paste_from_clipboard().unwrap());
+        model.reload_entries_sync().unwrap();
 
         let pasted = dest.join("a.txt");
         assert!(pasted.exists());
@@ -2325,6 +2472,7 @@ mod tests {
         assert_eq!(model.focused.as_ref(), Some(&src));
 
         assert_eq!(model.activate_focused(), FileBrowserActivation::Refresh);
+        model.reload_entries_sync().unwrap();
         assert_eq!(row_names(&model), ["src", "main.rs", "top.txt"]);
 
         assert!(model.collapse_focused());
@@ -2342,10 +2490,12 @@ mod tests {
         assert!(model.focus_path(&file));
         assert!(model.copy_focused());
         assert!(model.paste_from_clipboard().unwrap());
+        model.reload_entries_sync().unwrap();
         assert!(tmp.path.join("a copy.txt").exists());
 
         assert_eq!(model.focused.as_ref(), Some(&file));
         assert!(model.rename_focused("renamed.txt").is_ok());
+        model.reload_entries_sync().unwrap();
         let renamed = tmp.path.join("renamed.txt");
         assert!(!file.exists());
         assert!(renamed.exists());
@@ -2370,6 +2520,7 @@ mod tests {
         model.set_root(tmp.path.clone());
         assert!(model.focus_path(&folder));
         assert!(model.expand_focused());
+        model.reload_entries_sync().unwrap();
         assert!(model.extend_selection_to_path(&child));
 
         let targets = model.deletion_targets();
