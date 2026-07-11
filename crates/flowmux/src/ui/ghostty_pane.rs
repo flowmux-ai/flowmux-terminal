@@ -808,6 +808,10 @@ impl TerminalClickActivation {
     }
 }
 
+fn is_primary_button_release(event_type: gtk::gdk::EventType, button: Option<u32>) -> bool {
+    event_type == gtk::gdk::EventType::ButtonRelease && button == Some(gtk::gdk::BUTTON_PRIMARY)
+}
+
 fn terminal_image_path(raw: &str, cwd: Option<&std::path::Path>) -> Option<PathBuf> {
     let trimmed = raw.trim_end_matches(|c: char| {
         matches!(
@@ -1070,10 +1074,18 @@ fn install_url_link_handling(
         gesture.set_state(gtk::EventSequenceState::Claimed);
     });
 
+    let release = gtk::EventControllerLegacy::new();
+    release.set_propagation_phase(gtk::PropagationPhase::Capture);
     let term_widget = term.clone();
-    click.connect_released(move |gesture, _n_press, _x, _y| {
+    release.connect_event(move |_, event| {
+        let button = event
+            .downcast_ref::<gtk::gdk::ButtonEvent>()
+            .map(|event| event.button());
+        if !is_primary_button_release(event.event_type(), button) {
+            return glib::Propagation::Proceed;
+        }
         let Some(pending) = activation.borrow_mut().release() else {
-            return;
+            return glib::Propagation::Proceed;
         };
         match pending.target {
             TerminalClickTarget::Image(path) => {
@@ -1106,11 +1118,13 @@ fn install_url_link_handling(
                 }
             }
         }
-        // The press already claimed this sequence; keep it claimed through
-        // release so the underlying terminal does not also handle the click.
-        gesture.set_state(gtk::EventSequenceState::Claimed);
+        // Consume the physical release before VTE can return focus to the
+        // terminal window. The open callbacks dispatch asynchronously after
+        // this handler returns, so the viewer is presented after mouse-up.
+        glib::Propagation::Stop
     });
     term.add_controller(click);
+    term.add_controller(release);
 }
 
 /// Make VTE redraw the inline IME preedit string (a composing Hangul
@@ -2260,6 +2274,22 @@ mod tests {
             })
         );
         assert_eq!(activation.release(), None);
+    }
+
+    #[test]
+    fn terminal_link_dispatch_accepts_only_primary_button_release() {
+        assert!(!is_primary_button_release(
+            gtk::gdk::EventType::ButtonPress,
+            Some(gtk::gdk::BUTTON_PRIMARY)
+        ));
+        assert!(is_primary_button_release(
+            gtk::gdk::EventType::ButtonRelease,
+            Some(gtk::gdk::BUTTON_PRIMARY)
+        ));
+        assert!(!is_primary_button_release(
+            gtk::gdk::EventType::ButtonRelease,
+            Some(gtk::gdk::BUTTON_SECONDARY)
+        ));
     }
 
     #[test]
