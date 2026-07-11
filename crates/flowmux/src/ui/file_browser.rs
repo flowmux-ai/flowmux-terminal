@@ -15,6 +15,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -29,6 +30,7 @@ pub struct FileBrowserPanel {
     scroll: gtk::ScrolledWindow,
     status: gtk::Label,
     load_more_button: gtk::Button,
+    cancel_operation_button: gtk::Button,
     close_button: gtk::Button,
     model: Rc<RefCell<FileBrowserModel>>,
     delete_handler: Rc<RefCell<DeleteHandler>>,
@@ -38,6 +40,7 @@ pub struct FileBrowserPanel {
     on_focus_changed: Rc<RefCell<Option<Box<dyn Fn(bool)>>>>,
     open: Rc<Cell<bool>>,
     file_operation_in_progress: Rc<Cell<bool>>,
+    current_file_operation_cancel: Rc<RefCell<Option<Arc<AtomicBool>>>>,
     #[cfg_attr(test, allow(dead_code))]
     directory_generation: Rc<Cell<u64>>,
     directory_error: Rc<RefCell<Option<String>>>,
@@ -130,6 +133,7 @@ struct PasteRequest {
     target_dir: PathBuf,
 }
 
+#[derive(Debug)]
 struct PasteOutcome {
     pasted: Vec<PathBuf>,
     moved: Vec<(PathBuf, PathBuf)>,
@@ -139,6 +143,36 @@ struct PasteOutcome {
 struct DeleteOutcome {
     deleted: Vec<PathBuf>,
     failed: Vec<(PathBuf, io::Error)>,
+    cancelled: bool,
+}
+
+#[derive(Clone)]
+struct FileOperationControl {
+    cancelled: Arc<AtomicBool>,
+    completed: Arc<AtomicUsize>,
+    total: usize,
+}
+
+impl FileOperationControl {
+    fn new(total: usize) -> Self {
+        Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            completed: Arc::new(AtomicUsize::new(0)),
+            total,
+        }
+    }
+
+    fn check_cancelled(&self) -> io::Result<()> {
+        if self.cancelled.load(AtomicOrdering::Relaxed) {
+            Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn mark_completed(&self) {
+        self.completed.fetch_add(1, AtomicOrdering::Relaxed);
+    }
 }
 
 impl FileBrowserPanel {
@@ -171,7 +205,13 @@ impl FileBrowserPanel {
         close_button.set_tooltip_text(Some("Close file browser"));
         close_button.set_focus_on_click(false);
 
+        let cancel_operation_button = gtk::Button::with_label("Cancel");
+        cancel_operation_button.add_css_class("flat");
+        cancel_operation_button.set_visible(false);
+        cancel_operation_button.set_tooltip_text(Some("Cancel file operation"));
+
         header.append(&title_box);
+        header.append(&cancel_operation_button);
         header.append(&close_button);
         root.append(&header);
 
@@ -212,6 +252,7 @@ impl FileBrowserPanel {
             scroll,
             status,
             load_more_button,
+            cancel_operation_button,
             close_button,
             model: Rc::new(RefCell::new(FileBrowserModel::default())),
             delete_handler: Rc::new(RefCell::new(Arc::new(move_to_trash))),
@@ -223,6 +264,7 @@ impl FileBrowserPanel {
             on_focus_changed: Rc::new(RefCell::new(None)),
             open: Rc::new(Cell::new(false)),
             file_operation_in_progress: Rc::new(Cell::new(false)),
+            current_file_operation_cancel: Rc::new(RefCell::new(None)),
             directory_generation: Rc::new(Cell::new(0)),
             directory_error: Rc::new(RefCell::new(None)),
             directory_monitors: Rc::new(RefCell::new(Vec::new())),
@@ -248,8 +290,54 @@ impl FileBrowserPanel {
             );
             panel_for_more.rebuild_rows();
         });
+        let cancel = panel.current_file_operation_cancel.clone();
+        let status_for_cancel = panel.status.clone();
+        panel.cancel_operation_button.connect_clicked(move |_| {
+            if let Some(cancel) = cancel.borrow().as_ref() {
+                cancel.store(true, AtomicOrdering::Relaxed);
+                status_for_cancel.set_text("Cancelling…");
+            }
+        });
 
         panel
+    }
+
+    fn begin_file_operation(
+        &self,
+        label: &'static str,
+        total: usize,
+    ) -> Option<FileOperationControl> {
+        if self.file_operation_in_progress.replace(true) {
+            return None;
+        }
+        let control = FileOperationControl::new(total);
+        *self.current_file_operation_cancel.borrow_mut() = Some(control.cancelled.clone());
+        self.cancel_operation_button.set_visible(true);
+        self.status.set_text(&format!("{label}… 0/{total}"));
+        self.status.set_visible(true);
+
+        let panel = self.clone();
+        let progress = control.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+            if !panel.file_operation_in_progress.get() {
+                return glib::ControlFlow::Break;
+            }
+            if !progress.cancelled.load(AtomicOrdering::Relaxed) {
+                panel.status.set_text(&format!(
+                    "{label}… {}/{}",
+                    progress.completed.load(AtomicOrdering::Relaxed),
+                    progress.total
+                ));
+            }
+            glib::ControlFlow::Continue
+        });
+        Some(control)
+    }
+
+    fn finish_file_operation(&self) {
+        self.file_operation_in_progress.set(false);
+        self.current_file_operation_cancel.borrow_mut().take();
+        self.cancel_operation_button.set_visible(false);
     }
 
     pub fn widget(&self) -> &gtk::Box {
@@ -822,15 +910,18 @@ impl FileBrowserPanel {
         let Some(request) = self.model.borrow_mut().paste_request() else {
             return;
         };
-        if self.file_operation_in_progress.replace(true) {
+        let Some(control) = self.begin_file_operation("Pasting", request.clipboard.paths.len())
+        else {
             return;
-        }
+        };
         let scroll_value = self.scroll.vadjustment().value();
-        self.show_status("Pasting…");
         let panel = self.clone();
         glib::MainContext::default().spawn_local(async move {
             let started = Instant::now();
-            let result = gio::spawn_blocking(move || execute_paste(request)).await;
+            let worker_control = control.clone();
+            let result =
+                gio::spawn_blocking(move || execute_paste_with_control(request, &worker_control))
+                    .await;
             match result {
                 Ok(Ok(outcome)) => {
                     let pasted = outcome.pasted.len();
@@ -846,10 +937,17 @@ impl FileBrowserPanel {
                         "file browser operation completed"
                     );
                 }
-                Ok(Err(err)) => panel.show_status(&format!("Paste failed: {err}")),
+                Ok(Err(err)) if err.kind() == io::ErrorKind::Interrupted => {
+                    panel.refresh_with_scroll_value(scroll_value);
+                    panel.show_status("Paste cancelled");
+                }
+                Ok(Err(err)) => {
+                    panel.refresh_with_scroll_value(scroll_value);
+                    panel.show_status(&format!("Paste failed: {err}"));
+                }
                 Err(_) => panel.show_status("Paste failed: worker panicked"),
             }
-            panel.file_operation_in_progress.set(false);
+            panel.finish_file_operation();
         });
     }
 
@@ -932,24 +1030,29 @@ impl FileBrowserPanel {
         if paths.is_empty() {
             return;
         }
-        if self.file_operation_in_progress.replace(true) {
+        let label = if operation == "trash" {
+            "Moving to Trash"
+        } else {
+            "Deleting"
+        };
+        let Some(control) = self.begin_file_operation(label, paths.len()) else {
             return;
-        }
+        };
 
         let scroll_value = self.scroll.vadjustment().value();
         let next_focus = self
             .model
             .borrow()
             .focus_candidate_after_removed_paths(&paths);
-        self.show_status(if operation == "trash" {
-            "Moving to Trash…"
-        } else {
-            "Deleting…"
-        });
         let panel = self.clone();
         glib::MainContext::default().spawn_local(async move {
             let started = Instant::now();
-            match gio::spawn_blocking(move || execute_delete(paths, delete)).await {
+            let worker_control = control.clone();
+            match gio::spawn_blocking(move || {
+                execute_delete_with_control(paths, delete, &worker_control)
+            })
+            .await
+            {
                 Ok(outcome) => {
                     let deleted_count = outcome.deleted.len();
                     let failed_count = outcome.failed.len();
@@ -973,18 +1076,21 @@ impl FileBrowserPanel {
                                 "Delete failed for {failed_count} items: {err}"
                             ));
                         }
+                    } else if outcome.cancelled {
+                        panel.show_status("Delete cancelled");
                     }
                     tracing::info!(
                         operation,
                         deleted = deleted_count,
                         failed = failed_count,
+                        cancelled = outcome.cancelled,
                         elapsed_ms = started.elapsed().as_millis(),
                         "file browser operation completed"
                     );
                 }
                 Err(_) => panel.show_status("Delete failed: worker panicked"),
             }
-            panel.file_operation_in_progress.set(false);
+            panel.finish_file_operation();
         });
     }
 
@@ -1659,7 +1765,16 @@ impl FileBrowserModel {
     }
 }
 
+#[cfg(test)]
 fn execute_paste(request: PasteRequest) -> io::Result<PasteOutcome> {
+    let control = FileOperationControl::new(request.clipboard.paths.len());
+    execute_paste_with_control(request, &control)
+}
+
+fn execute_paste_with_control(
+    request: PasteRequest,
+    control: &FileOperationControl,
+) -> io::Result<PasteOutcome> {
     let PasteRequest {
         clipboard,
         target_dir,
@@ -1667,7 +1782,9 @@ fn execute_paste(request: PasteRequest) -> io::Result<PasteOutcome> {
     let mut pasted = Vec::new();
     let mut moved = Vec::new();
     for source in &clipboard.paths {
+        control.check_cancelled()?;
         if !source.exists() {
+            control.mark_completed();
             continue;
         }
         if source.is_dir() && target_dir.starts_with(source) {
@@ -1681,18 +1798,24 @@ fn execute_paste(request: PasteRequest) -> io::Result<PasteOutcome> {
             && source.parent() == Some(target_dir.as_path())
         {
             pasted.push(source.clone());
+            control.mark_completed();
             continue;
         }
 
         let destination = unique_destination(&target_dir, source)?;
-        match clipboard.operation {
-            ClipboardOperation::Copy => copy_path(source, &destination)?,
-            ClipboardOperation::Cut => {
-                move_path(source, &destination)?;
-                moved.push((source.clone(), destination.clone()));
-            }
+        let result = match clipboard.operation {
+            ClipboardOperation::Copy => copy_path_with_control(source, &destination, control),
+            ClipboardOperation::Cut => move_path_with_control(source, &destination, control),
+        };
+        if let Err(error) = result {
+            let _ = permanently_delete_path(&destination);
+            return Err(error);
+        }
+        if clipboard.operation == ClipboardOperation::Cut {
+            moved.push((source.clone(), destination.clone()));
         }
         pasted.push(destination);
+        control.mark_completed();
     }
 
     Ok(PasteOutcome {
@@ -1702,16 +1825,30 @@ fn execute_paste(request: PasteRequest) -> io::Result<PasteOutcome> {
     })
 }
 
-fn execute_delete(paths: Vec<PathBuf>, delete: DeleteHandler) -> DeleteOutcome {
+fn execute_delete_with_control(
+    paths: Vec<PathBuf>,
+    delete: DeleteHandler,
+    control: &FileOperationControl,
+) -> DeleteOutcome {
     let mut deleted = Vec::new();
     let mut failed = Vec::new();
+    let mut cancelled = false;
     for path in paths {
+        if control.check_cancelled().is_err() {
+            cancelled = true;
+            break;
+        }
         match delete(&path) {
             Ok(()) => deleted.push(path),
             Err(err) => failed.push((path, err)),
         }
+        control.mark_completed();
     }
-    DeleteOutcome { deleted, failed }
+    DeleteOutcome {
+        deleted,
+        failed,
+        cancelled,
+    }
 }
 
 fn read_dir_entries(dir: &Path) -> std::io::Result<Vec<FsEntry>> {
@@ -1800,14 +1937,20 @@ fn unique_destination(target_dir: &Path, source: &Path) -> io::Result<PathBuf> {
     unreachable!("unbounded suffix search must return before exhausting usize")
 }
 
-fn copy_path(source: &Path, destination: &Path) -> io::Result<()> {
+fn copy_path_with_control(
+    source: &Path,
+    destination: &Path,
+    control: &FileOperationControl,
+) -> io::Result<()> {
+    control.check_cancelled()?;
     if source.is_dir() {
         fs::create_dir(destination)?;
         for entry in fs::read_dir(source)? {
+            control.check_cancelled()?;
             let entry = entry?;
             let child_source = entry.path();
             let child_destination = destination.join(entry.file_name());
-            copy_path(&child_source, &child_destination)?;
+            copy_path_with_control(&child_source, &child_destination, control)?;
         }
         Ok(())
     } else {
@@ -1815,11 +1958,17 @@ fn copy_path(source: &Path, destination: &Path) -> io::Result<()> {
     }
 }
 
-fn move_path(source: &Path, destination: &Path) -> io::Result<()> {
+fn move_path_with_control(
+    source: &Path,
+    destination: &Path,
+    control: &FileOperationControl,
+) -> io::Result<()> {
+    control.check_cancelled()?;
     match fs::rename(source, destination) {
         Ok(()) => Ok(()),
         Err(rename_err) => {
-            copy_path(source, destination)?;
+            copy_path_with_control(source, destination, control)?;
+            control.check_cancelled()?;
             let remove_result = if source.is_dir() {
                 fs::remove_dir_all(source)
             } else {
@@ -2399,6 +2548,68 @@ mod tests {
         assert!(snapshot.contains_key(&expanded_dir));
         assert!(!snapshot.contains_key(&collapsed_dir));
         assert!(!snapshot.contains_key(&nested_dir));
+    }
+
+    #[test]
+    fn cancelled_recursive_paste_stops_before_writing() {
+        let tmp = TestDir::new("cancel-paste");
+        let source = tmp.dir("source");
+        tmp.file("source/a.txt");
+        let target = tmp.dir("target");
+        let control = FileOperationControl::new(1);
+        control.cancelled.store(true, AtomicOrdering::Relaxed);
+        let request = PasteRequest {
+            clipboard: FileClipboard {
+                operation: ClipboardOperation::Copy,
+                paths: vec![source],
+            },
+            target_dir: target.clone(),
+        };
+
+        let error = execute_paste_with_control(request, &control).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert!(!target.join("source").exists());
+        assert_eq!(control.completed.load(AtomicOrdering::Relaxed), 0);
+    }
+
+    #[test]
+    fn cancelled_delete_stops_before_next_selected_item() {
+        let tmp = TestDir::new("cancel-delete");
+        let first = tmp.file("a.txt");
+        let second = tmp.file("b.txt");
+        let control = FileOperationControl::new(2);
+        let cancel = control.cancelled.clone();
+        let delete: DeleteHandler = Arc::new(move |path| {
+            fs::remove_file(path)?;
+            cancel.store(true, AtomicOrdering::Relaxed);
+            Ok(())
+        });
+
+        let outcome =
+            execute_delete_with_control(vec![first.clone(), second.clone()], delete, &control);
+
+        assert!(outcome.cancelled);
+        assert_eq!(outcome.deleted, vec![first]);
+        assert!(second.exists());
+        assert_eq!(control.completed.load(AtomicOrdering::Relaxed), 1);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[gtk::test]
+    fn file_operation_cancel_button_controls_current_operation() {
+        let panel = FileBrowserPanel::new();
+        let control = panel.begin_file_operation("Copying", 3).unwrap();
+
+        assert!(panel.cancel_operation_button.property::<bool>("visible"));
+        assert_eq!(panel.status.text(), "Copying… 0/3");
+        panel.cancel_operation_button.emit_clicked();
+        assert!(control.cancelled.load(AtomicOrdering::Relaxed));
+        assert_eq!(panel.status.text(), "Cancelling…");
+
+        panel.finish_file_operation();
+        assert!(!panel.cancel_operation_button.property::<bool>("visible"));
+        assert!(!panel.file_operation_in_progress.get());
     }
 
     #[test]
