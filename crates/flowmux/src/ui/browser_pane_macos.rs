@@ -176,6 +176,10 @@ impl BrowserPane {
         let back = gtk::Button::from_icon_name("go-previous-symbolic");
         let forward = gtk::Button::from_icon_name("go-next-symbolic");
         let reload = gtk::Button::from_icon_name("view-refresh-symbolic");
+        let find = gtk::Button::from_icon_name("edit-find-symbolic");
+        find.set_tooltip_text(Some("Find in page"));
+        let zoom_reset = gtk::Button::from_icon_name("zoom-original-symbolic");
+        zoom_reset.set_tooltip_text(Some("Reset page zoom"));
         let address = gtk::Entry::new();
         address.set_hexpand(true);
         address.set_placeholder_text(Some("Enter URL — e.g. http://localhost:3000"));
@@ -194,7 +198,17 @@ impl BrowserPane {
         chrome.append(&forward);
         chrome.append(&reload);
         chrome.append(&address);
+        chrome.append(&find);
+        chrome.append(&zoom_reset);
         chrome.append(&inspector);
+
+        let find_entry = gtk::SearchEntry::builder()
+            .placeholder_text("Find in page…")
+            .visible(false)
+            .build();
+        find_entry.set_margin_start(4);
+        find_entry.set_margin_end(4);
+        find_entry.set_margin_bottom(4);
 
         let viewport = gtk::DrawingArea::new();
         viewport.set_hexpand(true);
@@ -206,6 +220,7 @@ impl BrowserPane {
         root.set_hexpand(true);
         root.set_vexpand(true);
         root.append(&chrome);
+        root.append(&find_entry);
         root.append(&viewport);
 
         let native = Rc::new(NativeBrowserView {
@@ -240,6 +255,43 @@ impl BrowserPane {
             let native = native.clone();
             reload.connect_clicked(move |_| unsafe {
                 native.web_view.reload();
+            });
+        }
+        {
+            let entry = find_entry.clone();
+            find.connect_clicked(move |_| {
+                let visible = !entry.is_visible();
+                entry.set_visible(visible);
+                if visible {
+                    entry.grab_focus();
+                }
+            });
+        }
+        {
+            let native = native.clone();
+            zoom_reset.connect_clicked(move |_| {
+                native.zoom.set(1.0);
+                unsafe { native.web_view.setPageZoom(1.0) };
+            });
+        }
+        {
+            let native = native.clone();
+            find_entry.connect_search_changed(move |entry| {
+                find_in_native_page(&native.web_view, &entry.text());
+            });
+        }
+        {
+            let native = native.clone();
+            find_entry.connect_activate(move |entry| {
+                find_in_native_page(&native.web_view, &entry.text());
+            });
+        }
+        {
+            let native = native.clone();
+            let entry = find_entry.clone();
+            find_entry.connect_stop_search(move |_| {
+                entry.set_visible(false);
+                focus_native_view(&native.web_view);
             });
         }
         inspector.connect_clicked(|_| {
@@ -448,6 +500,19 @@ impl BrowserPane {
                 .web_view
                 .evaluateJavaScript_completionHandler(&script, Some(&block));
         }
+    }
+}
+
+fn find_in_native_page(web_view: &WKWebView, query: &str) {
+    if query.is_empty() {
+        return;
+    }
+    let query = serde_json::to_string(query).unwrap_or_else(|_| "\"\"".into());
+    let script = NSString::from_str(&format!(
+        "window.find({query}, false, false, true, false, false, false)"
+    ));
+    unsafe {
+        web_view.evaluateJavaScript_completionHandler(&script, None);
     }
 }
 

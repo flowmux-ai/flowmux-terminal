@@ -166,6 +166,10 @@ impl BrowserPane {
         let back = gtk::Button::from_icon_name("go-previous-symbolic");
         let forward = gtk::Button::from_icon_name("go-next-symbolic");
         let reload = gtk::Button::from_icon_name("view-refresh-symbolic");
+        let find = gtk::Button::from_icon_name("edit-find-symbolic");
+        find.set_tooltip_text(Some("Find in page"));
+        let zoom_reset = gtk::Button::from_icon_name("zoom-original-symbolic");
+        zoom_reset.set_tooltip_text(Some("Reset page zoom"));
         let address = gtk::Entry::new();
         address.set_hexpand(true);
         address.set_placeholder_text(Some("Enter URL — e.g. http://localhost:3000"));
@@ -186,12 +190,23 @@ impl BrowserPane {
         chrome.append(&forward);
         chrome.append(&reload);
         chrome.append(&address);
+        chrome.append(&find);
+        chrome.append(&zoom_reset);
         chrome.append(&inspector);
+
+        let find_entry = gtk::SearchEntry::builder()
+            .placeholder_text("Find in page…")
+            .visible(false)
+            .build();
+        find_entry.set_margin_start(4);
+        find_entry.set_margin_end(4);
+        find_entry.set_margin_bottom(4);
 
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.set_hexpand(true);
         root.set_vexpand(true);
         root.append(&chrome);
+        root.append(&find_entry);
         root.append(&web_view);
 
         // Wire chrome buttons.
@@ -214,6 +229,59 @@ impl BrowserPane {
         {
             let v = web_view.clone();
             reload.connect_clicked(move |_| v.reload());
+        }
+        {
+            let entry = find_entry.clone();
+            find.connect_clicked(move |_| {
+                let visible = !entry.is_visible();
+                entry.set_visible(visible);
+                if visible {
+                    entry.grab_focus();
+                }
+            });
+        }
+        {
+            let v = web_view.clone();
+            zoom_reset.connect_clicked(move |_| v.set_zoom_level(1.0));
+        }
+        {
+            let v = web_view.clone();
+            find_entry.connect_search_changed(move |entry| {
+                let Some(controller) = v.find_controller() else {
+                    return;
+                };
+                let text = entry.text();
+                if text.is_empty() {
+                    controller.search_finish();
+                } else {
+                    controller.search(
+                        &text,
+                        (webkit6::FindOptions::CASE_INSENSITIVE
+                            | webkit6::FindOptions::WRAP_AROUND)
+                            .bits(),
+                        u32::MAX,
+                    );
+                }
+            });
+        }
+        {
+            let v = web_view.clone();
+            find_entry.connect_activate(move |_| {
+                if let Some(controller) = v.find_controller() {
+                    controller.search_next();
+                }
+            });
+        }
+        {
+            let v = web_view.clone();
+            let entry = find_entry.clone();
+            find_entry.connect_stop_search(move |_| {
+                if let Some(controller) = v.find_controller() {
+                    controller.search_finish();
+                }
+                entry.set_visible(false);
+                v.grab_focus();
+            });
         }
         {
             let v = web_view.clone();
