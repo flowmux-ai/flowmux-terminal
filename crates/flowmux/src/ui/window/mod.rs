@@ -287,6 +287,9 @@ pub struct WindowController {
     /// the head through third panes, shortened to the last 3 folders with a
     /// "..." prefix. Updated on focus moves within a workspace.
     focus_mru: Rc<RefCell<HashMap<WorkspaceId, std::collections::VecDeque<PaneId>>>>,
+    /// Command-palette entry keys ordered most-recent-first for this window.
+    /// Kept in memory only; project and workspace entries can change between launches.
+    palette_mru: Rc<RefCell<std::collections::VecDeque<String>>>,
     /// Monotonic id for process-tree sweeps. A slower older worker result is
     /// discarded instead of overwriting a newer agent observation.
     agent_poll_generation: Rc<Cell<u64>>,
@@ -683,6 +686,7 @@ impl WindowController {
             css_provider,
             clipboard_toast,
             focus_mru: Rc::new(RefCell::new(HashMap::new())),
+            palette_mru: Rc::new(RefCell::new(std::collections::VecDeque::new())),
             agent_poll_generation: Rc::new(Cell::new(0)),
             cwd_poll_generation: Rc::new(Cell::new(0)),
         };

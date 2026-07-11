@@ -72,6 +72,14 @@ enum TemplatePaneContent {
     },
 }
 
+fn record_palette_mru(mru: &mut std::collections::VecDeque<String>, key: &str) {
+    if let Some(index) = mru.iter().position(|entry| entry == key) {
+        mru.remove(index);
+    }
+    mru.push_front(key.to_string());
+    mru.truncate(20);
+}
+
 pub(super) fn development_workspace_template() -> WorkspaceTemplate {
     WorkspaceTemplate {
         id: "agent-tests-browser".into(),
@@ -509,6 +517,17 @@ impl WindowController {
             }
         }
 
+        for (search_text, button) in &entries {
+            let key = search_text.clone();
+            let mru = self.palette_mru.clone();
+            button.connect_clicked(move |_| record_palette_mru(&mut mru.borrow_mut(), &key));
+        }
+        for key in self.palette_mru.borrow().iter().rev() {
+            if let Some((_, button)) = entries.iter().find(|(search_text, _)| search_text == key) {
+                list.reorder_child_after(button, None::<&gtk::Widget>);
+            }
+        }
+
         let entries = Rc::new(entries);
         let entries_for_search = entries.clone();
         let no_results_for_search = no_results.clone();
@@ -814,7 +833,7 @@ impl WindowController {
 
 #[cfg(test)]
 mod tests {
-    use super::fuzzy_matches;
+    use super::{fuzzy_matches, record_palette_mru};
 
     #[test]
     fn fuzzy_match_supports_subsequences_and_multiple_terms() {
@@ -836,5 +855,23 @@ mod tests {
         let label = super::accelerator_label("<Ctrl><Shift>b").unwrap();
         assert!(label.contains("Ctrl"));
         assert!(label.to_lowercase().contains('b'));
+    }
+
+    #[test]
+    fn palette_mru_moves_existing_entries_and_caps_history() {
+        let mut mru = std::collections::VecDeque::new();
+        for index in 0..25 {
+            record_palette_mru(&mut mru, &format!("command-{index}"));
+        }
+        record_palette_mru(&mut mru, "command-10");
+
+        assert_eq!(mru.front().map(String::as_str), Some("command-10"));
+        assert_eq!(mru.len(), 20);
+        assert_eq!(
+            mru.iter()
+                .filter(|entry| entry.as_str() == "command-10")
+                .count(),
+            1
+        );
     }
 }
