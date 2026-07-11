@@ -163,6 +163,30 @@ impl BrowserPane {
             tracing::warn!("WebView::settings() returned None — media options skipped");
         }
 
+        {
+            let pane_id = pane_id.clone();
+            let open_url = callbacks.on_open_url.clone();
+            web_view.connect_decide_policy(move |_, decision, decision_type| {
+                if decision_type != webkit6::PolicyDecisionType::NewWindowAction {
+                    return false;
+                }
+                let Some(navigation) = decision.downcast_ref::<webkit6::NavigationPolicyDecision>()
+                else {
+                    return false;
+                };
+                let url = navigation
+                    .navigation_action()
+                    .and_then(|mut action| action.request())
+                    .and_then(|request| request.uri())
+                    .map(|uri| uri.to_string());
+                decision.ignore();
+                if let Some(url) = url {
+                    (open_url.borrow_mut())(pane_id.get(), url);
+                }
+                true
+            });
+        }
+
         let back = gtk::Button::from_icon_name("go-previous-symbolic");
         let forward = gtk::Button::from_icon_name("go-next-symbolic");
         let reload = gtk::Button::from_icon_name("view-refresh-symbolic");

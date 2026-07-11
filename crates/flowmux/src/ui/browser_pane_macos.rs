@@ -10,7 +10,8 @@ use gtk::prelude::*;
 use objc2::rc::{autoreleasepool, Retained};
 use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
 use objc2::{
-    define_class, msg_send, AnyThread, ClassType, MainThreadMarker, MainThreadOnly, Message,
+    define_class, msg_send, AnyThread, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly,
+    Message,
 };
 use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSResponder, NSView, NSWindow};
 use objc2_foundation::{
@@ -54,11 +55,17 @@ struct NativeBrowserView {
     zoom: Cell<f64>,
 }
 
+struct BrowserUIDelegateIvars {
+    pane_id: Rc<Cell<PaneId>>,
+    open_url: Rc<RefCell<dyn FnMut(PaneId, String)>>,
+}
+
 define_class!(
     // SAFETY: NSObject has no subclassing requirements. The delegate is used
     // only on the main thread as required by WKUIDelegate.
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
+    #[ivars = BrowserUIDelegateIvars]
     struct BrowserUIDelegate;
 
     unsafe impl NSObjectProtocol for BrowserUIDelegate {}
@@ -68,14 +75,19 @@ define_class!(
         #[allow(non_snake_case)]
         fn webView_createWebViewWithConfiguration_forNavigationAction_windowFeatures(
             &self,
-            web_view: &WKWebView,
+            _web_view: &WKWebView,
             _configuration: &WKWebViewConfiguration,
             navigation_action: &WKNavigationAction,
             _window_features: &WKWindowFeatures,
         ) -> Option<Retained<WKWebView>> {
             let request = unsafe { navigation_action.request() };
-            unsafe {
-                web_view.loadRequest(&request);
+            let url = request
+                .URL()
+                .and_then(|url| url.absoluteString())
+                .map(|url| url.to_string());
+            if let Some(url) = url {
+                let ivars = self.ivars();
+                (ivars.open_url.borrow_mut())(ivars.pane_id.get(), url);
             }
             None
         }
@@ -225,7 +237,12 @@ impl BrowserPane {
 
         let native = Rc::new(NativeBrowserView {
             web_view: web_view.clone(),
-            _ui_delegate: install_ui_delegate(&web_view),
+            _ui_delegate: install_ui_delegate(
+                mtm,
+                &web_view,
+                pane_id.clone(),
+                callbacks.on_open_url.clone(),
+            ),
             last_url: RefCell::new(String::new()),
             last_title: RefCell::new(String::new()),
             zoom: Cell::new(1.0),
@@ -541,9 +558,15 @@ fn create_web_view(
     web_view
 }
 
-fn install_ui_delegate(web_view: &WKWebView) -> Retained<BrowserUIDelegate> {
-    let delegate: Retained<BrowserUIDelegate> =
-        unsafe { msg_send![BrowserUIDelegate::class(), new] };
+fn install_ui_delegate(
+    mtm: MainThreadMarker,
+    web_view: &WKWebView,
+    pane_id: Rc<Cell<PaneId>>,
+    open_url: Rc<RefCell<dyn FnMut(PaneId, String)>>,
+) -> Retained<BrowserUIDelegate> {
+    let delegate =
+        BrowserUIDelegate::alloc(mtm).set_ivars(BrowserUIDelegateIvars { pane_id, open_url });
+    let delegate: Retained<BrowserUIDelegate> = unsafe { msg_send![super(delegate), init] };
     unsafe {
         web_view.setUIDelegate(Some(ProtocolObject::from_ref(&*delegate)));
     }
