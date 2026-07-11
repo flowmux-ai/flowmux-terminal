@@ -1933,6 +1933,139 @@ mod tests {
             .expect("expected active surface")
     }
 
+    async fn assert_agent_lifecycle(agent: &str, initial_status: AgentStatus) {
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(
+                Some(format!("{agent}-lifecycle")),
+                std::path::PathBuf::from(format!("/tmp/{agent}-lifecycle")),
+            )
+            .await;
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        let surface = first_pane_active_surface(&ws);
+
+        let report = |status, activity, seq| AgentStatusReport {
+            name: agent.into(),
+            status: Some(status),
+            activity,
+            pid: None,
+            source: Some("flowmux:hook".into()),
+            seq: Some(seq),
+            message: None,
+            custom_status: None,
+            session_id: Some(format!("{agent}-session")),
+        };
+
+        store
+            .report_agent_status_with_visibility(surface, report(initial_status, None, 1), true)
+            .await;
+        assert_eq!(
+            store.workspace_agent_status(ws_id).await,
+            Some(initial_status),
+            "{agent}: session start"
+        );
+
+        store
+            .report_agent_status_with_visibility(
+                surface,
+                report(
+                    AgentStatus::Working,
+                    Some(flowmux_core::AgentActivity::Running),
+                    2,
+                ),
+                true,
+            )
+            .await;
+        assert_eq!(
+            store.workspace_agent_status(ws_id).await,
+            Some(AgentStatus::Working),
+            "{agent}: running"
+        );
+
+        store
+            .report_agent_status_with_visibility(
+                surface,
+                report(
+                    AgentStatus::Blocked,
+                    Some(flowmux_core::AgentActivity::NeedsInput),
+                    3,
+                ),
+                false,
+            )
+            .await;
+        assert_eq!(
+            store.workspace_agent_attention_status(ws_id).await,
+            Some(AgentStatus::Blocked),
+            "{agent}: hidden input request raises attention"
+        );
+
+        store.set_active_workspace(Some(ws_id)).await;
+        assert_eq!(
+            store.workspace_agent_attention_status(ws_id).await,
+            None,
+            "{agent}: opening the workspace acknowledges the alert"
+        );
+        assert_eq!(
+            store.workspace_agent_status(ws_id).await,
+            Some(AgentStatus::Blocked),
+            "{agent}: acknowledgement preserves the blocked state"
+        );
+
+        store
+            .report_agent_status_with_visibility(
+                surface,
+                report(
+                    AgentStatus::Working,
+                    Some(flowmux_core::AgentActivity::Running),
+                    4,
+                ),
+                true,
+            )
+            .await;
+        assert_eq!(
+            store.workspace_agent_status(ws_id).await,
+            Some(AgentStatus::Working),
+            "{agent}: resumed"
+        );
+
+        store.set_active_workspace(None).await;
+        store
+            .report_agent_status_with_visibility(
+                surface,
+                report(
+                    AgentStatus::Idle,
+                    Some(flowmux_core::AgentActivity::Idle),
+                    5,
+                ),
+                false,
+            )
+            .await;
+        assert_eq!(
+            store.workspace_agent_attention_status(ws_id).await,
+            Some(AgentStatus::Done),
+            "{agent}: hidden completion raises a done alert"
+        );
+
+        store.set_active_workspace(Some(ws_id)).await;
+        assert_eq!(
+            store.workspace_agent_attention_status(ws_id).await,
+            None,
+            "{agent}: opening the completed workspace clears the alert"
+        );
+        assert_eq!(
+            store.workspace_agent_status(ws_id).await,
+            Some(AgentStatus::Idle),
+            "{agent}: acknowledged completion settles to idle"
+        );
+
+        assert_eq!(store.set_agent_activity(surface, None).await, Some(ws_id));
+        assert_eq!(
+            store.workspace_agent_status(ws_id).await,
+            None,
+            "{agent}: exit clears presence"
+        );
+    }
+
     #[tokio::test]
     async fn create_workspace_sets_order_active_surface_and_color() {
         let store = StateStore::new_lazy(State::default());
@@ -2058,6 +2191,21 @@ mod tests {
             store.workspace_agent_status(ws_id).await,
             Some(AgentStatus::Blocked)
         );
+    }
+
+    #[tokio::test]
+    async fn claude_lifecycle_start_running_blocked_resumed_completed_exit() {
+        assert_agent_lifecycle("claude", AgentStatus::Idle).await;
+    }
+
+    #[tokio::test]
+    async fn codex_lifecycle_unknown_running_blocked_resumed_completed_exit() {
+        assert_agent_lifecycle("codex", AgentStatus::Unknown).await;
+    }
+
+    #[tokio::test]
+    async fn opencode_lifecycle_unknown_running_blocked_resumed_completed_exit() {
+        assert_agent_lifecycle("opencode", AgentStatus::Unknown).await;
     }
 
     #[tokio::test]
