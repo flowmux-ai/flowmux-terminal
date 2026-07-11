@@ -137,6 +137,12 @@ The image viewer loads **ThorVG** at runtime (`dlopen`). It is **optional** —
 flowmux builds and runs without it; only the image viewer needs it, and shows a
 "ThorVG is not installed" message until it is present (no rebuild needed).
 
+On macOS, install the Homebrew package and restart FlowMux:
+
+```bash
+brew install thorvg
+```
+
 Ubuntu does not package ThorVG, so install it with the helper script (needs
 `meson` + `ninja-build`):
 

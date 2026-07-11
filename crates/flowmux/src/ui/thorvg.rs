@@ -99,14 +99,23 @@ struct Api {
 
 static API: OnceLock<Option<Api>> = OnceLock::new();
 
+#[cfg(target_os = "macos")]
+const LIBRARY_CANDIDATES: &[&str] = &[
+    "/opt/homebrew/opt/thorvg/lib/libthorvg-1.dylib",
+    "/usr/local/opt/thorvg/lib/libthorvg-1.dylib",
+    "/opt/homebrew/lib/libthorvg-1.dylib",
+    "/usr/local/lib/libthorvg-1.dylib",
+    "libthorvg-1.dylib",
+    "libthorvg.dylib",
+];
+
+#[cfg(not(target_os = "macos"))]
+const LIBRARY_CANDIDATES: &[&str] = &["libthorvg-1.so.1", "libthorvg-1.so", "libthorvg.so"];
+
 fn load() -> Option<Api> {
-    // Prefer the versioned soname; fall back to the linker name.
-    let lib = unsafe {
-        Library::new("libthorvg-1.so.1")
-            .or_else(|_| Library::new("libthorvg-1.so"))
-            .or_else(|_| Library::new("libthorvg.so"))
-    }
-    .ok()?;
+    let lib = LIBRARY_CANDIDATES
+        .iter()
+        .find_map(|candidate| unsafe { Library::new(candidate).ok() })?;
 
     // Resolve a symbol into a typed function pointer, returning None from
     // `load` if any is missing (treated as "ThorVG unavailable").
