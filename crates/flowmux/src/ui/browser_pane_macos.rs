@@ -3,11 +3,11 @@
 
 use crate::ui::browser_bookmarks::BookmarkMenu;
 use crate::ui::pane_terminal::PaneCallbacks;
+use adw::prelude::*;
 use flowmux_browser::{BrowserProfile, RefScope, RefStore};
 use flowmux_config::options::BrowserEngine;
 use flowmux_core::{PaneId, SurfaceId};
 use gtk::glib::{self, translate::ToGlibPtr};
-use gtk::prelude::*;
 use objc2::rc::{autoreleasepool, Retained};
 use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
 use objc2::{
@@ -20,8 +20,9 @@ use objc2_foundation::{
     NSURL, NSUUID,
 };
 use objc2_web_kit::{
-    WKAudiovisualMediaTypes, WKNavigationAction, WKPreferences, WKSnapshotConfiguration,
-    WKUIDelegate, WKWebView, WKWebViewConfiguration, WKWebsiteDataStore, WKWindowFeatures,
+    WKAudiovisualMediaTypes, WKFrameInfo, WKMediaCaptureType, WKNavigationAction,
+    WKPermissionDecision, WKPreferences, WKSecurityOrigin, WKSnapshotConfiguration, WKUIDelegate,
+    WKWebView, WKWebViewConfiguration, WKWebsiteDataStore, WKWindowFeatures,
 };
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
@@ -60,6 +61,7 @@ struct NativeBrowserView {
 struct BrowserUIDelegateIvars {
     pane_id: Rc<Cell<PaneId>>,
     open_url: Rc<RefCell<dyn FnMut(PaneId, String)>>,
+    placeholder: glib::WeakRef<gtk::Widget>,
 }
 
 define_class!(
@@ -92,6 +94,36 @@ define_class!(
                 (ivars.open_url.borrow_mut())(ivars.pane_id.get(), url);
             }
             None
+        }
+
+        #[unsafe(method(webView:requestMediaCapturePermissionForOrigin:initiatedByFrame:type:decisionHandler:))]
+        #[allow(non_snake_case)]
+        fn webView_requestMediaCapturePermissionForOrigin_initiatedByFrame_type_decisionHandler(
+            &self,
+            _web_view: &WKWebView,
+            origin: &WKSecurityOrigin,
+            _frame: &WKFrameInfo,
+            capture_type: WKMediaCaptureType,
+            decision_handler: &block2::DynBlock<dyn Fn(WKPermissionDecision)>,
+        ) {
+            let Some(parent) = self
+                .ivars()
+                .placeholder
+                .upgrade()
+                .and_then(|widget| widget.root())
+                .and_then(|root| root.downcast::<gtk::Window>().ok())
+            else {
+                decision_handler.call((WKPermissionDecision::Deny,));
+                return;
+            };
+            let site = unsafe { origin.host().to_string() };
+            let site = if site.is_empty() { "This page" } else { &site };
+            present_web_permission_dialog(
+                &parent,
+                media_capture_name(capture_type),
+                site,
+                decision_handler.copy(),
+            );
         }
     }
 );
@@ -286,6 +318,7 @@ impl BrowserPane {
                 &web_view,
                 pane_id.clone(),
                 callbacks.on_open_url.clone(),
+                web_widget.downgrade(),
             ),
             last_url: RefCell::new(String::new()),
             last_title: RefCell::new(String::new()),
@@ -619,14 +652,63 @@ fn install_ui_delegate(
     web_view: &WKWebView,
     pane_id: Rc<Cell<PaneId>>,
     open_url: Rc<RefCell<dyn FnMut(PaneId, String)>>,
+    placeholder: glib::WeakRef<gtk::Widget>,
 ) -> Retained<BrowserUIDelegate> {
-    let delegate =
-        BrowserUIDelegate::alloc(mtm).set_ivars(BrowserUIDelegateIvars { pane_id, open_url });
+    let delegate = BrowserUIDelegate::alloc(mtm).set_ivars(BrowserUIDelegateIvars {
+        pane_id,
+        open_url,
+        placeholder,
+    });
     let delegate: Retained<BrowserUIDelegate> = unsafe { msg_send![super(delegate), init] };
     unsafe {
         web_view.setUIDelegate(Some(ProtocolObject::from_ref(&*delegate)));
     }
     delegate
+}
+
+fn media_capture_name(capture_type: WKMediaCaptureType) -> &'static str {
+    match capture_type {
+        WKMediaCaptureType::Camera => "camera access",
+        WKMediaCaptureType::Microphone => "microphone access",
+        WKMediaCaptureType::CameraAndMicrophone => "camera and microphone access",
+        _ => "media capture access",
+    }
+}
+
+fn present_web_permission_dialog(
+    parent: &gtk::Window,
+    permission: &str,
+    site: &str,
+    decision_handler: block2::RcBlock<dyn Fn(WKPermissionDecision)>,
+) {
+    let dialog = adw::AlertDialog::new(
+        Some(&format!("Allow {permission}?")),
+        Some(&format!("{site} is requesting access.")),
+    );
+    dialog.add_response("deny", "Deny");
+    dialog.add_response("allow", "Allow");
+    dialog.set_default_response(Some("deny"));
+    dialog.set_close_response("deny");
+    dialog.set_response_appearance("allow", adw::ResponseAppearance::Suggested);
+
+    let native_browser_suspend = suspend_native_browser_views_for_window(parent);
+    let pending = Rc::new(RefCell::new(Some((
+        decision_handler,
+        native_browser_suspend,
+    ))));
+    dialog.connect_response(None, move |dialog, response| {
+        if let Some((decision_handler, native_browser_suspend)) = pending.borrow_mut().take() {
+            let decision = if response == "allow" {
+                WKPermissionDecision::Grant
+            } else {
+                WKPermissionDecision::Deny
+            };
+            decision_handler.call((decision,));
+            drop(native_browser_suspend);
+        }
+        dialog.close();
+    });
+    dialog.present(Some(parent));
 }
 
 fn website_data_store(
@@ -917,5 +999,21 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(first.len(), 36);
         assert_eq!(&first[14..15], "5");
+    }
+
+    #[test]
+    fn media_capture_names_distinguish_webkit_request_types() {
+        assert_eq!(
+            media_capture_name(WKMediaCaptureType::Camera),
+            "camera access"
+        );
+        assert_eq!(
+            media_capture_name(WKMediaCaptureType::Microphone),
+            "microphone access"
+        );
+        assert_eq!(
+            media_capture_name(WKMediaCaptureType::CameraAndMicrophone),
+            "camera and microphone access"
+        );
     }
 }

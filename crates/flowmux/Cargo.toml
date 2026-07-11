@@ -80,7 +80,7 @@ block2 = "0.6"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSBitmapImageRep", "NSImage", "NSImageRep", "NSResponder", "NSView", "NSWindow"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSData", "NSDictionary", "NSError", "NSGeometry", "NSObject", "NSString", "NSURL", "NSURLRequest", "NSUUID"] }
-objc2-web-kit = { version = "0.3.2", default-features = false, features = ["std", "WKNavigation", "WKNavigationAction", "WKPreferences", "WKSnapshotConfiguration", "WKUIDelegate", "WKWebView", "WKWebViewConfiguration", "WKWebsiteDataStore", "WKWindowFeatures", "block2", "objc2-app-kit", "objc2-core-foundation"] }
+objc2-web-kit = { version = "0.3.2", default-features = false, features = ["std", "WKFrameInfo", "WKNavigation", "WKNavigationAction", "WKPreferences", "WKSecurityOrigin", "WKSnapshotConfiguration", "WKUIDelegate", "WKWebView", "WKWebViewConfiguration", "WKWebsiteDataStore", "WKWindowFeatures", "block2", "objc2-app-kit", "objc2-core-foundation"] }
 
 [dev-dependencies]
 rusqlite = { version = "0.32", features = ["bundled"] }
