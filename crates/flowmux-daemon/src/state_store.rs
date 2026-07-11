@@ -865,13 +865,22 @@ impl StateStore {
     pub async fn report_agent_status(
         &self,
         surface_id: SurfaceId,
+        report: AgentStatusReport,
+    ) -> Option<(WorkspaceId, Option<AgentStatus>)> {
+        let surface_visible = self.surface_is_in_active_workspace(surface_id).await;
+        self.report_agent_status_with_visibility(surface_id, report, surface_visible)
+            .await
+    }
+
+    pub async fn report_agent_status_with_visibility(
+        &self,
+        surface_id: SurfaceId,
         mut report: AgentStatusReport,
+        surface_visible: bool,
     ) -> Option<(WorkspaceId, Option<AgentStatus>)> {
         let mut s = self.inner.lock().await;
-        let active_workspace = s.active_workspace;
         let mut accepted = None;
         for ws in s.workspaces.iter_mut() {
-            let workspace_visible = active_workspace == Some(ws.id);
             let mut found = false;
             let mut changed = false;
             for surface in ws.surfaces.iter_mut() {
@@ -881,7 +890,7 @@ impl StateStore {
                 if let Some(applied) = surface.root_pane.report_surface_agent(
                     surface_id,
                     report.clone(),
-                    workspace_visible,
+                    surface_visible,
                 ) {
                     found = true;
                     changed = applied;
@@ -958,6 +967,23 @@ impl StateStore {
         screen_text: Option<&str>,
         osc_title: Option<&str>,
     ) -> Option<(WorkspaceId, Option<AgentStatus>)> {
+        let surface_visible = self.surface_is_in_active_workspace(surface_id).await;
+        self.report_agent_screen_signals_with_visibility(
+            surface_id,
+            screen_text,
+            osc_title,
+            surface_visible,
+        )
+        .await
+    }
+
+    pub async fn report_agent_screen_signals_with_visibility(
+        &self,
+        surface_id: SurfaceId,
+        screen_text: Option<&str>,
+        osc_title: Option<&str>,
+        surface_visible: bool,
+    ) -> Option<(WorkspaceId, Option<AgentStatus>)> {
         let detected_status = detect_agent_status_from_signals(screen_text, osc_title);
         let idle_agent_name = if detected_status.is_none() {
             detect_agent_idle_name_from_signals(screen_text, osc_title)
@@ -971,7 +997,9 @@ impl StateStore {
             None
         };
         if status.is_none() {
-            return self.clear_screen_agent_signal(surface_id).await;
+            return self
+                .clear_screen_agent_signal(surface_id, surface_visible)
+                .await;
         }
         let status = status?;
         if self
@@ -983,9 +1011,7 @@ impl StateStore {
             return None;
         }
         let mut s = self.inner.lock().await;
-        let active_workspace = s.active_workspace;
         for ws in s.workspaces.iter_mut() {
-            let workspace_visible = active_workspace == Some(ws.id);
             let mut found = false;
             let mut changed = false;
             for surface in ws.surfaces.iter_mut() {
@@ -994,7 +1020,7 @@ impl StateStore {
                     status,
                     "flowmux:screen",
                     agent_name,
-                    workspace_visible,
+                    surface_visible,
                 ) {
                     found = true;
                     changed = applied;
@@ -1014,13 +1040,17 @@ impl StateStore {
     async fn clear_screen_agent_signal(
         &self,
         surface_id: SurfaceId,
+        surface_visible: bool,
     ) -> Option<(WorkspaceId, Option<AgentStatus>)> {
         let mut s = self.inner.lock().await;
         for ws in s.workspaces.iter_mut() {
             let mut found = false;
             let mut changed = false;
             for surface in ws.surfaces.iter_mut() {
-                if let Some(applied) = surface.root_pane.settle_screen_idle(surface_id) {
+                if let Some(applied) = surface
+                    .root_pane
+                    .settle_screen_idle(surface_id, surface_visible)
+                {
                     found = true;
                     changed = applied;
                     break;
@@ -1042,6 +1072,22 @@ impl StateStore {
             .iter()
             .find(|ws| ws.id == workspace)
             .and_then(Workspace::agent_status_rollup)
+    }
+
+    async fn surface_is_in_active_workspace(&self, surface_id: SurfaceId) -> bool {
+        let s = self.inner.lock().await;
+        let Some(active_workspace) = s.active_workspace else {
+            return false;
+        };
+        s.workspaces
+            .iter()
+            .find(|workspace| workspace.id == active_workspace)
+            .is_some_and(|workspace| {
+                workspace
+                    .surfaces
+                    .iter()
+                    .any(|surface| surface.root_pane.is_active_surface(surface_id))
+            })
     }
 
     pub async fn workspace_agent_attention_status(

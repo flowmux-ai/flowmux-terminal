@@ -150,6 +150,14 @@ pub struct TornOffSurface {
 }
 
 impl PaneRegistry {
+    pub fn pane_for_surface(&self, surface: SurfaceId) -> Option<PaneId> {
+        self.surface_tabs.iter().find_map(|(pane, tabs)| {
+            tabs.iter()
+                .any(|(candidate, _)| *candidate == surface)
+                .then_some(*pane)
+        })
+    }
+
     pub fn active_terminal(&self, pane: PaneId) -> Option<&PaneTerminal> {
         self.active_terminal_by_pane
             .get(&pane)

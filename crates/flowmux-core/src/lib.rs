@@ -444,6 +444,19 @@ impl Pane {
         }
     }
 
+    pub fn is_active_surface(&self, surface_id: SurfaceId) -> bool {
+        match self {
+            Pane::Leaf {
+                content: PaneContent::Tabs { active, .. },
+                ..
+            } => *active == surface_id,
+            Pane::Leaf { .. } => false,
+            Pane::Split { first, second, .. } => {
+                first.is_active_surface(surface_id) || second.is_active_surface(surface_id)
+            }
+        }
+    }
+
     pub fn surface_title(&self, target: PaneId, surface_id: SurfaceId) -> Option<&str> {
         match self {
             Pane::Leaf { id, content } if *id == target => match content {
@@ -517,21 +530,20 @@ impl Pane {
         }
     }
 
-    /// Merge a live agent report into the matching tab surface. `workspace_visible`
-    /// tells the done/seen logic whether this workspace is currently foregrounded;
-    /// the pane-local active tab is checked here.
+    /// Merge a live agent report into the matching tab surface. `surface_visible`
+    /// is true only when the app window, containing pane, and surface are focused.
     pub fn report_surface_agent(
         &mut self,
         surface_id: SurfaceId,
         report: AgentStatusReport,
-        workspace_visible: bool,
+        surface_visible: bool,
     ) -> Option<bool> {
         match self {
             Pane::Leaf {
                 content: PaneContent::Tabs { active, surfaces },
                 ..
             } => {
-                let visible = workspace_visible && *active == surface_id;
+                let visible = surface_visible && *active == surface_id;
                 let surface = surfaces.iter_mut().find(|s| s.id == surface_id)?;
                 let mut report = report;
                 normalize_agent_report_name_for_surface_title(&mut report, &surface.title);
@@ -545,8 +557,8 @@ impl Pane {
             }
             Pane::Leaf { .. } => None,
             Pane::Split { first, second, .. } => first
-                .report_surface_agent(surface_id, report.clone(), workspace_visible)
-                .or_else(|| second.report_surface_agent(surface_id, report, workspace_visible)),
+                .report_surface_agent(surface_id, report.clone(), surface_visible)
+                .or_else(|| second.report_surface_agent(surface_id, report, surface_visible)),
         }
     }
 
@@ -556,14 +568,14 @@ impl Pane {
         status: AgentStatus,
         source: &'static str,
         agent_name: Option<&str>,
-        workspace_visible: bool,
+        surface_visible: bool,
     ) -> Option<bool> {
         match self {
             Pane::Leaf {
                 content: PaneContent::Tabs { active, surfaces },
                 ..
             } => {
-                let visible = workspace_visible && *active == surface_id;
+                let visible = surface_visible && *active == surface_id;
                 let surface = surfaces.iter_mut().find(|s| s.id == surface_id)?;
                 let title_agent_name = detect_agent_name_from_surface_title(&surface.title);
                 let incoming_name = title_agent_name.or(agent_name).map(str::to_string);
@@ -628,7 +640,7 @@ impl Pane {
                     status,
                     source,
                     agent_name,
-                    workspace_visible,
+                    surface_visible,
                 )
                 .or_else(|| {
                     second.report_surface_agent_signal(
@@ -636,7 +648,7 @@ impl Pane {
                         status,
                         source,
                         agent_name,
-                        workspace_visible,
+                        surface_visible,
                     )
                 }),
         }
@@ -708,7 +720,11 @@ impl Pane {
     /// for a process-owned presence only settle it back to Idle — the agent is
     /// still running, it simply finished its turn. Hook-owned presences are
     /// authoritative and left untouched.
-    pub fn settle_screen_idle(&mut self, surface_id: SurfaceId) -> Option<bool> {
+    pub fn settle_screen_idle(
+        &mut self,
+        surface_id: SurfaceId,
+        surface_visible: bool,
+    ) -> Option<bool> {
         match self {
             Pane::Leaf {
                 content: PaneContent::Tabs { surfaces, .. },
@@ -724,10 +740,16 @@ impl Pane {
                         Some(true)
                     }
                     Some(AGENT_SOURCE_PROC) if agent.status != AgentStatus::Idle => {
+                        let prev = agent.status;
                         agent.status = AgentStatus::Idle;
                         agent.activity = AgentActivity::Idle;
                         agent.message = None;
                         agent.custom_status = None;
+                        if AgentStatus::should_mark_unseen_on_idle(prev, AgentStatus::Idle) {
+                            agent.seen = surface_visible;
+                        } else if surface_visible {
+                            agent.seen = true;
+                        }
                         Some(true)
                     }
                     _ => Some(false),
@@ -735,8 +757,8 @@ impl Pane {
             }
             Pane::Leaf { .. } => None,
             Pane::Split { first, second, .. } => first
-                .settle_screen_idle(surface_id)
-                .or_else(|| second.settle_screen_idle(surface_id)),
+                .settle_screen_idle(surface_id, surface_visible)
+                .or_else(|| second.settle_screen_idle(surface_id, surface_visible)),
         }
     }
 

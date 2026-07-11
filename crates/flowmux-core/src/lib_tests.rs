@@ -2366,10 +2366,33 @@ fn screen_working_keeps_proc_ownership_then_settles_idle_without_clearing() {
         true,
     );
     // Working turn ends: proc presence settles to Idle, not cleared.
-    assert_eq!(pane.settle_screen_idle(surface_id), Some(true));
+    assert_eq!(pane.settle_screen_idle(surface_id, true), Some(true));
     assert_eq!(pane.agent_status_rollup(), Some(AgentStatus::Idle));
     // Still present — a second settle is a no-op.
-    assert_eq!(pane.settle_screen_idle(surface_id), Some(false));
+    assert_eq!(pane.settle_screen_idle(surface_id, true), Some(false));
+}
+
+#[test]
+fn hidden_screen_completion_becomes_done_until_acknowledged() {
+    let mut surface = PaneSurface::terminal("agent", None);
+    let surface_id = surface.id;
+    let mut presence = AgentPresence::new("codex", AgentActivity::Running, None);
+    presence.source = Some(AGENT_SOURCE_PROC.to_string());
+    surface.agent = Some(presence);
+    let mut pane = Pane::Leaf {
+        id: PaneId::new(),
+        content: PaneContent::Tabs {
+            active: surface_id,
+            surfaces: vec![surface],
+        },
+    };
+
+    assert_eq!(pane.settle_screen_idle(surface_id, false), Some(true));
+    assert_eq!(pane.agent_status_rollup(), Some(AgentStatus::Done));
+    assert_eq!(pane.agent_attention_rollup(), Some(AgentStatus::Done));
+    assert!(pane.mark_all_agents_seen());
+    assert_eq!(pane.agent_status_rollup(), Some(AgentStatus::Idle));
+    assert_eq!(pane.agent_attention_rollup(), None);
 }
 
 #[test]
@@ -2386,7 +2409,7 @@ fn settle_screen_idle_clears_screen_owned_presence() {
             surfaces: vec![surface],
         },
     };
-    assert_eq!(pane.settle_screen_idle(sid), Some(true));
+    assert_eq!(pane.settle_screen_idle(sid, false), Some(true));
     assert_eq!(pane.agent_status_rollup(), None);
 }
 

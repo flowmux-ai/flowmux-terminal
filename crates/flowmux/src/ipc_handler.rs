@@ -797,6 +797,16 @@ impl GuiHandler {
                                 .await;
                         }
                     } else {
+                        let (visibility_tx, visibility_rx) = oneshot::channel();
+                        let _ = self
+                            .bridge
+                            .tx
+                            .send(GtkCommand::QueryAgentSurfaceVisible {
+                                surface,
+                                ack: visibility_tx,
+                            })
+                            .await;
+                        let surface_visible = visibility_rx.await.unwrap_or(false);
                         let report = AgentStatusReport {
                             name: agent,
                             status,
@@ -811,7 +821,7 @@ impl GuiHandler {
                         if let Some((ws_id, rollup)) = self
                             .inner
                             .store()
-                            .report_agent_status(surface, report)
+                            .report_agent_status_with_visibility(surface, report, surface_visible)
                             .await
                         {
                             let _ = self

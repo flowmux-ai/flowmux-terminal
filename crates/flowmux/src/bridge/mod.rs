@@ -541,6 +541,12 @@ pub enum GtkCommand {
         workspace: WorkspaceId,
         status: Option<AgentStatus>,
     },
+    /// Ask the GTK thread whether an agent surface is genuinely visible:
+    /// active app window, focused containing pane, and active pane tab.
+    QueryAgentSurfaceVisible {
+        surface: SurfaceId,
+        ack: oneshot::Sender<bool>,
+    },
 }
 
 #[derive(Clone)]

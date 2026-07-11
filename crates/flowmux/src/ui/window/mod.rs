@@ -62,6 +62,19 @@ fn should_suppress_notification(
         )
 }
 
+fn agent_surface_is_visible(
+    window_active: bool,
+    focused_pane: Option<PaneId>,
+    source_pane: Option<PaneId>,
+    active_surface: Option<SurfaceId>,
+    source_surface: SurfaceId,
+) -> bool {
+    window_active
+        && focused_pane.is_some()
+        && focused_pane == source_pane
+        && active_surface == Some(source_surface)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CommandPaletteCommand {
     OpenBrowser,
@@ -1124,6 +1137,20 @@ impl WindowController {
         }
     }
 
+    fn is_agent_surface_visible(&self, surface: SurfaceId) -> bool {
+        let focused_pane = self.focused_pane.get();
+        let active_surface =
+            focused_pane.and_then(|pane| self.pane_registry.borrow().active_surface(pane));
+        let source_pane = self.pane_registry.borrow().pane_for_surface(surface);
+        agent_surface_is_visible(
+            self.window.is_active(),
+            focused_pane,
+            source_pane,
+            active_surface,
+            surface,
+        )
+    }
+
     /// Grab keyboard focus on `pane`. Deferred to the next idle so that
     /// any in-flight workspace activation has finished swapping the
     /// stack child before we ask GTK to focus a specific terminal /
@@ -2134,6 +2161,9 @@ impl WindowController {
             }
             GtkCommand::SetAgentStatus { workspace, status } => {
                 self.sync_workspace_agent_status(workspace, status).await;
+            }
+            GtkCommand::QueryAgentSurfaceVisible { surface, ack } => {
+                let _ = ack.send(self.is_agent_surface_visible(surface));
             }
             GtkCommand::FocusWorkspaceAt { idx } => {
                 let snap = self.store.snapshot().await;
@@ -7751,6 +7781,40 @@ mod tests {
         assert!(!should_suppress_notification(
             flowmux_core::NotificationLevel::Error,
             true
+        ));
+    }
+
+    #[test]
+    fn agent_seen_requires_active_window_focused_pane_and_active_surface() {
+        let pane = PaneId::new();
+        let surface = SurfaceId::new();
+        assert!(agent_surface_is_visible(
+            true,
+            Some(pane),
+            Some(pane),
+            Some(surface),
+            surface
+        ));
+        assert!(!agent_surface_is_visible(
+            false,
+            Some(pane),
+            Some(pane),
+            Some(surface),
+            surface
+        ));
+        assert!(!agent_surface_is_visible(
+            true,
+            Some(PaneId::new()),
+            Some(pane),
+            Some(surface),
+            surface
+        ));
+        assert!(!agent_surface_is_visible(
+            true,
+            Some(pane),
+            Some(pane),
+            Some(SurfaceId::new()),
+            surface
         ));
     }
 

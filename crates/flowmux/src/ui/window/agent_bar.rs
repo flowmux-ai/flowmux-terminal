@@ -161,7 +161,12 @@ impl WindowController {
         }
         if let Some((ws_id, status)) = self
             .store
-            .report_agent_screen_signals(surface, screen.as_deref(), title.as_deref())
+            .report_agent_screen_signals_with_visibility(
+                surface,
+                screen.as_deref(),
+                title.as_deref(),
+                self.is_agent_surface_visible(surface),
+            )
             .await
         {
             self.sync_workspace_agent_status(ws_id, status).await;

@@ -437,24 +437,35 @@ async fn agent_activity_update_refreshes_store_and_sidebar() {
         .await
         .unwrap();
 
-    assert!(matches!(
-        handler
-            .handle(Request::AgentActivityUpdate {
-                pane: Some(pane),
-                surface: Some(surface),
-                agent: "codex".into(),
-                status: None,
-                activity: Some(AgentActivity::Running),
-                pid: Some(1234),
-                source: None,
-                seq: Some(10),
-                message: None,
-                custom_status: None,
-                session_id: None,
-            })
-            .await,
-        Response::Ok
-    ));
+    let response = handler.handle(Request::AgentActivityUpdate {
+        pane: Some(pane),
+        surface: Some(surface),
+        agent: "codex".into(),
+        status: None,
+        activity: Some(AgentActivity::Running),
+        pid: Some(1234),
+        source: None,
+        seq: Some(10),
+        message: None,
+        custom_status: None,
+        session_id: None,
+    });
+    tokio::pin!(response);
+
+    let visibility = tokio::select! {
+        response = &mut response => panic!("activity update completed before visibility ack: {response:?}"),
+        command = rx.recv() => command.expect("activity update should query GTK visibility"),
+    };
+    let GtkCommand::QueryAgentSurfaceVisible {
+        surface: queried_surface,
+        ack,
+    } = visibility
+    else {
+        panic!("expected QueryAgentSurfaceVisible");
+    };
+    assert_eq!(queried_surface, surface);
+    ack.send(false).unwrap();
+    assert!(matches!(response.await, Response::Ok));
 
     let command = rx
         .recv()
