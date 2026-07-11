@@ -3,6 +3,26 @@
 
 use super::*;
 
+fn dispatch_detached(bridge: &Bridge, command: GtkCommand) {
+    let bridge = bridge.clone();
+    glib::MainContext::default().spawn_local(async move {
+        let _ = bridge.tx.send(command).await;
+    });
+}
+
+fn dispatch_with_ack<T: 'static>(
+    bridge: &Bridge,
+    build: impl FnOnce(oneshot::Sender<T>) -> GtkCommand + 'static,
+) {
+    let bridge = bridge.clone();
+    glib::MainContext::default().spawn_local(async move {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        if bridge.tx.send(build(ack_tx)).await.is_ok() {
+            let _ = ack_rx.await;
+        }
+    });
+}
+
 /// Owns the dependencies captured by pane callbacks and builds the callback
 /// table consumed by terminal/browser pane widgets.
 pub(super) struct PaneCallbackRouter {
@@ -55,14 +75,7 @@ impl PaneCallbackRouter {
             on_close_pane: {
                 let bridge = bridge.clone();
                 Rc::new(RefCell::new(move |pane| {
-                    let bridge = bridge.clone();
-                    glib::MainContext::default().spawn_local(async move {
-                        let (tx, _rx) = oneshot::channel();
-                        let _ = bridge
-                            .tx
-                            .send(GtkCommand::CloseFocused { pane, ack: tx })
-                            .await;
-                    });
+                    dispatch_with_ack(&bridge, move |ack| GtkCommand::CloseFocused { pane, ack });
                 }))
             },
             on_focus: {
@@ -81,34 +94,20 @@ impl PaneCallbackRouter {
             on_split_right: {
                 let bridge = bridge.clone();
                 Rc::new(RefCell::new(move |pane| {
-                    let bridge = bridge.clone();
-                    glib::MainContext::default().spawn_local(async move {
-                        let (tx, _rx) = oneshot::channel();
-                        let _ = bridge
-                            .tx
-                            .send(GtkCommand::SplitFocused {
-                                pane,
-                                direction: flowmux_core::SplitDirection::Vertical,
-                                ack: tx,
-                            })
-                            .await;
+                    dispatch_with_ack(&bridge, move |ack| GtkCommand::SplitFocused {
+                        pane,
+                        direction: flowmux_core::SplitDirection::Vertical,
+                        ack,
                     });
                 }))
             },
             on_split_down: {
                 let bridge = bridge.clone();
                 Rc::new(RefCell::new(move |pane| {
-                    let bridge = bridge.clone();
-                    glib::MainContext::default().spawn_local(async move {
-                        let (tx, _rx) = oneshot::channel();
-                        let _ = bridge
-                            .tx
-                            .send(GtkCommand::SplitFocused {
-                                pane,
-                                direction: flowmux_core::SplitDirection::Horizontal,
-                                ack: tx,
-                            })
-                            .await;
+                    dispatch_with_ack(&bridge, move |ack| GtkCommand::SplitFocused {
+                        pane,
+                        direction: flowmux_core::SplitDirection::Horizontal,
+                        ack,
                     });
                 }))
             },
@@ -117,101 +116,60 @@ impl PaneCallbackRouter {
                 let focused = focused.clone();
                 Rc::new(RefCell::new(move |pane, surface| {
                     focused.set(Some(pane));
-                    let bridge = bridge.clone();
-                    glib::MainContext::default().spawn_local(async move {
-                        let _ = bridge
-                            .tx
-                            .send(GtkCommand::ActivateSurface { pane, surface })
-                            .await;
-                    });
+                    dispatch_detached(&bridge, GtkCommand::ActivateSurface { pane, surface });
                 }))
             },
             on_new_surface: {
                 let bridge = bridge.clone();
                 Rc::new(RefCell::new(move |pane| {
-                    let bridge = bridge.clone();
-                    glib::MainContext::default().spawn_local(async move {
-                        let _ = bridge.tx.send(GtkCommand::NewSurface { pane }).await;
-                    });
+                    dispatch_detached(&bridge, GtkCommand::NewSurface { pane });
                 }))
             },
             on_new_browser_surface: {
                 let bridge = bridge.clone();
                 Rc::new(RefCell::new(move |pane| {
-                    let bridge = bridge.clone();
-                    glib::MainContext::default().spawn_local(async move {
-                        let _ = bridge.tx.send(GtkCommand::NewBrowserSurface { pane }).await;
-                    });
+                    dispatch_detached(&bridge, GtkCommand::NewBrowserSurface { pane });
                 }))
             },
             on_close_surface: {
                 let bridge = bridge.clone();
                 Rc::new(RefCell::new(move |pane, surface| {
-                    let bridge = bridge.clone();
-                    glib::MainContext::default().spawn_local(async move {
-                        let (tx, _rx) = oneshot::channel();
-                        let _ = bridge
-                            .tx
-                            .send(GtkCommand::CloseSurface {
-                                pane,
-                                surface,
-                                ack: tx,
-                            })
-                            .await;
+                    dispatch_with_ack(&bridge, move |ack| GtkCommand::CloseSurface {
+                        pane,
+                        surface,
+                        ack,
                     });
                 }))
             },
             on_rename_surface: {
                 let bridge = bridge.clone();
                 Rc::new(RefCell::new(move |pane, surface| {
-                    let bridge = bridge.clone();
-                    glib::MainContext::default().spawn_local(async move {
-                        let _ = bridge
-                            .tx
-                            .send(GtkCommand::ShowRenameSurfaceDialog { pane, surface })
-                            .await;
-                    });
+                    dispatch_detached(
+                        &bridge,
+                        GtkCommand::ShowRenameSurfaceDialog { pane, surface },
+                    );
                 }))
             },
             on_show_surface_folder: {
                 let bridge = bridge.clone();
                 Rc::new(RefCell::new(move |pane, surface| {
-                    let bridge = bridge.clone();
-                    glib::MainContext::default().spawn_local(async move {
-                        let _ = bridge
-                            .tx
-                            .send(GtkCommand::ShowSurfaceFolder { pane, surface })
-                            .await;
-                    });
+                    dispatch_detached(&bridge, GtkCommand::ShowSurfaceFolder { pane, surface });
                 }))
             },
             on_copy_surface_text: {
                 let bridge = bridge.clone();
                 Rc::new(RefCell::new(move |pane, surface| {
-                    let bridge = bridge.clone();
-                    glib::MainContext::default().spawn_local(async move {
-                        let _ = bridge
-                            .tx
-                            .send(GtkCommand::CopySurfaceText { pane, surface })
-                            .await;
-                    });
+                    dispatch_detached(&bridge, GtkCommand::CopySurfaceText { pane, surface });
                 }))
             },
             on_reorder_surface: {
                 let bridge = bridge.clone();
                 Rc::new(RefCell::new(move |pane, surface, target_index| {
-                    let bridge = bridge.clone();
-                    glib::MainContext::default().spawn_local(async move {
-                        let (tx, _rx) = oneshot::channel();
-                        let _ = bridge
-                            .tx
-                            .send(GtkCommand::ReorderSurface {
-                                pane,
-                                surface,
-                                target_index,
-                                ack: tx,
-                            })
-                            .await;
+                    dispatch_with_ack(&bridge, move |ack| GtkCommand::ReorderSurface {
+                        pane,
+                        surface,
+                        target_index,
+                        ack,
                     });
                 }))
             },
@@ -219,34 +177,20 @@ impl PaneCallbackRouter {
                 let bridge = bridge.clone();
                 Rc::new(RefCell::new(move |pane, surface| {
                     tracing::debug!(%pane, %surface, "tab drag requested tear-off window");
-                    let bridge = bridge.clone();
-                    glib::MainContext::default().spawn_local(async move {
-                        let _ = bridge
-                            .tx
-                            .send(GtkCommand::TearOffSurface { pane, surface })
-                            .await;
-                    });
+                    dispatch_detached(&bridge, GtkCommand::TearOffSurface { pane, surface });
                 }))
             },
             on_move_surface_to_pane: {
                 let bridge = bridge.clone();
                 Rc::new(RefCell::new(
                     move |src_pane, surface, surface_model, dst_pane, target_index| {
-                        let bridge = bridge.clone();
-                        glib::MainContext::default().spawn_local(async move {
-                            let (ack_tx, ack_rx) = oneshot::channel();
-                            let _ = bridge
-                                .tx
-                                .send(GtkCommand::MoveSurfaceToPane {
-                                    src_pane,
-                                    surface,
-                                    surface_model,
-                                    dst_pane,
-                                    target_index,
-                                    ack: ack_tx,
-                                })
-                                .await;
-                            let _ = ack_rx.await;
+                        dispatch_with_ack(&bridge, move |ack| GtkCommand::MoveSurfaceToPane {
+                            src_pane,
+                            surface,
+                            surface_model,
+                            dst_pane,
+                            target_index,
+                            ack,
                         });
                     },
                 ))
@@ -254,19 +198,11 @@ impl PaneCallbackRouter {
             on_move_surface_to_workspace: {
                 let bridge = bridge.clone();
                 Rc::new(RefCell::new(move |src_pane, surface, dst_workspace| {
-                    let bridge = bridge.clone();
-                    glib::MainContext::default().spawn_local(async move {
-                        let (ack_tx, ack_rx) = oneshot::channel();
-                        let _ = bridge
-                            .tx
-                            .send(GtkCommand::MoveSurfaceToWorkspace {
-                                src_pane,
-                                surface,
-                                dst_workspace,
-                                ack: ack_tx,
-                            })
-                            .await;
-                        let _ = ack_rx.await;
+                    dispatch_with_ack(&bridge, move |ack| GtkCommand::MoveSurfaceToWorkspace {
+                        src_pane,
+                        surface,
+                        dst_workspace,
+                        ack,
                     });
                 }))
             },
@@ -282,21 +218,13 @@ impl PaneCallbackRouter {
                 let bridge = bridge.clone();
                 Rc::new(RefCell::new(
                     move |src_pane, surface, surface_model, dst_pane, direction| {
-                        let bridge = bridge.clone();
-                        glib::MainContext::default().spawn_local(async move {
-                            let (ack_tx, ack_rx) = oneshot::channel();
-                            let _ = bridge
-                                .tx
-                                .send(GtkCommand::SplitSurfaceIntoPane {
-                                    src_pane,
-                                    surface,
-                                    surface_model,
-                                    dst_pane,
-                                    direction,
-                                    ack: ack_tx,
-                                })
-                                .await;
-                            let _ = ack_rx.await;
+                        dispatch_with_ack(&bridge, move |ack| GtkCommand::SplitSurfaceIntoPane {
+                            src_pane,
+                            surface,
+                            surface_model,
+                            dst_pane,
+                            direction,
+                            ack,
                         });
                     },
                 ))
@@ -307,57 +235,45 @@ impl PaneCallbackRouter {
             on_terminal_cwd_changed: {
                 let bridge = bridge.clone();
                 Rc::new(RefCell::new(move |pane, surface, cwd| {
-                    let bridge = bridge.clone();
-                    glib::MainContext::default().spawn_local(async move {
-                        let _ = bridge
-                            .tx
-                            .send(GtkCommand::TerminalCwdChanged { pane, surface, cwd })
-                            .await;
-                    });
+                    dispatch_detached(
+                        &bridge,
+                        GtkCommand::TerminalCwdChanged { pane, surface, cwd },
+                    );
                 }))
             },
             on_browser_uri_changed: {
                 let bridge = bridge.clone();
                 Rc::new(RefCell::new(move |pane, surface, url| {
-                    let bridge = bridge.clone();
-                    glib::MainContext::default().spawn_local(async move {
-                        let _ = bridge
-                            .tx
-                            .send(GtkCommand::BrowserUriChanged { pane, surface, url })
-                            .await;
-                    });
+                    dispatch_detached(
+                        &bridge,
+                        GtkCommand::BrowserUriChanged { pane, surface, url },
+                    );
                 }))
             },
             on_browser_title_changed: {
                 let bridge = bridge.clone();
                 Rc::new(RefCell::new(move |pane, surface, title| {
-                    let bridge = bridge.clone();
-                    glib::MainContext::default().spawn_local(async move {
-                        let _ = bridge
-                            .tx
-                            .send(GtkCommand::BrowserTitleChanged {
-                                pane,
-                                surface,
-                                title,
-                            })
-                            .await;
-                    });
+                    dispatch_detached(
+                        &bridge,
+                        GtkCommand::BrowserTitleChanged {
+                            pane,
+                            surface,
+                            title,
+                        },
+                    );
                 }))
             },
             on_terminal_title_changed: {
                 let bridge = bridge.clone();
                 Rc::new(RefCell::new(move |pane, surface, title: String| {
-                    let bridge = bridge.clone();
-                    glib::MainContext::default().spawn_local(async move {
-                        let _ = bridge
-                            .tx
-                            .send(GtkCommand::TerminalTitleChanged {
-                                pane,
-                                surface,
-                                title,
-                            })
-                            .await;
-                    });
+                    dispatch_detached(
+                        &bridge,
+                        GtkCommand::TerminalTitleChanged {
+                            pane,
+                            surface,
+                            title,
+                        },
+                    );
                 }))
             },
             read_options: {
@@ -377,37 +293,19 @@ impl PaneCallbackRouter {
             on_open_url: {
                 let bridge = bridge.clone();
                 Rc::new(RefCell::new(move |pane, url| {
-                    let bridge = bridge.clone();
-                    glib::MainContext::default().spawn_local(async move {
-                        let _ = bridge
-                            .tx
-                            .send(GtkCommand::OpenUrlInBrowserTab { pane, url })
-                            .await;
-                    });
+                    dispatch_detached(&bridge, GtkCommand::OpenUrlInBrowserTab { pane, url });
                 }))
             },
             on_open_image: {
                 let bridge = bridge.clone();
                 Rc::new(RefCell::new(move |pane, path| {
-                    let bridge = bridge.clone();
-                    glib::MainContext::default().spawn_local(async move {
-                        let _ = bridge
-                            .tx
-                            .send(GtkCommand::OpenImageViewer { pane, path })
-                            .await;
-                    });
+                    dispatch_detached(&bridge, GtkCommand::OpenImageViewer { pane, path });
                 }))
             },
             on_open_markdown: {
                 let bridge = bridge.clone();
                 Rc::new(RefCell::new(move |pane, path| {
-                    let bridge = bridge.clone();
-                    glib::MainContext::default().spawn_local(async move {
-                        let _ = bridge
-                            .tx
-                            .send(GtkCommand::OpenMarkdownViewer { pane, path })
-                            .await;
-                    });
+                    dispatch_detached(&bridge, GtkCommand::OpenMarkdownViewer { pane, path });
                 }))
             },
         }
