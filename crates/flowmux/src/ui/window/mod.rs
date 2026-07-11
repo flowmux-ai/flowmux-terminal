@@ -300,6 +300,9 @@ pub struct WindowController {
     /// false — guaranteeing the dock badge converges to the freshest
     /// state regardless of `spawn_local` scheduling order.
     badge_dirty: Rc<Cell<bool>>,
+    /// Monotonic id for process-tree sweeps. A slower older worker result is
+    /// discarded instead of overwriting a newer agent observation.
+    agent_poll_generation: Rc<Cell<u64>>,
     /// Handle to the Tokio runtime so D-Bus calls dispatched from
     /// `glib::spawn_local` can enter the runtime before they `await`.
     /// `zbus` (with the `tokio` feature) calls `Handle::current()` to
@@ -689,6 +692,7 @@ impl WindowController {
             notifier: Arc::new(tokio::sync::Mutex::new(None)),
             badge_publisher_busy: Rc::new(Cell::new(false)),
             badge_dirty: Rc::new(Cell::new(false)),
+            agent_poll_generation: Rc::new(Cell::new(0)),
             tokio_handle,
         };
         controller.install_state_flush_on_close();

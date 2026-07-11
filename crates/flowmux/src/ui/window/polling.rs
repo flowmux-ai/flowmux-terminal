@@ -64,12 +64,32 @@ impl WindowController {
         if pids.is_empty() {
             return;
         }
-        // Cheap `/proc` subtree walks; a handful of agent panes at 2s is
-        // negligible and mirrors the existing cwd fallback poll.
-        let detected: Vec<(SurfaceId, Option<&'static str>)> = pids
-            .into_iter()
-            .map(|(surface, pid)| (surface, flowmux_procmon::agent_name_in_tree(pid)))
-            .collect();
+        let generation = self.agent_poll_generation.get().wrapping_add(1);
+        self.agent_poll_generation.set(generation);
+        let started = Instant::now();
+        let detected = match gtk::gio::spawn_blocking(move || {
+            pids.into_iter()
+                .map(|(surface, pid)| (surface, flowmux_procmon::agent_name_in_tree(pid)))
+                .collect::<Vec<_>>()
+        })
+        .await
+        {
+            Ok(detected) => detected,
+            Err(_) => {
+                tracing::warn!(generation, "agent process poll worker panicked");
+                return;
+            }
+        };
+        if self.agent_poll_generation.get() != generation {
+            tracing::debug!(generation, "discarding stale agent process poll");
+            return;
+        }
+        tracing::debug!(
+            generation,
+            surfaces = detected.len(),
+            elapsed_ms = started.elapsed().as_millis(),
+            "agent process poll completed"
+        );
         let changed = self.store.reconcile_process_agents(&detected).await;
         for (workspace, status) in changed {
             self.sync_workspace_agent_status(workspace, status).await;
