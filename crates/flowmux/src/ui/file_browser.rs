@@ -10,8 +10,8 @@ use gtk::{gdk, gio, glib};
 use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::io;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
@@ -1943,7 +1943,11 @@ fn copy_path_with_control(
     control: &FileOperationControl,
 ) -> io::Result<()> {
     control.check_cancelled()?;
-    if source.is_dir() {
+    let metadata = fs::symlink_metadata(source)?;
+    if metadata.file_type().is_symlink() {
+        let target = fs::read_link(source)?;
+        std::os::unix::fs::symlink(target, destination)
+    } else if metadata.is_dir() {
         fs::create_dir(destination)?;
         for entry in fs::read_dir(source)? {
             control.check_cancelled()?;
@@ -1952,10 +1956,34 @@ fn copy_path_with_control(
             let child_destination = destination.join(entry.file_name());
             copy_path_with_control(&child_source, &child_destination, control)?;
         }
-        Ok(())
+        fs::set_permissions(destination, metadata.permissions())
     } else {
-        fs::copy(source, destination).map(|_| ())
+        copy_file_with_control(source, destination, &metadata, control)
     }
+}
+
+fn copy_file_with_control(
+    source: &Path,
+    destination: &Path,
+    metadata: &fs::Metadata,
+    control: &FileOperationControl,
+) -> io::Result<()> {
+    let mut source_file = File::open(source)?;
+    let mut destination_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)?;
+    let mut buffer = vec![0; 1024 * 1024];
+    loop {
+        control.check_cancelled()?;
+        let read = source_file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        destination_file.write_all(&buffer[..read])?;
+    }
+    destination_file.flush()?;
+    fs::set_permissions(destination, metadata.permissions())
 }
 
 fn move_path_with_control(
@@ -1967,6 +1995,9 @@ fn move_path_with_control(
     match fs::rename(source, destination) {
         Ok(()) => Ok(()),
         Err(rename_err) => {
+            if !is_cross_device_error(&rename_err) {
+                return Err(rename_err);
+            }
             copy_path_with_control(source, destination, control)?;
             control.check_cancelled()?;
             let remove_result = if source.is_dir() {
@@ -1985,6 +2016,10 @@ fn move_path_with_control(
             })
         }
     }
+}
+
+fn is_cross_device_error(error: &io::Error) -> bool {
+    error.raw_os_error() == Some(libc::EXDEV)
 }
 
 fn show_context_menu(parent: &impl IsA<gtk::Widget>, path: &Path, x: f64, y: f64) {
@@ -2763,6 +2798,40 @@ mod tests {
         assert!(tmp.path.join("src/main.rs").exists());
         assert!(tmp.path.join("src copy/main.rs").exists());
         assert_eq!(model.focused.as_ref(), Some(&target));
+    }
+
+    #[test]
+    fn recursive_copy_preserves_directory_symlinks() {
+        let tmp = TestDir::new("copy-dir-symlink");
+        let source = tmp.dir("src");
+        let external = tmp.dir("external");
+        tmp.file("external/outside.txt");
+        std::os::unix::fs::symlink(&external, source.join("external-link")).unwrap();
+        let target = tmp.file("target.txt");
+
+        let mut model = FileBrowserModel::default();
+        model.set_root(tmp.path.clone());
+        assert!(model.focus_path(&source));
+        assert!(model.copy_focused());
+        assert!(model.focus_path(&target));
+
+        assert!(model.paste_from_clipboard().unwrap());
+
+        let copied_link = tmp.path.join("src copy/external-link");
+        assert!(fs::symlink_metadata(&copied_link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read_link(copied_link).unwrap(), external);
+    }
+
+    #[test]
+    fn copy_fallback_is_limited_to_cross_device_rename_errors() {
+        let cross_device = io::Error::from_raw_os_error(libc::EXDEV);
+        let permission_denied = io::Error::from(io::ErrorKind::PermissionDenied);
+
+        assert!(is_cross_device_error(&cross_device));
+        assert!(!is_cross_device_error(&permission_denied));
     }
 
     #[test]
