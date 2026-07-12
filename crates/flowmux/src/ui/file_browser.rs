@@ -44,12 +44,15 @@ pub struct FileBrowserPanel {
     #[cfg_attr(test, allow(dead_code))]
     directory_generation: Rc<Cell<u64>>,
     directory_error: Rc<RefCell<Option<String>>>,
+    directory_warnings: Rc<RefCell<HashMap<PathBuf, String>>>,
     directory_monitors: Rc<RefCell<Vec<gio::FileMonitor>>>,
     monitored_directories: Rc<RefCell<HashSet<PathBuf>>>,
-    monitor_ready: Rc<Cell<bool>>,
     monitor_epoch: Rc<Cell<u64>>,
     #[cfg_attr(test, allow(dead_code))]
     monitor_refresh_scheduled: Rc<Cell<bool>>,
+    #[cfg_attr(test, allow(dead_code))]
+    monitor_reload_in_progress: Rc<Cell<bool>>,
+    pending_monitor_refreshes: Rc<RefCell<HashSet<PathBuf>>>,
     visible_row_limit: Rc<Cell<usize>>,
     #[cfg(all(test, not(target_os = "macos")))]
     rebuild_count: Rc<Cell<usize>>,
@@ -69,6 +72,7 @@ pub(crate) struct FileBrowserPaneState {
 struct FileBrowserRow {
     path: PathBuf,
     is_dir: bool,
+    icon_name: Option<String>,
     depth: usize,
     expanded: bool,
     focused: bool,
@@ -76,26 +80,18 @@ struct FileBrowserRow {
     cut: bool,
 }
 
-#[derive(Clone)]
-enum FileIcon {
-    System(gio::Icon),
-    Named(&'static str),
-}
-
-impl FileIcon {
-    fn image(&self) -> gtk::Image {
-        match self {
-            Self::System(icon) => gtk::Image::from_gicon(icon),
-            Self::Named(name) => gtk::Image::from_icon_name(name),
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 struct FsEntry {
     path: PathBuf,
     name: String,
     is_dir: bool,
+    icon_name: Option<String>,
+}
+
+#[derive(Debug)]
+struct DirectorySnapshot {
+    entries_by_dir: HashMap<PathBuf, Vec<FsEntry>>,
+    warnings: HashMap<PathBuf, String>,
 }
 
 #[derive(Debug, Default)]
@@ -267,11 +263,13 @@ impl FileBrowserPanel {
             current_file_operation_cancel: Rc::new(RefCell::new(None)),
             directory_generation: Rc::new(Cell::new(0)),
             directory_error: Rc::new(RefCell::new(None)),
+            directory_warnings: Rc::new(RefCell::new(HashMap::new())),
             directory_monitors: Rc::new(RefCell::new(Vec::new())),
             monitored_directories: Rc::new(RefCell::new(HashSet::new())),
-            monitor_ready: Rc::new(Cell::new(false)),
             monitor_epoch: Rc::new(Cell::new(0)),
             monitor_refresh_scheduled: Rc::new(Cell::new(false)),
+            monitor_reload_in_progress: Rc::new(Cell::new(false)),
+            pending_monitor_refreshes: Rc::new(RefCell::new(HashSet::new())),
             visible_row_limit: Rc::new(Cell::new(ROW_BATCH_SIZE)),
             #[cfg(all(test, not(target_os = "macos")))]
             rebuild_count: Rc::new(Cell::new(0)),
@@ -282,13 +280,7 @@ impl FileBrowserPanel {
         panel.install_keyboard();
         let panel_for_more = panel.clone();
         panel.load_more_button.connect_clicked(move |_| {
-            panel_for_more.visible_row_limit.set(
-                panel_for_more
-                    .visible_row_limit
-                    .get()
-                    .saturating_add(ROW_BATCH_SIZE),
-            );
-            panel_for_more.rebuild_rows();
+            panel_for_more.show_more_rows();
         });
         let cancel = panel.current_file_operation_cancel.clone();
         let status_for_cancel = panel.status.clone();
@@ -481,11 +473,17 @@ impl FileBrowserPanel {
             }
 
             match loaded {
-                Ok(Ok(entries)) => {
-                    let directory_count = entries.len();
-                    let entry_count = entries.values().map(Vec::len).sum::<usize>();
-                    let monitored_directories = entries.keys().cloned().collect::<Vec<_>>();
-                    panel.model.borrow_mut().entries_by_dir = entries;
+                Ok(Ok(snapshot)) => {
+                    let directory_count = snapshot.entries_by_dir.len();
+                    let entry_count = snapshot
+                        .entries_by_dir
+                        .values()
+                        .map(Vec::len)
+                        .sum::<usize>();
+                    let monitored_directories =
+                        snapshot.entries_by_dir.keys().cloned().collect::<Vec<_>>();
+                    panel.model.borrow_mut().entries_by_dir = snapshot.entries_by_dir;
+                    *panel.directory_warnings.borrow_mut() = snapshot.warnings;
                     panel.directory_error.borrow_mut().take();
                     panel.install_directory_monitors(monitored_directories);
                     tracing::info!(
@@ -504,11 +502,13 @@ impl FileBrowserPanel {
                         "file browser directory snapshot failed"
                     );
                     panel.model.borrow_mut().entries_by_dir.clear();
+                    panel.directory_warnings.borrow_mut().clear();
                     panel.clear_directory_monitors();
                     *panel.directory_error.borrow_mut() = Some(error.to_string());
                 }
                 Err(_) => {
                     panel.model.borrow_mut().entries_by_dir.clear();
+                    panel.directory_warnings.borrow_mut().clear();
                     panel.clear_directory_monitors();
                     *panel.directory_error.borrow_mut() =
                         Some("Directory worker panicked".to_string());
@@ -536,6 +536,7 @@ impl FileBrowserPanel {
                 continue;
             };
             let panel = self.clone();
+            let directory = directory.clone();
             monitor.connect_changed(move |_, _, _, event| {
                 if !matches!(
                     event,
@@ -548,41 +549,118 @@ impl FileBrowserPanel {
                 ) {
                     return;
                 }
-                if panel.monitor_ready.get() {
-                    panel.schedule_monitored_directory_refresh();
-                }
+                panel.queue_monitored_directory_refresh(directory.clone());
             });
             monitors.push(monitor);
         }
         *self.directory_monitors.borrow_mut() = monitors;
         *self.monitored_directories.borrow_mut() = directories;
+    }
+
+    #[cfg(not(test))]
+    fn queue_monitored_directory_refresh(&self, directory: PathBuf) {
+        if !self.open.get() {
+            return;
+        }
+        self.pending_monitor_refreshes
+            .borrow_mut()
+            .insert(directory);
+        self.schedule_pending_monitor_refresh();
+    }
+
+    #[cfg(not(test))]
+    fn schedule_pending_monitor_refresh(&self) {
+        if self.pending_monitor_refreshes.borrow().is_empty()
+            || self.monitor_reload_in_progress.get()
+            || self.monitor_refresh_scheduled.replace(true)
+        {
+            return;
+        }
         let epoch = self.monitor_epoch.get();
         let panel = self.clone();
-        glib::timeout_add_local_once(std::time::Duration::from_millis(250), move || {
-            if panel.open.get() && panel.monitor_epoch.get() == epoch {
-                panel.monitor_ready.set(true);
+        glib::timeout_add_local_once(std::time::Duration::from_millis(100), move || {
+            if panel.monitor_epoch.get() != epoch {
+                return;
+            }
+            panel.monitor_refresh_scheduled.set(false);
+            if panel.open.get() {
+                panel.reload_monitored_directories();
             }
         });
     }
 
     #[cfg(not(test))]
-    fn schedule_monitored_directory_refresh(&self) {
-        if !self.open.get() || self.monitor_refresh_scheduled.replace(true) {
+    fn reload_monitored_directories(&self) {
+        if self.monitor_reload_in_progress.replace(true) {
             return;
         }
+        let directories = self
+            .pending_monitor_refreshes
+            .borrow_mut()
+            .drain()
+            .collect::<Vec<_>>();
+        let root = self.model.borrow().root.clone();
+        let generation = self.directory_generation.get();
+        let epoch = self.monitor_epoch.get();
+        let scroll_value = self.scroll.vadjustment().value();
         let panel = self.clone();
-        glib::timeout_add_local_once(std::time::Duration::from_millis(100), move || {
-            panel.monitor_refresh_scheduled.set(false);
-            if panel.open.get() {
-                panel.refresh();
+        glib::MainContext::default().spawn_local(async move {
+            let loaded = gio::spawn_blocking(move || {
+                directories
+                    .into_iter()
+                    .map(|directory| {
+                        let result = read_dir_entries(&directory);
+                        (directory, result)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .await;
+
+            if let Ok(results) = loaded {
+                if panel.open.get()
+                    && panel.directory_generation.get() == generation
+                    && panel.monitor_epoch.get() == epoch
+                    && panel.model.borrow().root == root
+                {
+                    let root = root.as_deref();
+                    let mut model = panel.model.borrow_mut();
+                    let mut warnings = panel.directory_warnings.borrow_mut();
+                    for (directory, result) in results {
+                        match result {
+                            Ok(entries) => {
+                                model.entries_by_dir.insert(directory.clone(), entries);
+                                warnings.remove(&directory);
+                                if root == Some(directory.as_path()) {
+                                    panel.directory_error.borrow_mut().take();
+                                }
+                            }
+                            Err(error) if root == Some(directory.as_path()) => {
+                                model.entries_by_dir.remove(&directory);
+                                *panel.directory_error.borrow_mut() = Some(error.to_string());
+                            }
+                            Err(error) => {
+                                model.entries_by_dir.insert(directory.clone(), Vec::new());
+                                warnings.insert(directory, error.to_string());
+                            }
+                        }
+                    }
+                    drop(warnings);
+                    drop(model);
+                    panel.rebuild_rows();
+                    panel.restore_scroll_value(scroll_value);
+                }
             }
+
+            panel.monitor_reload_in_progress.set(false);
+            panel.schedule_pending_monitor_refresh();
         });
     }
 
     fn clear_directory_monitors(&self) {
         self.monitor_epoch
             .set(self.monitor_epoch.get().wrapping_add(1));
-        self.monitor_ready.set(false);
+        self.monitor_refresh_scheduled.set(false);
+        self.pending_monitor_refreshes.borrow_mut().clear();
         self.directory_monitors.borrow_mut().clear();
         self.monitored_directories.borrow_mut().clear();
     }
@@ -635,25 +713,65 @@ impl FileBrowserPanel {
             model.sync_focus();
             model.rows()
         };
+        let warning_count = self.directory_warnings.borrow().len();
 
         if rows.is_empty() {
-            self.status.set_text("Directory is empty");
+            if warning_count == 0 {
+                self.status.set_text("Directory is empty");
+            } else {
+                self.status.set_text(&format!(
+                    "Unable to read {warning_count} expanded folder(s)"
+                ));
+            }
             self.status.set_visible(true);
             return;
         }
 
         let row_count = rows.len();
         let visible_count = row_count.min(self.visible_row_limit.get());
-        if visible_count < row_count {
-            self.status
-                .set_text(&format!("Showing {visible_count} of {row_count} items"));
-            self.status.set_visible(true);
-            self.load_more_button.set_visible(true);
-        } else {
-            self.status.set_visible(false);
-        }
+        self.update_list_status(row_count, visible_count, warning_count);
         for row in rows.into_iter().take(visible_count) {
             self.list.append(&self.build_row(&row));
+        }
+    }
+
+    fn show_more_rows(&self) {
+        let rows = self.model.borrow().rows();
+        let row_count = rows.len();
+        let old_visible = row_count.min(self.visible_row_limit.get());
+        let new_limit = self.visible_row_limit.get().saturating_add(ROW_BATCH_SIZE);
+        self.visible_row_limit.set(new_limit);
+        let new_visible = row_count.min(new_limit);
+        for row in rows
+            .into_iter()
+            .skip(old_visible)
+            .take(new_visible - old_visible)
+        {
+            self.list.append(&self.build_row(&row));
+        }
+        self.update_list_status(
+            row_count,
+            new_visible,
+            self.directory_warnings.borrow().len(),
+        );
+    }
+
+    fn update_list_status(&self, row_count: usize, visible_count: usize, warning_count: usize) {
+        self.load_more_button.set_visible(visible_count < row_count);
+        if visible_count < row_count {
+            let mut message = format!("Showing {visible_count} of {row_count} items");
+            if warning_count > 0 {
+                message.push_str(&format!("; {warning_count} folder(s) unavailable"));
+            }
+            self.status.set_text(&message);
+            self.status.set_visible(true);
+        } else if warning_count > 0 {
+            self.status.set_text(&format!(
+                "Unable to read {warning_count} expanded folder(s)"
+            ));
+            self.status.set_visible(true);
+        } else {
+            self.status.set_visible(false);
         }
     }
 
@@ -1270,7 +1388,10 @@ impl FileBrowserPanel {
         disclosure.set_pixel_size(12);
         disclosure.set_size_request(14, 14);
 
-        let icon = file_icon_for_path(&row.path, row.is_dir).image();
+        let icon = row.icon_name.as_deref().map_or_else(
+            || gtk::Image::from_icon_name(fallback_icon_name(row.is_dir)),
+            gtk::Image::from_icon_name,
+        );
         icon.set_pixel_size(16);
 
         let label = gtk::Label::new(Some(&display_name(&row.path)));
@@ -1400,6 +1521,7 @@ impl FileBrowserModel {
             rows.push(FileBrowserRow {
                 path: entry.path.clone(),
                 is_dir: entry.is_dir,
+                icon_name: entry.icon_name.clone(),
                 depth,
                 expanded,
                 focused: false,
@@ -1419,7 +1541,7 @@ impl FileBrowserModel {
             self.entries_by_dir.clear();
             return Ok(());
         };
-        self.entries_by_dir = load_directory_snapshot(&root, &self.expanded)?;
+        self.entries_by_dir = load_directory_snapshot(&root, &self.expanded)?.entries_by_dir;
         Ok(())
     }
 
@@ -1858,7 +1980,13 @@ fn read_dir_entries(dir: &Path) -> std::io::Result<Vec<FsEntry>> {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
         let is_dir = entry.file_type().map(|ty| ty.is_dir()).unwrap_or(false);
-        entries.push(FsEntry { path, name, is_dir });
+        let icon_name = system_file_icon_name(&path);
+        entries.push(FsEntry {
+            path,
+            name,
+            is_dir,
+            icon_name,
+        });
     }
 
     entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
@@ -1873,13 +2001,32 @@ fn read_dir_entries(dir: &Path) -> std::io::Result<Vec<FsEntry>> {
 fn load_directory_snapshot(
     root: &Path,
     expanded: &HashSet<PathBuf>,
-) -> io::Result<HashMap<PathBuf, Vec<FsEntry>>> {
+) -> io::Result<DirectorySnapshot> {
+    load_directory_snapshot_with(root, expanded, &read_dir_entries)
+}
+
+fn load_directory_snapshot_with(
+    root: &Path,
+    expanded: &HashSet<PathBuf>,
+    reader: &dyn Fn(&Path) -> io::Result<Vec<FsEntry>>,
+) -> io::Result<DirectorySnapshot> {
     fn collect(
         directory: &Path,
         expanded: &HashSet<PathBuf>,
         snapshot: &mut HashMap<PathBuf, Vec<FsEntry>>,
+        warnings: &mut HashMap<PathBuf, String>,
+        is_root: bool,
+        reader: &dyn Fn(&Path) -> io::Result<Vec<FsEntry>>,
     ) -> io::Result<()> {
-        let entries = read_dir_entries(directory)?;
+        let entries = match reader(directory) {
+            Ok(entries) => entries,
+            Err(error) if is_root => return Err(error),
+            Err(error) => {
+                warnings.insert(directory.to_path_buf(), error.to_string());
+                snapshot.insert(directory.to_path_buf(), Vec::new());
+                return Ok(());
+            }
+        };
         let children = entries
             .iter()
             .filter(|entry| entry.is_dir && expanded.contains(&entry.path))
@@ -1887,14 +2034,25 @@ fn load_directory_snapshot(
             .collect::<Vec<_>>();
         snapshot.insert(directory.to_path_buf(), entries);
         for child in children {
-            collect(&child, expanded, snapshot)?;
+            collect(&child, expanded, snapshot, warnings, false, reader)?;
         }
         Ok(())
     }
 
-    let mut snapshot = HashMap::new();
-    collect(root, expanded, &mut snapshot)?;
-    Ok(snapshot)
+    let mut entries_by_dir = HashMap::new();
+    let mut warnings = HashMap::new();
+    collect(
+        root,
+        expanded,
+        &mut entries_by_dir,
+        &mut warnings,
+        true,
+        reader,
+    )?;
+    Ok(DirectorySnapshot {
+        entries_by_dir,
+        warnings,
+    })
 }
 
 fn unique_destination(target_dir: &Path, source: &Path) -> io::Result<PathBuf> {
@@ -2181,13 +2339,6 @@ fn set_adjustment_value(adjustment: &gtk::Adjustment, value: f64) {
     adjustment.set_value(value.clamp(lower, upper));
 }
 
-fn file_icon_for_path(path: &Path, is_dir: bool) -> FileIcon {
-    system_file_icon(path).map_or_else(
-        || FileIcon::Named(fallback_icon_name(is_dir)),
-        FileIcon::System,
-    )
-}
-
 fn system_file_icon(path: &Path) -> Option<gio::Icon> {
     gio::File::for_path(path)
         .query_info(
@@ -2197,6 +2348,12 @@ fn system_file_icon(path: &Path) -> Option<gio::Icon> {
         )
         .ok()
         .and_then(|info| info.icon())
+}
+
+fn system_file_icon_name(path: &Path) -> Option<String> {
+    system_file_icon(path)
+        .and_then(|icon| icon.downcast::<gio::ThemedIcon>().ok())
+        .and_then(|icon| icon.names().first().map(ToString::to_string))
 }
 
 fn fallback_icon_name(is_dir: bool) -> &'static str {
@@ -2471,10 +2628,7 @@ mod tests {
         let tmp = TestDir::new("icon-system");
         let file = tmp.file("document.txt");
 
-        assert!(matches!(
-            file_icon_for_path(&file, false),
-            FileIcon::System(_)
-        ));
+        assert!(system_file_icon_name(&file).is_some());
     }
 
     #[test]
@@ -2482,14 +2636,9 @@ mod tests {
         let tmp = TestDir::new("icon-fallback");
         let missing = tmp.path.join("missing.txt");
 
-        assert!(matches!(
-            file_icon_for_path(&missing, false),
-            FileIcon::Named("text-x-generic-symbolic")
-        ));
-        assert!(matches!(
-            file_icon_for_path(&missing, true),
-            FileIcon::Named("folder-symbolic")
-        ));
+        assert!(system_file_icon_name(&missing).is_none());
+        assert_eq!(fallback_icon_name(false), "text-x-generic-symbolic");
+        assert_eq!(fallback_icon_name(true), "folder-symbolic");
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -2558,10 +2707,12 @@ mod tests {
         assert_eq!(rendered_row_count(&panel), ROW_BATCH_SIZE);
         assert!(panel.load_more_button.is_visible());
         assert_eq!(panel.status.text(), "Showing 500 of 525 items");
+        let first_row = panel.list.first_child().unwrap();
 
         panel.load_more_button.emit_clicked();
 
         assert_eq!(rendered_row_count(&panel), 525);
+        assert_eq!(panel.list.first_child().as_ref(), Some(&first_row));
         assert!(!panel.load_more_button.is_visible());
         assert!(!panel.status.is_visible());
     }
@@ -2579,10 +2730,32 @@ mod tests {
 
         let snapshot = load_directory_snapshot(&tmp.path, &expanded).unwrap();
 
-        assert!(snapshot.contains_key(&tmp.path));
-        assert!(snapshot.contains_key(&expanded_dir));
-        assert!(!snapshot.contains_key(&collapsed_dir));
-        assert!(!snapshot.contains_key(&nested_dir));
+        assert!(snapshot.entries_by_dir.contains_key(&tmp.path));
+        assert!(snapshot.entries_by_dir.contains_key(&expanded_dir));
+        assert!(!snapshot.entries_by_dir.contains_key(&collapsed_dir));
+        assert!(!snapshot.entries_by_dir.contains_key(&nested_dir));
+        assert!(snapshot.warnings.is_empty());
+    }
+
+    #[test]
+    fn directory_snapshot_keeps_root_when_expanded_child_fails() {
+        let tmp = TestDir::new("snapshot-child-error");
+        let expanded_dir = tmp.dir("expanded");
+        tmp.file("visible.txt");
+        let expanded = HashSet::from([expanded_dir.clone()]);
+
+        let snapshot = load_directory_snapshot_with(&tmp.path, &expanded, &|directory| {
+            if directory == expanded_dir {
+                Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied"))
+            } else {
+                read_dir_entries(directory)
+            }
+        })
+        .unwrap();
+
+        assert!(snapshot.entries_by_dir.contains_key(&tmp.path));
+        assert_eq!(snapshot.entries_by_dir[&expanded_dir].len(), 0);
+        assert_eq!(snapshot.warnings[&expanded_dir], "denied");
     }
 
     #[test]
