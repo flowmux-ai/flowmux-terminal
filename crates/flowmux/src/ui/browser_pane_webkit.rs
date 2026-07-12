@@ -126,6 +126,7 @@ impl BrowserPane {
             settings.set_enable_developer_extras(true);
             settings.set_enable_fullscreen(true);
             settings.set_enable_javascript(true);
+            settings.set_javascript_can_open_windows_automatically(true);
             // enable-media is the WebKitGTK 6.0 master switch for the
             // audio/video element pipeline. If false, the GStreamer audio sink
             // may never attach, leaving video visible but silent.
@@ -169,24 +170,29 @@ impl BrowserPane {
         {
             let pane_id = pane_id.clone();
             let open_url = callbacks.on_open_url.clone();
-            web_view.connect_decide_policy(move |_, decision, decision_type| {
-                if decision_type != webkit6::PolicyDecisionType::NewWindowAction {
-                    return false;
-                }
-                let Some(navigation) = decision.downcast_ref::<webkit6::NavigationPolicyDecision>()
-                else {
-                    return false;
-                };
-                let url = navigation
-                    .navigation_action()
-                    .and_then(|mut action| action.request())
+            web_view.connect_create(move |parent, navigation_action| {
+                let url = navigation_action
+                    .clone()
+                    .request()
                     .and_then(|request| request.uri())
                     .map(|uri| uri.to_string());
-                decision.ignore();
                 if let Some(url) = url {
                     (open_url.borrow_mut())(pane_id.get(), url);
                 }
-                true
+
+                // WebKit requires a related WebView return value before it
+                // completes window.open(). The real destination is routed to
+                // a FlowMux browser tab above, so keep this contract-only view
+                // hidden, block its duplicate navigation, and close it on the
+                // next main-loop turn.
+                let placeholder = webkit6::WebView::builder().related_view(parent).build();
+                placeholder.connect_decide_policy(|_, decision, _| {
+                    decision.ignore();
+                    true
+                });
+                let placeholder_for_close = placeholder.clone();
+                gtk::glib::idle_add_local_once(move || placeholder_for_close.try_close());
+                placeholder.upcast()
             });
         }
         web_view.connect_permission_request(move |web_view, request| {
