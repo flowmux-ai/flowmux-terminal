@@ -60,7 +60,18 @@ ninja -C "$src_dir/build"
 
 echo "==> installing to $PREFIX"
 $SUDO ninja -C "$src_dir/build" install
-if [ -z "$SUDO" ]; then :; else $SUDO ldconfig || true; fi
+
+case "$PREFIX" in
+    /usr|/usr/local)
+        need ldconfig
+        if [ "$(id -u)" -eq 0 ]; then
+            ldconfig
+        else
+            need sudo
+            sudo ldconfig
+        fi
+        ;;
+esac
 
 echo "==> verifying"
 if PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PREFIX/lib/x86_64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH:-}" \
