@@ -536,7 +536,6 @@ impl FileBrowserPanel {
         });
     }
 
-    #[cfg(not(test))]
     fn install_directory_monitors(&self, directories: Vec<PathBuf>) {
         let directories = directories.into_iter().collect::<HashSet<_>>();
         if *self.monitored_directories.borrow() == directories {
@@ -574,7 +573,6 @@ impl FileBrowserPanel {
         *self.monitored_directories.borrow_mut() = directories;
     }
 
-    #[cfg(not(test))]
     fn queue_monitored_directory_refresh(&self, directory: PathBuf) {
         if !self.open.get() {
             return;
@@ -585,7 +583,6 @@ impl FileBrowserPanel {
         self.schedule_pending_monitor_refresh();
     }
 
-    #[cfg(not(test))]
     fn schedule_pending_monitor_refresh(&self) {
         if self.pending_monitor_refreshes.borrow().is_empty()
             || self.monitor_reload_in_progress.get()
@@ -606,7 +603,6 @@ impl FileBrowserPanel {
         });
     }
 
-    #[cfg(not(test))]
     fn reload_monitored_directories(&self) {
         if self.monitor_reload_in_progress.replace(true) {
             return;
@@ -2819,6 +2815,22 @@ mod tests {
         assert_eq!(panel.list.first_child().as_ref(), Some(&first_row));
         assert!(!panel.load_more_button.is_visible());
         assert!(!panel.status.is_visible());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[gtk::test]
+    fn directory_monitor_refreshes_only_the_changed_directory() {
+        let tmp = TestDir::new("directory-monitor");
+        tmp.file("existing.txt");
+        let panel = FileBrowserPanel::new();
+        panel.show_for_root(tmp.path.clone());
+        panel.install_directory_monitors(vec![tmp.path.clone()]);
+
+        let created = tmp.file("created.txt");
+        wait_until(|| panel_row_names(&panel).contains(&"created.txt".to_string()));
+
+        assert!(created.exists());
+        assert_eq!(panel_row_names(&panel), vec!["created.txt", "existing.txt"]);
     }
 
     #[test]
