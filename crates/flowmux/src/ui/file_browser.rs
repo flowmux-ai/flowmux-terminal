@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::time::Instant;
 
-type DeleteHandler = Arc<dyn Fn(&Path) -> io::Result<()> + Send + Sync>;
+type DeleteHandler = Arc<dyn Fn(&Path, &FileOperationControl) -> io::Result<()> + Send + Sync>;
 const ROW_BATCH_SIZE: usize = 500;
 
 #[derive(Clone)]
@@ -332,6 +332,16 @@ impl FileBrowserPanel {
         self.cancel_operation_button.set_visible(false);
     }
 
+    fn cancel_current_file_operation(&self) {
+        if let Some(cancel) = self.current_file_operation_cancel.borrow().as_ref() {
+            cancel.store(true, AtomicOrdering::Relaxed);
+        }
+    }
+
+    fn operation_context_is_active(&self, root: &Path) -> bool {
+        self.open.get() && self.model.borrow().root.as_deref() == Some(root)
+    }
+
     pub fn widget(&self) -> &gtk::Box {
         &self.root
     }
@@ -357,7 +367,7 @@ impl FileBrowserPanel {
 
     #[cfg(all(test, not(target_os = "macos")))]
     fn set_delete_handler<F: Fn(&Path) -> io::Result<()> + Send + Sync + 'static>(&self, f: F) {
-        *self.delete_handler.borrow_mut() = Arc::new(f);
+        *self.delete_handler.borrow_mut() = Arc::new(move |path, _| f(path));
     }
 
     #[cfg(all(test, not(target_os = "macos")))]
@@ -367,6 +377,9 @@ impl FileBrowserPanel {
 
     #[cfg(all(test, not(target_os = "macos")))]
     fn show_for_root(&self, root: PathBuf) {
+        if !self.is_showing_root(&root) {
+            self.cancel_current_file_operation();
+        }
         self.model.borrow_mut().set_root(root.clone());
         self.open.set(true);
         self.root.set_visible(true);
@@ -379,6 +392,7 @@ impl FileBrowserPanel {
         state: Option<FileBrowserPaneState>,
     ) {
         if !self.is_showing_root(&root) {
+            self.cancel_current_file_operation();
             self.clear_directory_monitors();
             self.visible_row_limit.set(ROW_BATCH_SIZE);
         }
@@ -415,6 +429,7 @@ impl FileBrowserPanel {
     }
 
     pub fn hide(&self) {
+        self.cancel_current_file_operation();
         self.open.set(false);
         self.directory_generation
             .set(self.directory_generation.get().wrapping_add(1));
@@ -1028,6 +1043,9 @@ impl FileBrowserPanel {
         let Some(request) = self.model.borrow_mut().paste_request() else {
             return;
         };
+        let Some(operation_root) = self.model.borrow().root.clone() else {
+            return;
+        };
         let Some(control) = self.begin_file_operation("Pasting", request.clipboard.paths.len())
         else {
             return;
@@ -1043,10 +1061,14 @@ impl FileBrowserPanel {
             match result {
                 Ok(Ok(outcome)) => {
                     let pasted = outcome.pasted.len();
-                    if panel.model.borrow_mut().apply_paste_outcome(outcome) {
-                        panel.refresh_with_scroll_value(scroll_value);
-                    } else {
-                        panel.show_status("Nothing to paste");
+                    if panel.operation_context_is_active(&operation_root) {
+                        if panel.model.borrow_mut().apply_paste_outcome(outcome) {
+                            panel.refresh_with_scroll_value(scroll_value);
+                        } else {
+                            panel.show_status("Nothing to paste");
+                        }
+                    } else if outcome.clear_clipboard {
+                        panel.model.borrow_mut().clipboard = None;
                     }
                     tracing::info!(
                         operation = "paste",
@@ -1056,14 +1078,21 @@ impl FileBrowserPanel {
                     );
                 }
                 Ok(Err(err)) if err.kind() == io::ErrorKind::Interrupted => {
-                    panel.refresh_with_scroll_value(scroll_value);
-                    panel.show_status("Paste cancelled");
+                    if panel.operation_context_is_active(&operation_root) {
+                        panel.refresh_with_scroll_value(scroll_value);
+                        panel.show_status("Paste cancelled");
+                    }
                 }
                 Ok(Err(err)) => {
-                    panel.refresh_with_scroll_value(scroll_value);
-                    panel.show_status(&format!("Paste failed: {err}"));
+                    if panel.operation_context_is_active(&operation_root) {
+                        panel.refresh_with_scroll_value(scroll_value);
+                        panel.show_status(&format!("Paste failed: {err}"));
+                    }
                 }
-                Err(_) => panel.show_status("Paste failed: worker panicked"),
+                Err(_) if panel.operation_context_is_active(&operation_root) => {
+                    panel.show_status("Paste failed: worker panicked");
+                }
+                Err(_) => {}
             }
             panel.finish_file_operation();
         });
@@ -1135,7 +1164,11 @@ impl FileBrowserPanel {
     }
 
     fn delete_paths_permanently(&self, paths: Vec<PathBuf>) {
-        self.delete_paths_with(paths, Arc::new(permanently_delete_path), "delete");
+        self.delete_paths_with(
+            paths,
+            Arc::new(permanently_delete_path_with_control),
+            "delete",
+        );
     }
 
     fn delete_paths_with(
@@ -1148,6 +1181,9 @@ impl FileBrowserPanel {
         if paths.is_empty() {
             return;
         }
+        let Some(operation_root) = self.model.borrow().root.clone() else {
+            return;
+        };
         let label = if operation == "trash" {
             "Moving to Trash"
         } else {
@@ -1179,23 +1215,30 @@ impl FileBrowserPanel {
                         .first()
                         .map(|(path, _)| path.clone())
                         .or(next_focus);
-                    if !outcome.deleted.is_empty() {
-                        panel
-                            .model
-                            .borrow_mut()
-                            .forget_removed_paths(&outcome.deleted, next_focus);
-                        panel.refresh_with_scroll_value(scroll_value);
-                    }
-                    if let Some((_, err)) = outcome.failed.first() {
-                        if failed_count == 1 {
-                            panel.show_status(&format!("Delete failed: {err}"));
-                        } else {
-                            panel.show_status(&format!(
-                                "Delete failed for {failed_count} items: {err}"
-                            ));
+                    let context_is_active = panel.operation_context_is_active(&operation_root);
+                    if context_is_active {
+                        if !outcome.deleted.is_empty() {
+                            panel
+                                .model
+                                .borrow_mut()
+                                .forget_removed_paths(&outcome.deleted, next_focus);
                         }
-                    } else if outcome.cancelled {
-                        panel.show_status("Delete cancelled");
+                        if !outcome.deleted.is_empty() || outcome.cancelled {
+                            panel.refresh_with_scroll_value(scroll_value);
+                        }
+                    }
+                    if context_is_active {
+                        if let Some((_, err)) = outcome.failed.first() {
+                            if failed_count == 1 {
+                                panel.show_status(&format!("Delete failed: {err}"));
+                            } else {
+                                panel.show_status(&format!(
+                                    "Delete failed for {failed_count} items: {err}"
+                                ));
+                            }
+                        } else if outcome.cancelled {
+                            panel.show_status("Delete cancelled");
+                        }
                     }
                     tracing::info!(
                         operation,
@@ -1206,7 +1249,10 @@ impl FileBrowserPanel {
                         "file browser operation completed"
                     );
                 }
-                Err(_) => panel.show_status("Delete failed: worker panicked"),
+                Err(_) if panel.operation_context_is_active(&operation_root) => {
+                    panel.show_status("Delete failed: worker panicked");
+                }
+                Err(_) => {}
             }
             panel.finish_file_operation();
         });
@@ -1819,25 +1865,38 @@ impl FileBrowserModel {
     }
 
     fn copy_focused(&mut self) -> bool {
-        let Some(path) = self.focused_path() else {
+        let paths = self.clipboard_targets();
+        if paths.is_empty() {
             return false;
-        };
+        }
         self.clipboard = Some(FileClipboard {
             operation: ClipboardOperation::Copy,
-            paths: vec![path],
+            paths,
         });
         true
     }
 
     fn cut_focused(&mut self) -> bool {
-        let Some(path) = self.focused_path() else {
+        let paths = self.clipboard_targets();
+        if paths.is_empty() {
             return false;
-        };
+        }
         self.clipboard = Some(FileClipboard {
             operation: ClipboardOperation::Cut,
-            paths: vec![path],
+            paths,
         });
         true
+    }
+
+    fn clipboard_targets(&mut self) -> Vec<PathBuf> {
+        if self.selected.is_empty() {
+            return self.focused_path().into_iter().collect();
+        }
+        self.visible_rows()
+            .into_iter()
+            .filter(|row| self.selected.contains(&row.path))
+            .map(|row| row.path)
+            .collect()
     }
 
     #[cfg(test)]
@@ -1960,8 +2019,12 @@ fn execute_delete_with_control(
             cancelled = true;
             break;
         }
-        match delete(&path) {
+        match delete(&path, control) {
             Ok(()) => deleted.push(path),
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {
+                cancelled = true;
+                break;
+            }
             Err(err) => failed.push((path, err)),
         }
         control.mark_completed();
@@ -2158,11 +2221,7 @@ fn move_path_with_control(
             }
             copy_path_with_control(source, destination, control)?;
             control.check_cancelled()?;
-            let remove_result = if source.is_dir() {
-                fs::remove_dir_all(source)
-            } else {
-                fs::remove_file(source)
-            };
+            let remove_result = permanently_delete_path_with_control(source, control);
             remove_result.map_err(|remove_err| {
                 io::Error::new(
                     remove_err.kind(),
@@ -2364,7 +2423,8 @@ fn fallback_icon_name(is_dir: bool) -> &'static str {
     }
 }
 
-fn move_to_trash(path: &Path) -> io::Result<()> {
+fn move_to_trash(path: &Path, control: &FileOperationControl) -> io::Result<()> {
+    control.check_cancelled()?;
     gio::File::for_path(path)
         .trash(None::<&gio::Cancellable>)
         .map(|_| ())
@@ -2372,9 +2432,22 @@ fn move_to_trash(path: &Path) -> io::Result<()> {
 }
 
 fn permanently_delete_path(path: &Path) -> io::Result<()> {
+    permanently_delete_path_with_control(path, &FileOperationControl::new(1))
+}
+
+fn permanently_delete_path_with_control(
+    path: &Path,
+    control: &FileOperationControl,
+) -> io::Result<()> {
+    control.check_cancelled()?;
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_dir() {
-        fs::remove_dir_all(path)
+        for entry in fs::read_dir(path)? {
+            control.check_cancelled()?;
+            permanently_delete_path_with_control(&entry?.path(), control)?;
+        }
+        control.check_cancelled()?;
+        fs::remove_dir(path)
     } else {
         fs::remove_file(path)
     }
@@ -2788,7 +2861,7 @@ mod tests {
         let second = tmp.file("b.txt");
         let control = FileOperationControl::new(2);
         let cancel = control.cancelled.clone();
-        let delete: DeleteHandler = Arc::new(move |path| {
+        let delete: DeleteHandler = Arc::new(move |path, _| {
             fs::remove_file(path)?;
             cancel.store(true, AtomicOrdering::Relaxed);
             Ok(())
@@ -2801,6 +2874,22 @@ mod tests {
         assert_eq!(outcome.deleted, vec![first]);
         assert!(second.exists());
         assert_eq!(control.completed.load(AtomicOrdering::Relaxed), 1);
+    }
+
+    #[test]
+    fn interrupted_delete_is_reported_as_cancelled() {
+        let tmp = TestDir::new("cancel-delete-current");
+        let path = tmp.file("a.txt");
+        let control = FileOperationControl::new(1);
+        let delete: DeleteHandler =
+            Arc::new(|_, _| Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+
+        let outcome = execute_delete_with_control(vec![path.clone()], delete, &control);
+
+        assert!(outcome.cancelled);
+        assert!(outcome.failed.is_empty());
+        assert!(path.exists());
+        assert_eq!(control.completed.load(AtomicOrdering::Relaxed), 0);
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -2818,6 +2907,25 @@ mod tests {
         panel.finish_file_operation();
         assert!(!panel.cancel_operation_button.property::<bool>("visible"));
         assert!(!panel.file_operation_in_progress.get());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[gtk::test]
+    fn changing_root_cancels_the_previous_file_operation() {
+        let first = TestDir::new("operation-root-a");
+        first.file("a.txt");
+        let second = TestDir::new("operation-root-b");
+        second.file("b.txt");
+        let panel = FileBrowserPanel::new();
+        panel.show_for_root(first.path.clone());
+        let control = panel.begin_file_operation("Copying", 1).unwrap();
+
+        panel.show_for_root(second.path.clone());
+
+        assert!(control.cancelled.load(AtomicOrdering::Relaxed));
+        assert!(!panel.operation_context_is_active(&first.path));
+        assert!(panel.operation_context_is_active(&second.path));
+        panel.finish_file_operation();
     }
 
     #[test]
@@ -2996,6 +3104,30 @@ mod tests {
             .file_type()
             .is_symlink());
         assert_eq!(fs::read_link(copied_link).unwrap(), external);
+    }
+
+    #[test]
+    fn copy_paste_uses_all_selected_entries() {
+        let tmp = TestDir::new("copy-selection");
+        let first = tmp.file("a.txt");
+        let second = tmp.file("b.txt");
+        let target = tmp.dir("target");
+
+        let mut model = FileBrowserModel::default();
+        model.set_root(tmp.path.clone());
+        assert!(model.toggle_path_selection(&first));
+        assert!(model.toggle_path_selection(&second));
+        assert!(model.copy_focused());
+        assert_eq!(
+            model.clipboard.as_ref().unwrap().paths,
+            vec![first.clone(), second.clone()]
+        );
+        assert!(model.focus_path(&target));
+
+        assert!(model.paste_from_clipboard().unwrap());
+
+        assert!(target.join("a.txt").exists());
+        assert!(target.join("b.txt").exists());
     }
 
     #[test]
