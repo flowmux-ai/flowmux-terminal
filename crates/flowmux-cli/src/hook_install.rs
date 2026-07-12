@@ -29,7 +29,7 @@ pub const FLOWMUX_HOOK_MARKER: &str = "flowmux-hook";
 
 /// Plugin source-marker for the OpenCode JS plugin file. Lets a re-run
 /// detect that the file is owned by flowmux and may be overwritten.
-pub const FLOWMUX_OPENCODE_PLUGIN_MARKER: &str = "flowmux-opencode-session-plugin v2";
+pub const FLOWMUX_OPENCODE_PLUGIN_MARKER: &str = "flowmux-opencode-session-plugin v3";
 
 /// One agent flowmux knows how to install hooks for. Same enum shape
 /// as `agent::Target` so future merges can collapse them, but kept
@@ -1069,15 +1069,27 @@ function fireFlowmuxHook(event, payload) {{
 
 export const id = "flowmux-session";
 
+function sessionPayload(event) {{
+  const properties = event && event.properties;
+  if (!properties) return null;
+  const session = properties.session;
+  const sessionId = properties.sessionID || properties.sessionId || properties.session_id ||
+    (session && (session.id || session.sessionID || session.sessionId));
+  return sessionId ? JSON.stringify({{ session_id: String(sessionId) }}) : null;
+}}
+
 export const server = async () => ({{
   event: async ({{ event }}) => {{
     if (!event || typeof event.type !== "string") return;
     const t = event.type;
-    if (t === "session.idle") fireFlowmuxHook("stop");
+    const payload = sessionPayload(event);
+    if (t === "session.created" || t === "session.updated") {{
+      fireFlowmuxHook("session-start", payload);
+    }} else if (t === "session.idle") fireFlowmuxHook("stop", payload);
     else if (t === "session.status") {{
       const status = event.properties && event.properties.status;
       if (status && (status.type === "busy" || status.type === "retry")) {{
-        fireFlowmuxHook("running");
+        fireFlowmuxHook("running", payload);
       }}
     }} else if (t === "session.error") {{
       fireFlowmuxHook("notification", JSON.stringify({{ message: "OpenCode session error" }}));
@@ -1489,6 +1501,10 @@ hooks = true
         assert!(src.contains(FLOWMUX_OPENCODE_PLUGIN_MARKER));
         assert!(src.contains("/usr/local/bin/flowmux"));
         assert!(src.contains("session.idle"));
+        assert!(src.contains("session.created"));
+        assert!(src.contains("session.updated"));
+        assert!(src.contains("sessionPayload"));
+        assert!(src.contains("session_id"));
         // Must be an ESM module so OpenCode 1.14+ loads it.
         assert!(src.contains("import"));
         assert!(src.contains("export const server"));

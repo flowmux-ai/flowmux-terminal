@@ -467,6 +467,7 @@ impl WindowController {
             title: title.clone(),
             title_locked: false,
             kind: torn.kind.clone(),
+            scrollback: None,
             agent: None,
         };
         let workspace = Workspace {

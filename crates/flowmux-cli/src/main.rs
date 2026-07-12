@@ -699,6 +699,10 @@ enum AgentHookEvent {
     },
     /// Session started; registers presence with unknown turn activity.
     SessionStart {
+        #[arg(long)]
+        pane: Option<PaneId>,
+        #[arg(long)]
+        surface: Option<SurfaceId>,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },

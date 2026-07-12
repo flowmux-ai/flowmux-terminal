@@ -1353,6 +1353,36 @@ impl StateStore {
         updated
     }
 
+    pub async fn update_surface_scrollback(
+        &self,
+        pane: PaneId,
+        surface_id: SurfaceId,
+        text: String,
+    ) -> Option<WorkspaceId> {
+        let mut s = self.inner.lock().await;
+        let updated = update_surface_scrollback_in_state(&mut s, pane, surface_id, text);
+        drop(s);
+        if updated.is_some() {
+            self.mark_dirty();
+        }
+        updated
+    }
+
+    pub fn update_surface_scrollback_blocking(
+        &self,
+        pane: PaneId,
+        surface_id: SurfaceId,
+        text: String,
+    ) -> Option<WorkspaceId> {
+        let mut s = self.inner.blocking_lock();
+        let updated = update_surface_scrollback_in_state(&mut s, pane, surface_id, text);
+        drop(s);
+        if updated.is_some() {
+            self.mark_dirty();
+        }
+        updated
+    }
+
     /// Called when reordering terminal/browser tabs inside a pane by drag and
     /// drop. Moves `surface_id` within the same pane to `target_index`. The index
     /// is the final position after applying the move and clamps to the end when
@@ -1921,6 +1951,25 @@ fn update_surface_cwd_in_state(
             if surface
                 .root_pane
                 .set_surface_cwd(pane, surface_id, cwd.clone())
+            {
+                return Some(ws.id);
+            }
+        }
+    }
+    None
+}
+
+fn update_surface_scrollback_in_state(
+    state: &mut State,
+    pane: PaneId,
+    surface_id: SurfaceId,
+    text: String,
+) -> Option<WorkspaceId> {
+    for ws in state.workspaces.iter_mut() {
+        for surface in ws.surfaces.iter_mut() {
+            if surface
+                .root_pane
+                .set_surface_scrollback(pane, surface_id, text.clone())
             {
                 return Some(ws.id);
             }
@@ -3359,6 +3408,41 @@ Do you want to continue?";
         ));
         assert_eq!(surfaces[0].title, "two");
         assert!(!surfaces[0].title_locked);
+    }
+
+    #[tokio::test]
+    async fn update_surface_scrollback_persists_bounded_history_and_skips_duplicates() {
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("one".into()), std::path::PathBuf::from("/tmp/one"))
+            .await;
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        let pane = first_pane(&ws);
+        let surface = first_pane_active_surface(&ws);
+        let text = format!(
+            "{}latest",
+            "x".repeat(flowmux_core::TERMINAL_SCROLLBACK_MAX_BYTES)
+        );
+
+        assert_eq!(
+            store
+                .update_surface_scrollback(pane, surface, text.clone())
+                .await,
+            Some(ws_id)
+        );
+        assert_eq!(
+            store.update_surface_scrollback(pane, surface, text).await,
+            None
+        );
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        let saved = ws.surfaces[0]
+            .root_pane
+            .find_surface(pane, surface)
+            .unwrap()
+            .scrollback
+            .unwrap();
+        assert!(saved.len() <= flowmux_core::TERMINAL_SCROLLBACK_MAX_BYTES);
+        assert!(saved.ends_with("latest"));
     }
 
     #[tokio::test]

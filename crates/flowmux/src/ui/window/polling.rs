@@ -44,6 +44,43 @@ impl WindowController {
             let _ = self.store.update_surface_cwd_blocking(pane, surface, cwd);
         }
     }
+
+    pub(super) fn flush_terminal_scrollback_blocking(&self) {
+        if !self.options.borrow().restore_terminal_scrollback {
+            return;
+        }
+        let snapshots = self.pane_registry.borrow().terminal_scrollback_snapshots();
+        for (pane, surface, text) in snapshots {
+            let _ = self
+                .store
+                .update_surface_scrollback_blocking(pane, surface, text);
+        }
+    }
+
+    /// Capture terminal history periodically so a crash or power loss loses at
+    /// most one short interval. StateStore de-duplicates identical snapshots
+    /// and debounces disk writes.
+    pub(super) fn install_scrollback_persistence(&self) {
+        let controller = self.clone();
+        glib::timeout_add_local(Duration::from_secs(15), move || {
+            if controller.options.borrow().restore_terminal_scrollback {
+                let snapshots = controller
+                    .pane_registry
+                    .borrow()
+                    .terminal_scrollback_snapshots();
+                let controller = controller.clone();
+                glib::MainContext::default().spawn_local(async move {
+                    for (pane, surface, text) in snapshots {
+                        let _ = controller
+                            .store
+                            .update_surface_scrollback(pane, surface, text)
+                            .await;
+                    }
+                });
+            }
+            glib::ControlFlow::Continue
+        });
+    }
     /// Relying only on VTE OSC 7 (`current-directory-uri::notify`) misses shells
     /// without OSC 7 integration, such as Ubuntu's default bash spawned by
     /// flowmux; after `cd`, no notify ever arrives and the tab name stays stale.

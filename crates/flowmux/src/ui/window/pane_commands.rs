@@ -55,7 +55,18 @@ impl WindowController {
                         return;
                     }
                 }
-                match self.store.close_pane(pane).await {
+                let closing_surfaces = self
+                    .pane_registry
+                    .borrow()
+                    .surface_tabs
+                    .get(&pane)
+                    .map(|tabs| tabs.iter().map(|(surface, _)| *surface).collect::<Vec<_>>())
+                    .unwrap_or_default();
+                let outcome = self.store.close_pane(pane).await;
+                if outcome.is_some() {
+                    forget_saved_agent_sessions(&closing_surfaces);
+                }
+                match outcome {
                     None => {
                         let _ = ack.send(Err(format!("pane not found: {pane}")));
                     }
@@ -170,7 +181,11 @@ impl WindowController {
                         }
                     }
                 }
-                match self.store.close_surface(pane, surface).await {
+                let outcome = self.store.close_surface(pane, surface).await;
+                if outcome.is_some() {
+                    forget_saved_agent_sessions(&[surface]);
+                }
+                match outcome {
                     None => {
                         let _ = ack.send(Err(format!("surface not found: {surface}")));
                     }

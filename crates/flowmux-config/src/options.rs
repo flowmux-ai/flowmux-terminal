@@ -40,6 +40,13 @@ pub const FOCUS_BORDER_OPACITY_DEFAULT: u8 = 30;
 /// so the option ships enabled.
 pub const PERSIST_BROWSER_SESSION_DEFAULT: bool = true;
 
+/// Resume supported coding-agent sessions captured by lifecycle hooks when a
+/// persisted terminal tab is rebuilt after relaunch.
+pub const AUTO_RESUME_AGENT_SESSIONS_DEFAULT: bool = true;
+
+/// Persist and replay a bounded plain-text terminal history on relaunch.
+pub const RESTORE_TERMINAL_SCROLLBACK_DEFAULT: bool = true;
+
 /// Default for [`Options::system_notifications_enabled`]. Desktop toasts ship
 /// enabled so flowmux behaves like every other notifying app on first launch;
 /// the user can opt out to keep only the in-app bell list.
@@ -125,6 +132,10 @@ pub struct Options {
     /// Default: [`PERSIST_BROWSER_SESSION_DEFAULT`] (`true`).
     #[serde(default = "default_persist_browser_session")]
     pub persist_browser_session: bool,
+    #[serde(default = "default_auto_resume_agent_sessions")]
+    pub auto_resume_agent_sessions: bool,
+    #[serde(default = "default_restore_terminal_scrollback")]
+    pub restore_terminal_scrollback: bool,
     /// When true, notifications are delivered as system desktop toasts
     /// (libnotify / D-Bus) in addition to the in-app bell list. When false,
     /// notifications still appear in the in-app bell list but no system toast
@@ -187,6 +198,14 @@ fn default_persist_browser_session() -> bool {
     PERSIST_BROWSER_SESSION_DEFAULT
 }
 
+fn default_auto_resume_agent_sessions() -> bool {
+    AUTO_RESUME_AGENT_SESSIONS_DEFAULT
+}
+
+fn default_restore_terminal_scrollback() -> bool {
+    RESTORE_TERMINAL_SCROLLBACK_DEFAULT
+}
+
 fn default_system_notifications_enabled() -> bool {
     SYSTEM_NOTIFICATIONS_ENABLED_DEFAULT
 }
@@ -211,6 +230,8 @@ impl Default for Options {
             focus_border_color: default_focus_color(),
             focus_border_opacity: default_focus_border_opacity(),
             persist_browser_session: default_persist_browser_session(),
+            auto_resume_agent_sessions: default_auto_resume_agent_sessions(),
+            restore_terminal_scrollback: default_restore_terminal_scrollback(),
             system_notifications_enabled: default_system_notifications_enabled(),
             agent_bar_enabled: default_agent_bar_enabled(),
             cursor_blink: default_cursor_blink(),
@@ -293,6 +314,16 @@ impl Options {
     /// Builder-style setter for the browser-session persistence flag.
     pub fn with_persist_browser_session(mut self, persist: bool) -> Self {
         self.persist_browser_session = persist;
+        self
+    }
+
+    pub fn with_auto_resume_agent_sessions(mut self, enabled: bool) -> Self {
+        self.auto_resume_agent_sessions = enabled;
+        self
+    }
+
+    pub fn with_restore_terminal_scrollback(mut self, enabled: bool) -> Self {
+        self.restore_terminal_scrollback = enabled;
         self
     }
 
@@ -757,6 +788,26 @@ mod tests {
     fn empty_object_deserializes_persist_browser_session_default() {
         let opts: Options = serde_json::from_str("{}").unwrap();
         assert!(opts.persist_browser_session);
+    }
+
+    #[test]
+    fn agent_resume_and_scrollback_restore_default_on_for_older_files() {
+        let opts: Options = serde_json::from_str("{}").unwrap();
+        assert!(opts.auto_resume_agent_sessions);
+        assert!(opts.restore_terminal_scrollback);
+    }
+
+    #[test]
+    fn agent_resume_and_scrollback_restore_round_trip_false() {
+        with_xdg(|_| {
+            let opts = Options::default()
+                .with_auto_resume_agent_sessions(false)
+                .with_restore_terminal_scrollback(false);
+            save(&opts).unwrap();
+            let back = load();
+            assert!(!back.auto_resume_agent_sessions);
+            assert!(!back.restore_terminal_scrollback);
+        });
     }
 
     // ===== font_family / font_size =====

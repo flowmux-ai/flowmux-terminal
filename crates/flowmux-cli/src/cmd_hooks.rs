@@ -313,7 +313,7 @@ pub(crate) async fn run_generic_agent_hook_event(
         AgentHookEvent::Stop { pane, surface, .. } => (*pane, *surface),
         AgentHookEvent::Notification { pane, surface, .. } => (*pane, *surface),
         AgentHookEvent::Running { pane, surface, .. } => (*pane, *surface),
-        AgentHookEvent::SessionStart { .. } => (None, None),
+        AgentHookEvent::SessionStart { pane, surface, .. } => (*pane, *surface),
     };
     // CLI flags win over env so the OpenCode Flatpak plugin (which
     // passes them explicitly across the sandbox boundary) is the
@@ -363,20 +363,31 @@ pub(crate) async fn run_generic_agent_hook_event(
             ));
             reqs.push(build_notification_notify(agent, msg, pane, surface));
         }
-        AgentHookEvent::Running { .. } => {
-            reqs.push(build_activity_update(
+        AgentHookEvent::Running { args, .. } => {
+            let input = read_codex_hook_input(args);
+            reqs.push(build_activity_update_with_metadata(
                 agent,
                 Some(Running),
                 pid,
                 pane,
                 surface,
+                None,
+                None,
+                input.session_id.as_deref(),
             ));
         }
         // Codex / OpenCode register presence on session start without claiming
         // a turn is idle. The wrapper PID, when available, lets the liveness
         // sweep clear sessions that have no SessionEnd hook.
-        AgentHookEvent::SessionStart { .. } => {
-            reqs.push(build_unknown_activity_update(agent, pid, pane, surface));
+        AgentHookEvent::SessionStart { args, .. } => {
+            let input = read_codex_hook_input(args);
+            reqs.push(build_unknown_activity_update_with_session(
+                agent,
+                pid,
+                pane,
+                surface,
+                input.session_id.as_deref(),
+            ));
         }
     };
     match hooks::connect_daemon(socket).await {

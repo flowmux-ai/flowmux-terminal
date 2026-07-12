@@ -87,6 +87,15 @@ impl GhosttyPane {
         Ok(())
     }
 
+    /// Replay persisted plain text into VTE's display only. This never writes
+    /// into the child PTY, so old prompts and agent output cannot be executed.
+    pub fn restore_scrollback(&self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.widget.feed(&scrollback_replay_bytes(text));
+    }
+
     /// The widget used for focus tracking / identity comparisons in the window
     /// controller. With VTE this is the terminal widget itself.
     #[allow(dead_code)]
@@ -205,6 +214,22 @@ impl GhosttyPane {
         scroll_terminal_to_bottom(&self.widget);
         self.widget.paste_clipboard();
     }
+}
+
+fn scrollback_replay_bytes(text: &str) -> Vec<u8> {
+    let mut replay = Vec::with_capacity(text.len() + text.lines().count());
+    let mut previous = None;
+    for byte in text.bytes() {
+        if byte == b'\n' && previous != Some(b'\r') {
+            replay.push(b'\r');
+        }
+        replay.push(byte);
+        previous = Some(byte);
+    }
+    if !text.ends_with('\n') {
+        replay.extend_from_slice(b"\r\n");
+    }
+    replay
 }
 
 fn uri_to_path(uri: &str) -> Option<PathBuf> {
@@ -2262,6 +2287,12 @@ except (ChildProcessError, ValueError):
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scrollback_replay_uses_terminal_safe_line_endings() {
+        assert_eq!(scrollback_replay_bytes("one\ntwo"), b"one\r\ntwo\r\n");
+        assert_eq!(scrollback_replay_bytes("one\r\ntwo\r\n"), b"one\r\ntwo\r\n");
+    }
 
     #[test]
     fn image_path_regex_compiles() {

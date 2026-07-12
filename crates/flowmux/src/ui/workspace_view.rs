@@ -208,6 +208,13 @@ impl PaneRegistry {
             .filter_map(move |(pane, ws)| (*ws == workspace).then_some(*pane))
     }
 
+    pub fn surface_ids_in_workspace(&self, workspace: WorkspaceId) -> Vec<SurfaceId> {
+        self.surface_workspace
+            .iter()
+            .filter_map(|(surface, owner)| (*owner == workspace).then_some(*surface))
+            .collect()
+    }
+
     pub fn active_surface(&self, pane: PaneId) -> Option<SurfaceId> {
         self.active_terminal_by_pane
             .get(&pane)
@@ -264,6 +271,17 @@ impl PaneRegistry {
                 terminal
                     .poll_cwd_if_changed()
                     .map(|cwd| (terminal.id(), *surface, cwd))
+            })
+            .collect()
+    }
+
+    pub fn terminal_scrollback_snapshots(&self) -> Vec<(PaneId, SurfaceId, String)> {
+        self.terminals
+            .iter()
+            .filter_map(|(surface, terminal)| {
+                terminal
+                    .screen_text()
+                    .map(|text| (terminal.id(), *surface, text))
             })
             .collect()
     }
@@ -2310,7 +2328,7 @@ fn build_panel(
 ) -> gtk::Widget {
     match &surface.kind {
         SurfaceKind::Terminal { cwd, shell } => {
-            let argv = shell.clone().map(|s| vec![s]).unwrap_or(argv);
+            let mut argv = shell.clone().map(|s| vec![s]).unwrap_or(argv);
             // Match the per-PID socket that `flowmux::main` binds, so
             // PTYs inside this GUI window route their notifications
             // back to the SAME GUI even when multiple flowmux windows
@@ -2331,6 +2349,17 @@ fn build_panel(
             // options so a freshly spawned tab matches the live ones.
             let opts = (callbacks.read_options)();
             let font = theme.font_with_overrides(opts.font_family.as_deref(), opts.font_size);
+            let resume_command = restored_agent_shell_command(
+                surface.id,
+                opts.auto_resume_agent_sessions,
+                flowmux_state::default_agent_session_store(),
+            );
+            if resume_command.is_some() {
+                // Resume inside an interactive shell so a missing binary or
+                // stale session returns to a usable prompt instead of leaving
+                // a dead terminal tab.
+                argv = shell.clone().map(|s| vec![s]).unwrap_or_default();
+            }
 
             // VTE is the only terminal backend. GhosttyPane owns the
             // PTY + render; title/cwd changes are forwarded from inside it.
@@ -2346,6 +2375,19 @@ fn build_panel(
             pane.set_font(&font);
             pane.set_font_scale(opts.zoom_factor());
             pane.set_cursor_blink(opts.cursor_blink, opts.cursor_blink_interval_ms);
+            if opts.restore_terminal_scrollback {
+                if let Some(scrollback) = surface.scrollback.as_deref() {
+                    pane.restore_scrollback(scrollback);
+                }
+            }
+            if let Some(command) = resume_command {
+                let terminal = pane.clone();
+                gtk::glib::idle_add_local_once(move || {
+                    if let Err(error) = terminal.write_input(command.as_bytes()) {
+                        tracing::warn!(%error, "failed to start restored agent session");
+                    }
+                });
+            }
             let pane_terminal: PaneTerminal = pane;
 
             // Toggle the .focused class on frame focus enter/leave. theme.rs
@@ -2423,5 +2465,35 @@ fn build_panel(
             r.surface_workspace.insert(surface.id, workspace);
             widget
         }
+    }
+}
+
+fn restored_agent_shell_command(
+    surface: SurfaceId,
+    enabled: bool,
+    store: Option<flowmux_state::AgentSessionStore>,
+) -> Option<String> {
+    enabled
+        .then_some(store)
+        .flatten()
+        .and_then(|store| store.lookup_surface(surface))
+        .and_then(|session| session.shell_command())
+}
+
+#[cfg(test)]
+mod resume_tests {
+    use super::*;
+
+    #[test]
+    fn restored_agent_command_respects_setting_and_surface_binding() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = flowmux_state::AgentSessionStore::new(dir.path().to_path_buf());
+        let surface = SurfaceId::new();
+        store.record("claude", surface, "session-1").unwrap();
+
+        assert!(restored_agent_shell_command(surface, false, Some(store.clone())).is_none());
+        let command = restored_agent_shell_command(surface, true, Some(store)).unwrap();
+        assert!(command.contains("'claude' '--resume' 'session-1'"));
+        assert!(restored_agent_shell_command(SurfaceId::new(), true, None).is_none());
     }
 }

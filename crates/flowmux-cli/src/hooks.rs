@@ -35,7 +35,13 @@ const HOOK_NOTIFY_TIMEOUT: Duration = Duration::from_millis(750);
 #[allow(dead_code)]
 #[derive(Debug, Default, Deserialize)]
 pub struct ClaudeHookInput {
-    #[serde(default)]
+    #[serde(
+        default,
+        alias = "thread-id",
+        alias = "thread_id",
+        alias = "sessionID",
+        alias = "sessionId"
+    )]
     pub session_id: Option<String>,
     #[serde(default)]
     pub transcript_path: Option<PathBuf>,
@@ -153,6 +159,7 @@ fn hook_seq() -> Option<u64> {
 
 /// Build a `Request::AgentActivityUpdate`. `activity: None` clears the
 /// presence (session end / teardown).
+#[cfg(test)]
 pub fn build_activity_update(
     agent: &str,
     activity: Option<AgentActivity>,
@@ -165,11 +172,22 @@ pub fn build_activity_update(
 
 /// Register an agent whose process is known but whose turn activity has not
 /// been reported by a reliable lifecycle event.
+#[cfg(test)]
 pub fn build_unknown_activity_update(
     agent: &str,
     pid: Option<u32>,
     pane: Option<PaneId>,
     surface: Option<SurfaceId>,
+) -> Request {
+    build_unknown_activity_update_with_session(agent, pid, pane, surface, None)
+}
+
+pub fn build_unknown_activity_update_with_session(
+    agent: &str,
+    pid: Option<u32>,
+    pane: Option<PaneId>,
+    surface: Option<SurfaceId>,
+    session_id: Option<&str>,
 ) -> Request {
     Request::AgentActivityUpdate {
         pane,
@@ -182,7 +200,7 @@ pub fn build_unknown_activity_update(
         seq: hook_seq(),
         message: None,
         custom_status: None,
-        session_id: None,
+        session_id: session_id.map(str::to_string),
     }
 }
 
@@ -664,6 +682,18 @@ mod tests {
         assert_eq!(parsed.session_id.as_deref(), Some("abc"));
         assert_eq!(parsed.hook_event_name.as_deref(), Some("Stop"));
         assert!(parsed.transcript_path.is_some());
+    }
+
+    #[test]
+    fn codex_and_opencode_session_id_aliases_are_accepted() {
+        for raw in [
+            r#"{"thread-id":"codex-thread"}"#,
+            r#"{"sessionID":"opencode-session"}"#,
+            r#"{"sessionId":"camel-session"}"#,
+        ] {
+            let parsed: ClaudeHookInput = serde_json::from_str(raw).unwrap();
+            assert!(parsed.session_id.is_some(), "payload was {raw}");
+        }
     }
 
     #[test]

@@ -46,7 +46,9 @@ impl WindowController {
                     let _ = ack.send(());
                     return;
                 }
+                let closing_surfaces = self.pane_registry.borrow().surface_ids_in_workspace(id);
                 if self.store.remove_workspace(id).await {
+                    forget_saved_agent_sessions(&closing_surfaces);
                     self.drop_workspace(id);
                     self.activate_active_or_show_empty().await;
                 }

@@ -708,6 +708,7 @@ mod tests {
             title: "shell".into(),
             title_locked: false,
             kind: term(),
+            scrollback: None,
             agent: None,
         };
         shell.agent = Some(AgentPresence::new(
@@ -726,6 +727,7 @@ mod tests {
                         title: "docs".into(),
                         title_locked: false,
                         kind: SurfaceKind::Browser { initial_url: None },
+                        scrollback: None,
                         agent: None,
                     },
                 ],

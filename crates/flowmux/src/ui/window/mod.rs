@@ -195,6 +195,17 @@ fn shell_quote(arg: &str) -> String {
     format!("'{}'", arg.replace('\'', "'\\''"))
 }
 
+fn forget_saved_agent_sessions(surfaces: &[SurfaceId]) {
+    let Some(store) = flowmux_state::default_agent_session_store() else {
+        return;
+    };
+    for surface in surfaces {
+        if let Err(error) = store.forget_surface(*surface) {
+            tracing::warn!(%surface, %error, "failed to forget closed agent session");
+        }
+    }
+}
+
 fn custom_command_cwd(base_dir: &std::path::Path, command: &CustomCommand) -> std::path::PathBuf {
     match command.cwd.as_deref() {
         Some(cwd) => {
@@ -692,6 +703,7 @@ impl WindowController {
         };
         controller.install_state_flush_on_close();
         controller.install_cwd_polling_fallback();
+        controller.install_scrollback_persistence();
         controller.install_agent_process_polling();
         controller
     }
@@ -794,6 +806,7 @@ impl WindowController {
         let controller = self.clone();
         self.window.connect_close_request(move |_| {
             controller.flush_terminal_cwds_blocking();
+            controller.flush_terminal_scrollback_blocking();
             controller.flush_layout_blocking();
             if let Err(e) = controller.store.save_now_blocking() {
                 tracing::warn!(error = %e, "state save on close failed");

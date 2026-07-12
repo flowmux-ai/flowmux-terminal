@@ -22,8 +22,7 @@ use tracing::warn;
 /// XDG data dir is unavailable (very rare on Linux, but possible in
 /// minimal containers without HOME / XDG_DATA_HOME).
 fn agent_session_store() -> Option<flowmux_state::AgentSessionStore> {
-    let dir = flowmux_config::paths::data_dir()?.join("agent-sessions");
-    Some(flowmux_state::AgentSessionStore::new(dir))
+    flowmux_state::default_agent_session_store()
 }
 
 fn browser_error_response(error: String) -> Response {
@@ -696,6 +695,16 @@ impl GuiHandler {
                 ..
             } => match surface {
                 Some(surface) => {
+                    // SessionEnd clears only live presence. Keep the native
+                    // session binding so app quit/relaunch can resume it; an
+                    // explicit tab close removes the binding separately.
+                    if let Some(session_id) = session_id.as_deref() {
+                        if let Some(store) = agent_session_store() {
+                            if let Err(error) = store.record(&agent, surface, session_id) {
+                                warn!(%surface, %agent, %error, "failed to persist agent session");
+                            }
+                        }
+                    }
                     if status.is_none() && activity.is_none() {
                         if let Some(ws_id) =
                             self.inner.store().set_agent_activity(surface, None).await

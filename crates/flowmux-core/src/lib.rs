@@ -13,6 +13,23 @@ const TERMINAL_TAB_TITLE_MAX_CHARS: usize = 17;
 const FALLBACK_TERMINAL_TAB_TITLE: &str = "Terminal";
 pub const AGENT_BAR_ITEM_MIN_WIDTH_PX: u16 = 84;
 pub const AGENT_BAR_ITEM_MAX_WIDTH_PX: u16 = 168;
+/// Maximum terminal scrollback persisted per tab. The cap keeps `state.json`
+/// bounded even when VTE is configured with a much larger live scrollback.
+pub const TERMINAL_SCROLLBACK_MAX_BYTES: usize = 256 * 1024;
+
+/// Keep the newest complete UTF-8 suffix that fits the persisted scrollback
+/// budget. Terminal history is useful from the tail; truncating from the front
+/// also preserves the current prompt and most recent agent output.
+pub fn bound_terminal_scrollback(text: &str) -> String {
+    if text.len() <= TERMINAL_SCROLLBACK_MAX_BYTES {
+        return text.to_string();
+    }
+    let mut start = text.len() - TERMINAL_SCROLLBACK_MAX_BYTES;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    text[start..].to_string()
+}
 
 pub fn terminal_tab_title_for_cwd(cwd: Option<&Path>) -> String {
     let folder = cwd
@@ -319,6 +336,10 @@ pub struct PaneSurface {
     #[serde(default)]
     pub title_locked: bool,
     pub kind: SurfaceKind,
+    /// Best-effort plain-text terminal history replayed on the next launch.
+    /// Bounded by [`TERMINAL_SCROLLBACK_MAX_BYTES`] before it reaches state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scrollback: Option<String>,
     /// Live AI-agent activity, set from agent lifecycle hooks. Runtime
     /// state only — never persisted, so resumed workspaces start with no
     /// agent presence until the next hook fires.
@@ -1035,6 +1056,30 @@ impl Pane {
         true
     }
 
+    /// Store bounded terminal history for a tab. Browser tabs reject the
+    /// update, and identical snapshots are no-ops so periodic capture does not
+    /// cause needless state writes.
+    pub fn set_surface_scrollback(
+        &mut self,
+        target: PaneId,
+        surface_id: SurfaceId,
+        text: String,
+    ) -> bool {
+        let Some(surface) = self.find_surface_mut(target, surface_id) else {
+            return false;
+        };
+        if !matches!(surface.kind, SurfaceKind::Terminal { .. }) {
+            return false;
+        }
+        let bounded = bound_terminal_scrollback(&text);
+        let next = (!bounded.is_empty()).then_some(bounded);
+        if surface.scrollback == next {
+            return false;
+        }
+        surface.scrollback = next;
+        true
+    }
+
     /// Move the terminal or browser tab identified by `surface_id` within the
     /// same pane to `target_index`. `target_index` is the final index after the
     /// move and clamps to the last tab when too large. The active tab SurfaceId
@@ -1606,6 +1651,7 @@ impl PaneSurface {
             title: title.into(),
             title_locked: false,
             kind: SurfaceKind::Terminal { shell: None, cwd },
+            scrollback: None,
             agent: None,
         }
     }
@@ -1618,6 +1664,7 @@ impl PaneSurface {
             kind: SurfaceKind::Browser {
                 initial_url: Some(url),
             },
+            scrollback: None,
             agent: None,
         }
     }

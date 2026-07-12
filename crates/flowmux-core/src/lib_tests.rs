@@ -1506,6 +1506,7 @@ fn normalize_resets_unlocked_title_to_cwd_after_relaunch() {
             shell: None,
             cwd: Some(cwd.clone()),
         },
+        scrollback: None,
         agent: None,
     };
     let changed = normalize_unlocked_terminal_title(&mut surface);
@@ -1527,6 +1528,7 @@ fn agent_presence_is_never_persisted() {
             shell: None,
             cwd: None,
         },
+        scrollback: None,
         agent: Some(AgentPresence::new(
             "claude",
             AgentActivity::Running,
@@ -2794,6 +2796,7 @@ fn normalize_keeps_user_renamed_titles() {
             shell: None,
             cwd: Some("/tmp".into()),
         },
+        scrollback: None,
         agent: None,
     };
     let changed = normalize_unlocked_terminal_title(&mut surface);
@@ -2814,6 +2817,7 @@ fn normalize_keeps_already_cwd_matching_titles() {
             shell: None,
             cwd: Some(cwd),
         },
+        scrollback: None,
         agent: None,
     };
     let changed = normalize_unlocked_terminal_title(&mut surface);
@@ -2828,6 +2832,7 @@ fn normalize_skips_browser_surfaces() {
         title: "Page Title".into(),
         title_locked: false,
         kind: SurfaceKind::Browser { initial_url: None },
+        scrollback: None,
         agent: None,
     };
     let changed = normalize_unlocked_terminal_title(&mut surface);
@@ -2845,11 +2850,68 @@ fn normalize_falls_back_to_default_when_cwd_is_missing() {
             shell: None,
             cwd: None,
         },
+        scrollback: None,
         agent: None,
     };
     let changed = normalize_unlocked_terminal_title(&mut surface);
     assert!(changed);
     assert_eq!(surface.title, FALLBACK_TERMINAL_TAB_TITLE);
+}
+
+#[test]
+fn terminal_scrollback_keeps_newest_utf8_suffix_with_fixed_bound() {
+    let prefix = "x".repeat(TERMINAL_SCROLLBACK_MAX_BYTES);
+    let text = format!("{prefix}한글-tail");
+    let bounded = bound_terminal_scrollback(&text);
+    assert!(bounded.len() <= TERMINAL_SCROLLBACK_MAX_BYTES);
+    assert!(bounded.ends_with("한글-tail"));
+    assert!(std::str::from_utf8(bounded.as_bytes()).is_ok());
+}
+
+#[test]
+fn set_surface_scrollback_is_terminal_only_bounded_and_idempotent() {
+    let pane = PaneId::new();
+    let terminal = PaneSurface::terminal("shell", None);
+    let terminal_id = terminal.id;
+    let mut tree = Pane::Leaf {
+        id: pane,
+        content: PaneContent::Tabs {
+            active: terminal_id,
+            surfaces: vec![terminal],
+        },
+    };
+    let large = format!("{}tail", "a".repeat(TERMINAL_SCROLLBACK_MAX_BYTES));
+    assert!(tree.set_surface_scrollback(pane, terminal_id, large.clone()));
+    assert!(!tree.set_surface_scrollback(pane, terminal_id, large));
+    let stored = tree.find_surface(pane, terminal_id).unwrap();
+    assert!(stored.scrollback.unwrap().ends_with("tail"));
+
+    let browser = PaneSurface::browser("docs", "about:blank".into());
+    let browser_id = browser.id;
+    let mut browser_tree = Pane::Leaf {
+        id: pane,
+        content: PaneContent::Tabs {
+            active: browser_id,
+            surfaces: vec![browser],
+        },
+    };
+    assert!(!browser_tree.set_surface_scrollback(pane, browser_id, "ignored".into()));
+}
+
+#[test]
+fn pane_surface_scrollback_round_trips_and_old_json_defaults_empty() {
+    let mut surface = PaneSurface::terminal("shell", None);
+    surface.scrollback = Some("previous output".into());
+    let json = serde_json::to_string(&surface).unwrap();
+    let restored: PaneSurface = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored.scrollback.as_deref(), Some("previous output"));
+
+    let old = format!(
+        r#"{{"id":"{}","title":"shell","kind":{{"type":"terminal","shell":null,"cwd":null}}}}"#,
+        SurfaceId::new()
+    );
+    let restored: PaneSurface = serde_json::from_str(&old).unwrap();
+    assert_eq!(restored.scrollback, None);
 }
 
 // ---- tab move (take / insert) ----

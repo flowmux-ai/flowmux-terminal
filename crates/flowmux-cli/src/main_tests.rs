@@ -1283,6 +1283,42 @@ fn hooks_opencode_running_accepts_pane_and_surface_flags() {
 }
 
 #[test]
+fn hooks_opencode_session_start_accepts_context_and_session_payload() {
+    let pane = PaneId::new();
+    let surface = SurfaceId::new();
+    let payload = r#"{"session_id":"session-1"}"#;
+    let cli = Cli::try_parse_from([
+        "flowmuxctl",
+        "hooks",
+        "opencode",
+        "session-start",
+        "--pane",
+        &pane.to_string(),
+        "--surface",
+        &surface.to_string(),
+        payload,
+    ])
+    .expect("session-start hook should parse context and payload");
+    let Cmd::Hooks {
+        op:
+            HooksOp::Opencode {
+                event:
+                    AgentHookEvent::SessionStart {
+                        pane: got_pane,
+                        surface: got_surface,
+                        args,
+                    },
+            },
+    } = cli.cmd
+    else {
+        panic!("expected opencode session-start hook");
+    };
+    assert_eq!(got_pane, Some(pane));
+    assert_eq!(got_surface, Some(surface));
+    assert_eq!(args, vec![payload.to_string()]);
+}
+
+#[test]
 fn hooks_opencode_stop_keeps_trailing_payload_after_flags() {
     // The plugin always emits flags before the optional JSON
     // payload (Codex-compat) so clap can split them cleanly. Make

@@ -357,6 +357,19 @@ impl Drop for HomeEnvRestore {
     }
 }
 
+struct DataEnvRestore(Option<std::ffi::OsString>);
+
+impl Drop for DataEnvRestore {
+    fn drop(&mut self) {
+        unsafe {
+            match self.0.take() {
+                Some(value) => std::env::set_var("XDG_DATA_HOME", value),
+                None => std::env::remove_var("XDG_DATA_HOME"),
+            }
+        }
+    }
+}
+
 #[allow(clippy::await_holding_lock)]
 #[tokio::test(flavor = "current_thread")]
 async fn import_cookies_dispatches_inject_for_firefox_fixture() {
@@ -490,6 +503,48 @@ async fn agent_activity_update_refreshes_store_and_sidebar() {
             .await
             .is_empty(),
         "clearing activity must remove the runtime presence from the store"
+    );
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "current_thread")]
+async fn agent_activity_session_id_is_persisted_for_restart_resume() {
+    let _guard = home_env_lock();
+    let _restore = DataEnvRestore(std::env::var_os("XDG_DATA_HOME"));
+    let data = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("XDG_DATA_HOME", data.path());
+    }
+    let (handler, rx, pane, surface) = single_pane_handler().await;
+    let response = handler.handle(Request::AgentActivityUpdate {
+        pane: Some(pane),
+        surface: Some(surface),
+        agent: "claude".into(),
+        status: Some(AgentStatus::Idle),
+        activity: Some(AgentActivity::Idle),
+        pid: Some(4321),
+        source: Some("flowmux:hook".into()),
+        seq: Some(11),
+        message: None,
+        custom_status: None,
+        session_id: Some("claude-session-1".into()),
+    });
+    tokio::pin!(response);
+    let command = tokio::select! {
+        response = &mut response => panic!("activity update completed before visibility query: {response:?}"),
+        command = rx.recv() => command.unwrap(),
+    };
+    let GtkCommand::QueryAgentSurfaceVisible { ack, .. } = command else {
+        panic!("expected visibility query")
+    };
+    ack.send(false).unwrap();
+    assert!(matches!(response.await, Response::Ok));
+
+    let store =
+        flowmux_state::AgentSessionStore::new(data.path().join("flowmux").join("agent-sessions"));
+    assert_eq!(
+        store.lookup("claude", surface).as_deref(),
+        Some("claude-session-1")
     );
 }
 
