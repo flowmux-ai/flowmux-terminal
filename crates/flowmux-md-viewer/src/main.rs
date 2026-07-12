@@ -63,6 +63,11 @@ window.flowmux-md-viewer .md-viewer-content {
 "#;
 
 fn main() -> ExitCode {
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS", "1");
+    }
+
     match Args::parse(std::env::args().skip(1)) {
         Ok(args) => {
             if args.help {
