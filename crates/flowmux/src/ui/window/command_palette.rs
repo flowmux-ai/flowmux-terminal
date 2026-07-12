@@ -87,14 +87,22 @@ fn quick_open_files(root: &std::path::Path, limit: usize) -> Vec<std::path::Path
         let Ok(entries) = std::fs::read_dir(directory) else {
             continue;
         };
-        for entry in entries.flatten() {
+        let mut entries = entries.flatten().collect::<Vec<_>>();
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        for entry in entries {
             let path = entry.path();
-            if path.is_dir() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
                 let name = entry.file_name();
                 if !matches!(name.to_str(), Some(".git" | "target" | "node_modules")) {
                     directories.push_back(path);
                 }
-            } else if path.is_file() {
+            } else if file_type.is_file() {
                 files.push(path);
                 if files.len() >= limit {
                     files.sort_by_key(|path| (path.components().count(), path.clone()));
@@ -939,6 +947,9 @@ mod tests {
         std::fs::write(root.path().join("src/two.rs"), "two").unwrap();
         std::fs::create_dir(root.path().join("target")).unwrap();
         std::fs::write(root.path().join("target/generated.rs"), "generated").unwrap();
+        let external = tempfile::tempdir().unwrap();
+        std::fs::write(external.path().join("outside.rs"), "outside").unwrap();
+        std::os::unix::fs::symlink(external.path(), root.path().join("external-link")).unwrap();
 
         let files = quick_open_files(root.path(), 2);
         assert_eq!(files.len(), 2);
@@ -946,5 +957,21 @@ mod tests {
         assert!(files
             .iter()
             .all(|path| !path.starts_with(root.path().join("target"))));
+        assert!(files
+            .iter()
+            .all(|path| !path.starts_with(root.path().join("external-link"))));
+    }
+
+    #[test]
+    fn quick_open_limit_is_deterministic() {
+        let root = tempfile::tempdir().unwrap();
+        for name in ["z.rs", "b.rs", "a.rs"] {
+            std::fs::write(root.path().join(name), name).unwrap();
+        }
+
+        assert_eq!(
+            quick_open_files(root.path(), 2),
+            vec![root.path().join("a.rs"), root.path().join("b.rs")]
+        );
     }
 }
