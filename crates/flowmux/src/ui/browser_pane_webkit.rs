@@ -17,6 +17,7 @@
 //! IndexedDB directories.
 
 use crate::ui::browser_bookmarks::BookmarkMenu;
+use crate::ui::browser_downloads::DownloadManager;
 use crate::ui::pane_terminal::PaneCallbacks;
 use adw::prelude::*;
 use flowmux_browser::{BrowserProfile, RefScope, RefStore};
@@ -252,21 +253,7 @@ impl BrowserPane {
         let inspector = gtk::Button::from_icon_name("applications-utilities-symbolic");
         inspector.add_css_class("flat");
         inspector.set_tooltip_text(Some("Open Web Inspector"));
-        let downloads = gtk::MenuButton::builder()
-            .icon_name("folder-download-symbolic")
-            .tooltip_text("Downloads")
-            .build();
-        let downloads_list = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        downloads_list.set_margin_top(8);
-        downloads_list.set_margin_bottom(8);
-        downloads_list.set_margin_start(8);
-        downloads_list.set_margin_end(8);
-        let downloads_empty = gtk::Label::new(Some("No downloads yet"));
-        downloads_empty.add_css_class("dim-label");
-        downloads_list.append(&downloads_empty);
-        let downloads_popover = gtk::Popover::new();
-        downloads_popover.set_child(Some(&downloads_list));
-        downloads.set_popover(Some(&downloads_popover));
+        let downloads = DownloadManager::new();
         let bookmarks = BookmarkMenu::new(
             &profile,
             {
@@ -310,88 +297,45 @@ impl BrowserPane {
         chrome.append(&zoom_out);
         chrome.append(&zoom_reset);
         chrome.append(&zoom_in);
-        chrome.append(&downloads);
+        chrome.append(&downloads.button());
         chrome.append(&inspector);
 
         {
             let downloads = downloads.clone();
-            let downloads_list = downloads_list.clone();
-            let downloads_empty = downloads_empty.clone();
             let download_directory = download_directory();
             network_session.connect_download_started(move |_, download| {
-                downloads_empty.set_visible(false);
-                downloads.set_tooltip_text(Some("Downloads in progress"));
-
-                let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-                let details = gtk::Box::new(gtk::Orientation::Vertical, 4);
-                details.set_hexpand(true);
-                let name = gtk::Label::new(Some("Preparing download…"));
-                name.set_halign(gtk::Align::Start);
-                name.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
-                let progress = gtk::ProgressBar::new();
-                progress.set_hexpand(true);
-                let cancel = gtk::Button::from_icon_name("process-stop-symbolic");
-                cancel.set_tooltip_text(Some("Cancel download"));
-                details.append(&name);
-                details.append(&progress);
-                row.append(&details);
-                row.append(&cancel);
-                downloads_list.append(&row);
-
-                {
-                    let download = download.clone();
-                    cancel.connect_clicked(move |button| {
-                        download.cancel();
-                        button.set_sensitive(false);
-                    });
-                }
+                let native_for_cancel = download.clone();
+                let item = downloads.add(move || native_for_cancel.cancel());
                 {
                     let directory = download_directory.clone();
-                    let name = name.clone();
+                    let item = item.clone();
                     download.connect_decide_destination(move |download, suggested| {
                         if let Err(error) = std::fs::create_dir_all(&directory) {
-                            name.set_text(&format!("Download failed: {error}"));
+                            item.fail(error.to_string());
                             return false;
                         }
                         let destination = available_download_path(&directory, suggested);
-                        name.set_text(
-                            destination
-                                .file_name()
-                                .and_then(|value| value.to_str())
-                                .unwrap_or("download"),
-                        );
-                        name.set_tooltip_text(Some(&destination.display().to_string()));
+                        item.set_destination(&destination);
                         download.set_destination(&destination.to_string_lossy());
                         true
                     });
                 }
                 {
-                    let progress = progress.clone();
+                    let item = item.clone();
                     download.connect_estimated_progress_notify(move |download| {
-                        progress.set_fraction(download.estimated_progress());
+                        item.set_progress(download.estimated_progress());
                     });
                 }
                 {
-                    let downloads = downloads.clone();
-                    let cancel = cancel.clone();
-                    let progress = progress.clone();
+                    let item = item.clone();
                     download.connect_finished(move |_| {
-                        progress.set_fraction(1.0);
-                        progress.set_text(Some("Complete"));
-                        progress.set_show_text(true);
-                        cancel.set_visible(false);
-                        downloads.set_tooltip_text(Some("Downloads"));
+                        item.finish();
                     });
                 }
                 {
-                    let downloads = downloads.clone();
-                    let cancel = cancel.clone();
-                    let progress = progress.clone();
+                    let item = item.clone();
                     download.connect_failed(move |_, error| {
-                        progress.set_text(Some(&format!("Failed: {error}")));
-                        progress.set_show_text(true);
-                        cancel.set_visible(false);
-                        downloads.set_tooltip_text(Some("Download failed"));
+                        item.fail(error.to_string());
                     });
                 }
             });

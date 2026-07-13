@@ -167,6 +167,7 @@ pub(crate) struct DownloadManager {
 
 struct DownloadManagerInner {
     button: gtk::MenuButton,
+    #[cfg_attr(not(test), allow(dead_code))]
     scroll: gtk::ScrolledWindow,
     list: gtk::Box,
     empty: gtk::Label,
