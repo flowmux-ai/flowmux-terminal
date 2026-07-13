@@ -2,6 +2,7 @@
 //! macOS in-app browser pane backed by the system WebKit `WKWebView`.
 
 use crate::ui::browser_bookmarks::BookmarkMenu;
+use crate::ui::browser_downloads::{DownloadItem, DownloadManager};
 use crate::ui::pane_terminal::PaneCallbacks;
 use adw::prelude::*;
 use flowmux_browser::{BrowserProfile, RefScope, RefStore};
@@ -63,16 +64,12 @@ struct NativeBrowserView {
 }
 
 struct DownloadUi {
-    name: gtk::Label,
-    progress: gtk::ProgressBar,
-    cancel: gtk::Button,
+    item: DownloadItem,
     handle: Rc<RefCell<Option<Retained<WKDownload>>>>,
 }
 
 struct BrowserNavigationDelegateIvars {
-    downloads_button: gtk::MenuButton,
-    downloads_list: gtk::Box,
-    downloads_empty: gtk::Label,
+    download_manager: DownloadManager,
     download_directory: PathBuf,
     downloads: RefCell<HashMap<usize, DownloadUi>>,
 }
@@ -227,7 +224,7 @@ define_class!(
             let directory = &self.ivars().download_directory;
             if let Err(error) = std::fs::create_dir_all(directory) {
                 if let Some(ui) = self.ivars().downloads.borrow().get(&key) {
-                    ui.name.set_text(&format!("Download failed: {error}"));
+                    ui.item.fail(error.to_string());
                 }
                 completion_handler.call((std::ptr::null_mut(),));
                 return;
@@ -235,14 +232,7 @@ define_class!(
 
             let destination = available_download_path(directory, &suggested_filename.to_string());
             if let Some(ui) = self.ivars().downloads.borrow().get(&key) {
-                ui.name.set_text(
-                    destination
-                        .file_name()
-                        .and_then(|value| value.to_str())
-                        .unwrap_or("download"),
-                );
-                ui.name
-                    .set_tooltip_text(Some(&destination.display().to_string()));
+                ui.item.set_destination(&destination);
             }
             let path = NSString::from_str(&destination.to_string_lossy());
             let url = NSURL::fileURLWithPath(&path);
@@ -278,90 +268,46 @@ impl BrowserNavigationDelegate {
             download.setDelegate(Some(ProtocolObject::from_ref(self)));
         }
 
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        let details = gtk::Box::new(gtk::Orientation::Vertical, 4);
-        details.set_hexpand(true);
-        let name = gtk::Label::new(Some("Preparing download…"));
-        name.set_halign(gtk::Align::Start);
-        name.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
-        let progress = gtk::ProgressBar::new();
-        progress.set_hexpand(true);
-        let cancel = gtk::Button::from_icon_name("process-stop-symbolic");
-        cancel.set_tooltip_text(Some("Cancel download"));
-        details.append(&name);
-        details.append(&progress);
-        row.append(&details);
-        row.append(&cancel);
-        self.ivars().downloads_empty.set_visible(false);
-        self.ivars().downloads_list.append(&row);
-        self.ivars()
-            .downloads_button
-            .set_tooltip_text(Some("Downloads in progress"));
-
         let handle = Rc::new(RefCell::new(Some(download.retain())));
-        {
-            let handle = handle.clone();
-            cancel.connect_clicked(move |button| {
-                if let Some(download) = handle.borrow().as_ref() {
-                    unsafe {
-                        download.cancel(None);
-                    }
+        let handle_for_cancel = handle.clone();
+        let item = self.ivars().download_manager.add(move || {
+            if let Some(download) = handle_for_cancel.borrow().as_ref() {
+                unsafe {
+                    download.cancel(None);
                 }
-                button.set_sensitive(false);
-            });
-        }
+            }
+        });
         {
             let handle = handle.clone();
-            let progress = progress.clone();
+            let item = item.clone();
             glib::timeout_add_local(Duration::from_millis(100), move || {
                 let Some(download) = handle.borrow().as_ref().cloned() else {
                     return glib::ControlFlow::Break;
                 };
-                progress.set_fraction(download.progress().fractionCompleted().clamp(0.0, 1.0));
+                item.set_progress(download.progress().fractionCompleted());
                 glib::ControlFlow::Continue
             });
         }
-        self.ivars().downloads.borrow_mut().insert(
-            key,
-            DownloadUi {
-                name,
-                progress,
-                cancel,
-                handle,
-            },
-        );
+        self.ivars()
+            .downloads
+            .borrow_mut()
+            .insert(key, DownloadUi { item, handle });
     }
 
     fn finish_download(&self, download: &WKDownload, error: Option<String>) {
-        let (ui, has_active_downloads) = {
-            let mut downloads = self.ivars().downloads.borrow_mut();
-            let Some(ui) = downloads.remove(&download_key(download)) else {
-                return;
-            };
-            (ui, !downloads.is_empty())
+        let Some(ui) = self
+            .ivars()
+            .downloads
+            .borrow_mut()
+            .remove(&download_key(download))
+        else {
+            return;
         };
         ui.handle.borrow_mut().take();
-        ui.cancel.set_visible(false);
-        ui.progress.set_show_text(true);
-        let failed = error.is_some();
         if let Some(error) = error {
-            ui.progress.set_text(Some(&format!("Failed: {error}")));
+            ui.item.fail(error);
         } else {
-            ui.progress.set_fraction(1.0);
-            ui.progress.set_text(Some("Complete"));
-        }
-        if has_active_downloads {
-            self.ivars()
-                .downloads_button
-                .set_tooltip_text(Some("Downloads in progress"));
-        } else if failed {
-            self.ivars()
-                .downloads_button
-                .set_tooltip_text(Some("Download failed"));
-        } else {
-            self.ivars()
-                .downloads_button
-                .set_tooltip_text(Some("Downloads"));
+            ui.item.finish();
         }
     }
 }
@@ -477,21 +423,7 @@ impl BrowserPane {
         inspector.set_tooltip_text(Some(
             "Web Inspector is available from Safari's Develop menu",
         ));
-        let downloads = gtk::MenuButton::builder()
-            .icon_name("folder-download-symbolic")
-            .tooltip_text("Downloads")
-            .build();
-        let downloads_list = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        downloads_list.set_margin_top(8);
-        downloads_list.set_margin_bottom(8);
-        downloads_list.set_margin_start(8);
-        downloads_list.set_margin_end(8);
-        let downloads_empty = gtk::Label::new(Some("No downloads yet"));
-        downloads_empty.add_css_class("dim-label");
-        downloads_list.append(&downloads_empty);
-        let downloads_popover = gtk::Popover::new();
-        downloads_popover.set_child(Some(&downloads_list));
-        downloads.set_popover(Some(&downloads_popover));
+        let downloads = DownloadManager::new();
         let bookmarks = BookmarkMenu::new(
             &profile,
             {
@@ -541,7 +473,7 @@ impl BrowserPane {
         chrome.append(&zoom_out);
         chrome.append(&zoom_reset);
         chrome.append(&zoom_in);
-        chrome.append(&downloads);
+        chrome.append(&downloads.button());
         chrome.append(&inspector);
 
         let find_entry = gtk::SearchEntry::builder()
@@ -574,13 +506,7 @@ impl BrowserPane {
                 callbacks.on_open_url.clone(),
                 web_widget.downgrade(),
             ),
-            _navigation_delegate: install_navigation_delegate(
-                mtm,
-                &web_view,
-                downloads,
-                downloads_list,
-                downloads_empty,
-            ),
+            _navigation_delegate: install_navigation_delegate(mtm, &web_view, downloads),
             last_url: RefCell::new(String::new()),
             last_title: RefCell::new(String::new()),
             zoom: Cell::new(1.0),
@@ -930,15 +856,11 @@ fn install_ui_delegate(
 fn install_navigation_delegate(
     mtm: MainThreadMarker,
     web_view: &WKWebView,
-    downloads_button: gtk::MenuButton,
-    downloads_list: gtk::Box,
-    downloads_empty: gtk::Label,
+    download_manager: DownloadManager,
 ) -> Retained<BrowserNavigationDelegate> {
     let delegate =
         BrowserNavigationDelegate::alloc(mtm).set_ivars(BrowserNavigationDelegateIvars {
-            downloads_button,
-            downloads_list,
-            downloads_empty,
+            download_manager,
             download_directory: download_directory(),
             downloads: RefCell::new(HashMap::new()),
         });
