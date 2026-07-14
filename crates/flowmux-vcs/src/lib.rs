@@ -13,6 +13,8 @@ use std::path::Path;
 use tokio::process::Command;
 use tracing::warn;
 
+pub mod worktree;
+
 #[derive(Debug, thiserror::Error)]
 pub enum VcsError {
     #[error("not a git repository: {0}")]
