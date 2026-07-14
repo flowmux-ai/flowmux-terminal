@@ -14,6 +14,7 @@ pub mod popover_pos;
 pub mod show_in_folder;
 pub mod sidebar;
 pub mod thorvg;
+pub mod usage_popover;
 pub mod window;
 pub mod workspace_view;
 

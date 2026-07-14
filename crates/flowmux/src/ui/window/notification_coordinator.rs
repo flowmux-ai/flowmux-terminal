@@ -41,6 +41,10 @@ impl NotificationCoordinator {
         self.notifier = notifier;
     }
 
+    pub(super) fn tokio_handle(&self) -> Option<tokio::runtime::Handle> {
+        self.tokio_handle.clone()
+    }
+
     pub(super) fn refresh_launcher_badge(&self) {
         if self.badge_publisher_busy.get() {
             self.badge_dirty.set(true);

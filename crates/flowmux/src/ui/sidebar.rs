@@ -20,6 +20,7 @@
 
 use crate::bridge::{Bridge, GtkCommand};
 use crate::notifications::{NotificationEntry, NotificationStore};
+use crate::ui::usage_popover::UsagePopover;
 use crate::ui::workspace_view::{
     read_tab_dnd_payload_from_drop, tab_dnd_content_formats, tab_dnd_formats_accept_payload,
 };
@@ -93,6 +94,7 @@ impl Sidebar {
         on_close: C,
         bridge: Bridge,
         notifications: NotificationStore,
+        tokio_handle: Option<tokio::runtime::Handle>,
     ) -> Self
     where
         S: Fn(WorkspaceId) + 'static,
@@ -230,16 +232,23 @@ impl Sidebar {
         });
         footer.append(&options_btn);
 
-        // File browser toggle, right-aligned in the footer (opposite the
-        // Options button). Sends `None` so the window dispatcher targets the
-        // focused pane (the footer has no pane context). Same Ctrl+Alt+F path.
+        let footer_spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        footer_spacer.set_hexpand(true);
+        footer.append(&footer_spacer);
+
+        let usage = UsagePopover::new(tokio_handle);
+        footer.append(usage.button());
+
+        // File browser toggle, immediately right of the usage button. Sends
+        // `None` so the window dispatcher targets the focused pane (the footer
+        // has no pane context). Same Ctrl+Alt+F path.
         let file_browser_btn = gtk::Button::from_icon_name("folder-symbolic");
         file_browser_btn.add_css_class("flat");
         file_browser_btn.set_tooltip_text(Some("File browser (Ctrl+Alt+F)"));
         file_browser_btn.set_focus_on_click(false);
         file_browser_btn.add_css_class("flowmux-sidebar-options");
-        file_browser_btn.set_hexpand(true);
         file_browser_btn.set_halign(gtk::Align::End);
+        file_browser_btn.set_widget_name("flowmux-file-browser-button");
         let bridge_for_files = bridge.clone();
         file_browser_btn.connect_clicked(move |_| {
             let bridge = bridge_for_files.clone();
@@ -1438,12 +1447,43 @@ mod tests {
     }
 
     #[gtk::test]
+    fn usage_button_sits_immediately_before_file_browser_button() {
+        if gtk::init().is_err() {
+            return;
+        }
+        let bridge = crate::bridge::Bridge::new().0;
+        let sidebar = Sidebar::new(|_| {}, |_| {}, bridge, NotificationStore::new(), None);
+        let footer = sidebar
+            .root
+            .last_child()
+            .unwrap()
+            .downcast::<gtk::Box>()
+            .unwrap();
+        let mut names = Vec::new();
+        let mut child = footer.first_child();
+        while let Some(widget) = child {
+            names.push(widget.widget_name().to_string());
+            child = widget.next_sibling();
+        }
+
+        let usage = names
+            .iter()
+            .position(|name| name == "flowmux-usage-button")
+            .expect("usage button must exist");
+        let folder = names
+            .iter()
+            .position(|name| name == "flowmux-file-browser-button")
+            .expect("file browser button must exist");
+        assert_eq!(usage + 1, folder);
+    }
+
+    #[gtk::test]
     fn workspace_titles_track_display_title_through_rename() {
         if gtk::init().is_err() {
             return;
         }
         let bridge = crate::bridge::Bridge::new().0;
-        let sidebar = Sidebar::new(|_| {}, |_| {}, bridge, NotificationStore::new());
+        let sidebar = Sidebar::new(|_| {}, |_| {}, bridge, NotificationStore::new(), None);
         let titles = sidebar.workspace_titles();
 
         let mut ws = ws_with_active_terminal_cwd(Some(PathBuf::from("/home/u/dev/projA")));
@@ -1495,7 +1535,7 @@ mod tests {
             return;
         }
         let bridge = crate::bridge::Bridge::new().0;
-        let sidebar = Sidebar::new(|_| {}, |_| {}, bridge, NotificationStore::new());
+        let sidebar = Sidebar::new(|_| {}, |_| {}, bridge, NotificationStore::new(), None);
 
         let workspaces: Vec<Workspace> = (0..4)
             .map(|index| {

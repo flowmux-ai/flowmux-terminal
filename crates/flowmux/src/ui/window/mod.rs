@@ -531,7 +531,13 @@ impl WindowController {
                 let _ = rx.await;
             });
         };
-        let sidebar = Sidebar::new(on_select, on_close, bridge.clone(), notifications.clone());
+        let sidebar = Sidebar::new(
+            on_select,
+            on_close,
+            bridge.clone(),
+            notifications.clone(),
+            tokio_handle.clone(),
+        );
         let agent_bar = AgentBar::new(bridge.clone());
         let agent_bar_attentions = Rc::new(RefCell::new(HashSet::new()));
 

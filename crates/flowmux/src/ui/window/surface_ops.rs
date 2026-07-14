@@ -509,6 +509,7 @@ impl WindowController {
             },
             sidebar_bridge,
             NotificationStore::new(),
+            self.notifications.tokio_handle(),
         );
         sidebar.root.set_size_request(160, -1);
         sidebar.upsert(&workspace);
