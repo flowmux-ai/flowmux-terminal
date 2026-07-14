@@ -20,6 +20,9 @@ Thumbs.db
 *.rpm
 *.AppImage
 
+# Agent-generated planning documents
+/docs/superpowers/
+
 # Local-only upstream tracking (kept out of the published tree)
 /.upstream-cmux/
 /scripts/sync-upstream.sh
