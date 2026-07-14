@@ -135,13 +135,10 @@ async fn read_app_server(home: &Path, path: Option<&OsStr>) -> Result<(Value, Va
             let Ok(value) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
-            match value.get("id").and_then(Value::as_u64) {
-                Some(1) => limits_response = Some(value),
-                Some(2) => usage_response = Some(value),
-                _ => {}
-            }
-            if let (Some(limits), Some(usage)) = (limits_response.take(), usage_response.take()) {
-                return Ok((limits, usage));
+            if let Some(responses) =
+                record_app_server_response(value, &mut limits_response, &mut usage_response)
+            {
+                return Ok(responses);
             }
         }
         Err(UsageError::new(
@@ -161,6 +158,32 @@ async fn read_app_server(home: &Path, path: Option<&OsStr>) -> Result<(Value, Va
     let _ = child.kill().await;
     let _ = child.wait().await;
     result
+}
+
+fn record_app_server_response(
+    value: Value,
+    limits_response: &mut Option<Value>,
+    usage_response: &mut Option<Value>,
+) -> Option<(Value, Value)> {
+    match value.get("id").and_then(Value::as_u64) {
+        Some(1) => {
+            if let Some(usage) = usage_response.take() {
+                Some((value, usage))
+            } else {
+                *limits_response = Some(value);
+                None
+            }
+        }
+        Some(2) => {
+            if let Some(limits) = limits_response.take() {
+                Some((limits, value))
+            } else {
+                *usage_response = Some(value);
+                None
+            }
+        }
+        _ => None,
+    }
 }
 
 fn resolve_codex_executable(home: &Path, path: Option<&OsStr>) -> Option<PathBuf> {
@@ -345,6 +368,30 @@ mod tests {
         assert_eq!(requests[2]["id"], 1);
         assert_eq!(requests[3]["method"], "account/usage/read");
         assert_eq!(requests[3]["id"], 2);
+    }
+
+    #[test]
+    fn out_of_order_responses_are_retained_until_pair_is_complete() {
+        let mut limits = None;
+        let mut usage = None;
+
+        assert!(record_app_server_response(
+            serde_json::json!({"id": 2, "result": {"summary": {}}}),
+            &mut limits,
+            &mut usage,
+        )
+        .is_none());
+        assert!(limits.is_none());
+        assert!(usage.is_some());
+
+        let (limits, usage) = record_app_server_response(
+            serde_json::json!({"id": 1, "result": {"rateLimits": {}}}),
+            &mut limits,
+            &mut usage,
+        )
+        .expect("both responses should now be available");
+        assert_eq!(limits["id"], 1);
+        assert_eq!(usage["id"], 2);
     }
 
     #[cfg(unix)]
