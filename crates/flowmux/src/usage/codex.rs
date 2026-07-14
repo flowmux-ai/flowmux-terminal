@@ -129,8 +129,8 @@ async fn read_app_server() -> Result<(Value, Value), UsageError> {
                 Some(2) => usage_response = Some(value),
                 _ => {}
             }
-            if limits_response.is_some() && usage_response.is_some() {
-                return Ok((limits_response.unwrap(), usage_response.unwrap()));
+            if let (Some(limits), Some(usage)) = (limits_response.take(), usage_response.take()) {
+                return Ok((limits, usage));
             }
         }
         Err(UsageError::new(
