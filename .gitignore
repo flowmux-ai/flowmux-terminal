@@ -16,6 +16,7 @@ Thumbs.db
 # Build artifacts
 /dist
 /build
+/.worktrees/
 *.deb
 *.rpm
 *.AppImage
