@@ -68,9 +68,21 @@ fn app_server_requests() -> Vec<Value> {
 }
 
 async fn read_app_server(home: &Path, path: Option<&OsStr>) -> Result<(Value, Value), UsageError> {
+    read_app_server_with_timeout(home, path, REQUEST_TIMEOUT).await
+}
+
+async fn read_app_server_with_timeout(
+    home: &Path,
+    path: Option<&OsStr>,
+    timeout: Duration,
+) -> Result<(Value, Value), UsageError> {
     let executable = resolve_codex_executable(home, path)
         .ok_or_else(|| UsageError::new(UsageErrorKind::NotInstalled, "Codex CLI was not found."))?;
-    let mut child = Command::new(executable)
+    let mut command = Command::new(executable.program);
+    if let Some(script) = executable.script {
+        command.arg(script);
+    }
+    let mut child = command
         .arg("app-server")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -147,14 +159,13 @@ async fn read_app_server(home: &Path, path: Option<&OsStr>) -> Result<(Value, Va
         ))
     };
 
-    let result = tokio::time::timeout(REQUEST_TIMEOUT, exchange)
-        .await
-        .map_err(|_| {
-            UsageError::new(
-                UsageErrorKind::Timeout,
-                "The Codex usage request timed out.",
-            )
-        })?;
+    let result = match tokio::time::timeout(timeout, exchange).await {
+        Ok(result) => result,
+        Err(_) => Err(UsageError::new(
+            UsageErrorKind::Timeout,
+            "The Codex usage request timed out.",
+        )),
+    };
     let _ = child.kill().await;
     let _ = child.wait().await;
     result
@@ -186,7 +197,13 @@ fn record_app_server_response(
     }
 }
 
-fn resolve_codex_executable(home: &Path, path: Option<&OsStr>) -> Option<PathBuf> {
+#[derive(Debug, PartialEq, Eq)]
+struct CodexExecutable {
+    program: PathBuf,
+    script: Option<PathBuf>,
+}
+
+fn resolve_codex_executable(home: &Path, path: Option<&OsStr>) -> Option<CodexExecutable> {
     let executable_name = format!("codex{}", std::env::consts::EXE_SUFFIX);
     if let Some(candidate) = path
         .into_iter()
@@ -194,7 +211,10 @@ fn resolve_codex_executable(home: &Path, path: Option<&OsStr>) -> Option<PathBuf
         .map(|directory| directory.join(&executable_name))
         .find(|candidate| is_executable(candidate))
     {
-        return Some(candidate);
+        return Some(CodexExecutable {
+            program: candidate,
+            script: None,
+        });
     }
 
     let versions = home.join(".nvm/versions/node");
@@ -204,7 +224,17 @@ fn resolve_codex_executable(home: &Path, path: Option<&OsStr>) -> Option<PathBuf
         .filter_map(|entry| {
             let version = parse_node_version(&entry.file_name())?;
             let candidate = entry.path().join("bin").join(&executable_name);
-            is_executable(&candidate).then_some((version, candidate))
+            let node = entry
+                .path()
+                .join("bin")
+                .join(format!("node{}", std::env::consts::EXE_SUFFIX));
+            (is_executable(&candidate) && is_executable(&node)).then_some((
+                version,
+                CodexExecutable {
+                    program: node,
+                    script: Some(candidate),
+                },
+            ))
         })
         .max_by_key(|(version, _)| *version)
         .map(|(_, candidate)| candidate)
@@ -305,34 +335,77 @@ fn append_snapshot_windows(
 
 fn parse_token_usage_response(value: &Value, day: NaiveDate) -> Result<TokenTotals, UsageError> {
     let result = response_result(value)?;
-    let lifetime = result
-        .get("summary")
-        .and_then(|summary| summary.get("lifetimeTokens"))
-        .and_then(Value::as_u64);
-    let today = result
-        .get("dailyUsageBuckets")
-        .and_then(Value::as_array)
-        .map(|buckets| {
-            buckets
-                .iter()
-                .find(|bucket| {
-                    bucket.get("startDate").and_then(Value::as_str)
-                        == Some(day.format("%Y-%m-%d").to_string().as_str())
-                })
-                .and_then(|bucket| bucket.get("tokens").and_then(Value::as_u64))
-                .unwrap_or(0)
-        });
+    let lifetime = match result.get("summary") {
+        None | Some(Value::Null) => None,
+        Some(Value::Object(summary)) => match summary.get("lifetimeTokens") {
+            None | Some(Value::Null) => None,
+            Some(value) => Some(value.as_u64().ok_or_else(invalid_response)?),
+        },
+        Some(_) => return Err(invalid_response()),
+    };
+    let today = match result.get("dailyUsageBuckets") {
+        None | Some(Value::Null) => None,
+        Some(Value::Array(buckets)) => {
+            let target = day.format("%Y-%m-%d").to_string();
+            let mut today = 0;
+            for bucket in buckets {
+                let bucket = bucket.as_object().ok_or_else(invalid_response)?;
+                let start_date = bucket
+                    .get("startDate")
+                    .and_then(Value::as_str)
+                    .ok_or_else(invalid_response)?;
+                let tokens = bucket
+                    .get("tokens")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(invalid_response)?;
+                if start_date == target {
+                    today = tokens;
+                    break;
+                }
+            }
+            Some(today)
+        }
+        Some(_) => return Err(invalid_response()),
+    };
     Ok(TokenTotals { today, lifetime })
 }
 
 fn response_result(value: &Value) -> Result<&Value, UsageError> {
-    if value.get("error").is_some() {
+    if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
+        let error = error.as_object().ok_or_else(invalid_response)?;
+        error
+            .get("code")
+            .and_then(Value::as_i64)
+            .ok_or_else(invalid_response)?;
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .ok_or_else(invalid_response)?;
+        if is_authentication_error(message) {
+            return Err(UsageError::new(
+                UsageErrorKind::NotLoggedIn,
+                "Check the local Codex login.",
+            ));
+        }
         return Err(UsageError::new(
-            UsageErrorKind::NotLoggedIn,
-            "Check the local Codex login.",
+            UsageErrorKind::InvalidData,
+            "The Codex usage request failed.",
         ));
     }
     value.get("result").ok_or_else(invalid_response)
+}
+
+fn is_authentication_error(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    [
+        "not authenticated",
+        "authentication required",
+        "login required",
+        "not logged in",
+        "unauthorized",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
 }
 
 fn invalid_response() -> UsageError {
@@ -406,7 +479,10 @@ mod tests {
 
         assert_eq!(
             resolve_codex_executable(temp.path(), Some(path_dir.as_os_str())),
-            Some(path_codex)
+            Some(CodexExecutable {
+                program: path_codex,
+                script: None,
+            })
         );
     }
 
@@ -415,11 +491,58 @@ mod tests {
     fn executable_resolution_uses_newest_nvm_version_as_fallback() {
         let temp = tempfile::tempdir().unwrap();
         let older = temp.path().join(".nvm/versions/node/v20.18.0/bin/codex");
+        let older_node = temp.path().join(".nvm/versions/node/v20.18.0/bin/node");
         let newer = temp.path().join(".nvm/versions/node/v22.22.2/bin/codex");
+        let newer_node = temp.path().join(".nvm/versions/node/v22.22.2/bin/node");
         make_executable(&older);
+        make_executable(&older_node);
         make_executable(&newer);
+        make_executable(&newer_node);
 
-        assert_eq!(resolve_codex_executable(temp.path(), None), Some(newer));
+        let resolved = resolve_codex_executable(temp.path(), None).unwrap();
+
+        assert_eq!(resolved.program, newer_node);
+        assert_eq!(resolved.script, Some(newer));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timed_out_app_server_is_reaped_before_returning() {
+        let temp = tempfile::tempdir().unwrap();
+        let path_dir = temp.path().join("bin");
+        let executable = path_dir.join("codex");
+        let pid_file = temp.path().join("pid");
+        fs::create_dir_all(&path_dir).unwrap();
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\nwhile :; do :; done\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions).unwrap();
+
+        let error = read_app_server_with_timeout(
+            temp.path(),
+            Some(path_dir.as_os_str()),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.kind, UsageErrorKind::Timeout);
+        let pid = fs::read_to_string(pid_file).unwrap();
+        let still_running = std::process::Command::new("kill")
+            .args(["-0", pid.trim()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        assert!(!still_running, "timed-out child must already be reaped");
     }
 
     #[cfg(unix)]
@@ -503,5 +626,47 @@ mod tests {
                 lifetime: Some(123456)
             }
         );
+    }
+
+    #[test]
+    fn token_usage_parser_rejects_malformed_today_bucket() {
+        let value = serde_json::json!({"result": {
+            "summary": {"lifetimeTokens": 123456},
+            "dailyUsageBuckets": [
+                {"startDate": "2026-07-14", "tokens": "unknown"}
+            ]
+        }});
+
+        let error =
+            parse_token_usage_response(&value, NaiveDate::from_ymd_opt(2026, 7, 14).unwrap())
+                .unwrap_err();
+
+        assert_eq!(error.kind, UsageErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn non_auth_rpc_error_is_not_reported_as_login_problem() {
+        let value = serde_json::json!({
+            "id": 1,
+            "error": {"code": -32601, "message": "Method not found"}
+        });
+
+        let error = response_result(&value).unwrap_err();
+
+        assert_eq!(error.kind, UsageErrorKind::InvalidData);
+        assert_eq!(error.message, "The Codex usage request failed.");
+    }
+
+    #[test]
+    fn auth_rpc_error_is_reported_as_missing_local_login() {
+        let value = serde_json::json!({
+            "id": 1,
+            "error": {"code": -32600, "message": "Not authenticated"}
+        });
+
+        let error = response_result(&value).unwrap_err();
+
+        assert_eq!(error.kind, UsageErrorKind::NotLoggedIn);
+        assert_eq!(error.message, "Check the local Codex login.");
     }
 }

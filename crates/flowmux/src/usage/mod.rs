@@ -110,7 +110,8 @@ pub(crate) struct ProviderState {
     pub(crate) provider: Provider,
     pub(crate) tokens: Option<Timestamped<TokenTotals>>,
     pub(crate) limits: Option<Timestamped<Vec<UsageWindow>>>,
-    pub(crate) errors: Vec<UsageError>,
+    pub(crate) token_error: Option<UsageError>,
+    pub(crate) limits_error: Option<UsageError>,
 }
 
 impl ProviderState {
@@ -119,20 +120,21 @@ impl ProviderState {
             provider,
             tokens: None,
             limits: None,
-            errors: Vec::new(),
+            token_error: None,
+            limits_error: None,
         }
     }
 
     fn apply(&mut self, update: ProviderRefresh) {
-        self.errors.clear();
         match update.tokens {
             FieldRefresh::Success(value) => {
                 self.tokens = Some(Timestamped {
                     value,
                     updated_at: update.collected_at,
                 });
+                self.token_error = None;
             }
-            FieldRefresh::Failure(error) => self.errors.push(error),
+            FieldRefresh::Failure(error) => self.token_error = Some(error),
         }
         match update.limits {
             FieldRefresh::Success(value) => {
@@ -140,8 +142,9 @@ impl ProviderState {
                     value,
                     updated_at: update.collected_at,
                 });
+                self.limits_error = None;
             }
-            FieldRefresh::Failure(error) => self.errors.push(error),
+            FieldRefresh::Failure(error) => self.limits_error = Some(error),
         }
     }
 }
@@ -202,6 +205,10 @@ impl UsagePanelState {
 pub(crate) fn duration_label(minutes: Option<u64>) -> String {
     match minutes {
         Some(10_080) => "Weekly".into(),
+        Some(1_440) => "1 day".into(),
+        Some(60) => "1 hour".into(),
+        Some(1) => "1 minute".into(),
+        Some(0) => "0 minutes".into(),
         Some(value) if value % 1_440 == 0 => format!("{} days", value / 1_440),
         Some(value) if value % 60 == 0 => format!("{} hours", value / 60),
         Some(value) => format!("{value} minutes"),
@@ -264,7 +271,8 @@ mod tests {
             state.claude.limits.as_ref().unwrap().value[0].used_percent,
             25.0
         );
-        assert_eq!(state.claude.errors.len(), 2);
+        assert!(state.claude.token_error.is_some());
+        assert!(state.claude.limits_error.is_some());
     }
 
     #[test]
@@ -273,6 +281,10 @@ mod tests {
         assert_eq!(duration_label(Some(10_080)), "Weekly");
         assert_eq!(duration_label(Some(4_320)), "3 days");
         assert_eq!(duration_label(Some(90)), "90 minutes");
+        assert_eq!(duration_label(Some(1_440)), "1 day");
+        assert_eq!(duration_label(Some(60)), "1 hour");
+        assert_eq!(duration_label(Some(1)), "1 minute");
+        assert_eq!(duration_label(Some(0)), "0 minutes");
         assert_eq!(duration_label(None), "Usage limit");
     }
 

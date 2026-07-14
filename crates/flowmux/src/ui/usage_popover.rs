@@ -73,9 +73,9 @@ impl UsagePopover {
         let (result_tx, result_rx) = async_channel::bounded(1);
         let state_for_results = state.clone();
         let popover_weak = popover.downgrade();
-        let cards_for_results = cards.clone();
-        let refresh_for_results = refresh_button.clone();
-        let spinner_for_results = spinner.clone();
+        let cards_weak = cards.downgrade();
+        let refresh_weak = refresh_button.downgrade();
+        let spinner_weak = spinner.downgrade();
         gtk::glib::MainContext::default().spawn_local(async move {
             while let Ok(refreshes) = result_rx.recv().await {
                 {
@@ -85,15 +85,18 @@ impl UsagePopover {
                     }
                     state.finish_refresh(Utc::now());
                 }
-                if let Some(popover) = popover_weak.upgrade() {
-                    if popover.is_visible() {
-                        render_usage(
-                            &cards_for_results,
-                            &refresh_for_results,
-                            &spinner_for_results,
-                            &state_for_results.borrow(),
-                        );
-                    }
+                let Some(popover) = popover_weak.upgrade() else {
+                    break;
+                };
+                if popover.is_visible() {
+                    let (Some(cards), Some(refresh), Some(spinner)) = (
+                        cards_weak.upgrade(),
+                        refresh_weak.upgrade(),
+                        spinner_weak.upgrade(),
+                    ) else {
+                        break;
+                    };
+                    render_usage(&cards, &refresh, &spinner, &state_for_results.borrow());
                 }
             }
         });
@@ -251,9 +254,9 @@ fn provider_card(state: &ProviderState, refreshing: bool) -> gtk::Widget {
     }
     content.append(&provider_header);
 
-    let error_messages: HashSet<&str> = state
-        .errors
-        .iter()
+    let error_messages: HashSet<&str> = [state.token_error.as_ref(), state.limits_error.as_ref()]
+        .into_iter()
+        .flatten()
         .map(|error| error.message.as_str())
         .collect();
     let text_rows = provider_text_rows(state);
@@ -261,7 +264,10 @@ fn provider_card(state: &ProviderState, refreshing: bool) -> gtk::Widget {
         let label = gtk::Label::new(Some(text));
         label.set_halign(gtk::Align::Start);
         label.set_wrap(true);
-        if error_messages.contains(text.as_str()) {
+        if error_messages.contains(text.as_str())
+            || text.starts_with("Token data last updated ")
+            || text.starts_with("Rate limits last updated ")
+        {
             label.add_css_class("caption");
             label.add_css_class("dim-label");
         }
@@ -348,14 +354,30 @@ fn provider_text_rows(state: &ProviderState) -> Vec<String> {
         if let Some(lifetime) = tokens.value.lifetime {
             rows.push(format!("Lifetime tokens {}", format_token_count(lifetime)));
         }
+        if state.token_error.is_some() {
+            rows.push(format_field_updated_at("Token data", tokens.updated_at));
+        }
+    }
+    if let Some(limits) = &state.limits {
+        if state.limits_error.is_some() {
+            rows.push(format_field_updated_at("Rate limits", limits.updated_at));
+        }
     }
     let mut seen_errors = HashSet::new();
-    for error in &state.errors {
+    for error in [state.token_error.as_ref(), state.limits_error.as_ref()]
+        .into_iter()
+        .flatten()
+    {
         if seen_errors.insert(error.message.as_str()) {
             rows.push(error.message.clone());
         }
     }
     rows
+}
+
+fn format_field_updated_at(label: &str, value: DateTime<Utc>) -> String {
+    let local: DateTime<Local> = value.into();
+    format!("{label} last updated {}", local.format("%H:%M"))
 }
 
 fn latest_update(state: &ProviderState) -> Option<DateTime<Utc>> {
@@ -430,16 +452,48 @@ mod tests {
                 updated_at: Utc::now(),
             }),
             limits: None,
-            errors: vec![UsageError::new(
+            token_error: Some(UsageError::new(
                 UsageErrorKind::Unauthorized,
                 "Run Claude once to refresh the local login.",
-            )],
+            )),
+            limits_error: None,
         };
 
         let rows = provider_text_rows(&state);
 
         assert!(rows.iter().any(|row| row.contains("Tokens today 12.5K")));
         assert!(rows.iter().any(|row| row.contains("Run Claude once")));
+    }
+
+    #[test]
+    fn partial_failure_marks_only_the_stale_field_timestamp() {
+        let old = Utc::now() - chrono::Duration::minutes(5);
+        let fresh = Utc::now();
+        let mut panel = UsagePanelState::default();
+        panel.apply(ProviderRefresh {
+            provider: Provider::Claude,
+            tokens: FieldRefresh::Success(TokenTotals {
+                today: Some(12_500),
+                lifetime: None,
+            }),
+            limits: FieldRefresh::Success(Vec::new()),
+            collected_at: old,
+        });
+        panel.apply(ProviderRefresh {
+            provider: Provider::Claude,
+            tokens: FieldRefresh::Failure(UsageError::network()),
+            limits: FieldRefresh::Success(Vec::new()),
+            collected_at: fresh,
+        });
+
+        let rows = provider_text_rows(&panel.claude);
+
+        assert!(rows
+            .iter()
+            .any(|row| row.starts_with("Token data last updated ")));
+        assert!(!rows
+            .iter()
+            .any(|row| row.starts_with("Rate limits last updated ")));
     }
 
     #[gtk::test]
@@ -480,6 +534,33 @@ mod tests {
         set_refresh_controls(&refresh, &spinner, true);
         assert!(!refresh.is_sensitive());
         assert!(spinner.is_spinning());
+    }
+
+    #[gtk::test]
+    fn dropping_usage_popover_releases_refresh_widgets() {
+        if gtk::init().is_err() {
+            return;
+        }
+
+        let usage = UsagePopover::new(None);
+        let refresh_weak = {
+            let popover = usage.button().popover().unwrap();
+            let root = popover.child().unwrap();
+            find_named_widget(&root, "flowmux-usage-refresh-button")
+                .unwrap()
+                .downgrade()
+        };
+
+        drop(usage);
+        let context = gtk::glib::MainContext::default();
+        while context.pending() {
+            context.iteration(false);
+        }
+
+        assert!(
+            refresh_weak.upgrade().is_none(),
+            "the refresh receiver must not retain the widget graph"
+        );
     }
 
     fn find_named_widget(root: &gtk::Widget, name: &str) -> Option<gtk::Widget> {

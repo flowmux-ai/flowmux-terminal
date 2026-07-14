@@ -66,18 +66,13 @@ async fn fetch_limits(
                 "The local Claude login was not found.",
             )
         })?;
-    let credentials: Value = serde_json::from_str(&raw).map_err(|_| {
-        UsageError::new(
-            UsageErrorKind::InvalidData,
-            "Could not read the Claude login information.",
-        )
-    })?;
-    let access_token = access_token_from_credentials(&credentials)?;
+    let access_token = access_token_from_credentials(&raw)?;
+    drop(raw);
 
     let request = async {
         let response = client
             .get(USAGE_URL)
-            .bearer_auth(access_token)
+            .bearer_auth(&access_token)
             .header("anthropic-beta", "oauth-2025-04-20")
             .header("accept", "application/json")
             .send()
@@ -108,11 +103,28 @@ async fn fetch_limits(
         })?
 }
 
-fn access_token_from_credentials(value: &Value) -> Result<&str, UsageError> {
-    value
-        .get("claudeAiOauth")
-        .and_then(|oauth| oauth.get("accessToken"))
-        .and_then(Value::as_str)
+#[derive(Deserialize)]
+struct ClaudeCredentials {
+    #[serde(rename = "claudeAiOauth")]
+    oauth: Option<ClaudeOauthCredentials>,
+}
+
+#[derive(Deserialize)]
+struct ClaudeOauthCredentials {
+    #[serde(rename = "accessToken")]
+    access_token: Option<String>,
+}
+
+fn access_token_from_credentials(raw: &str) -> Result<String, UsageError> {
+    let credentials: ClaudeCredentials = serde_json::from_str(raw).map_err(|_| {
+        UsageError::new(
+            UsageErrorKind::InvalidData,
+            "Could not read the Claude login information.",
+        )
+    })?;
+    credentials
+        .oauth
+        .and_then(|oauth| oauth.access_token)
         .filter(|token| !token.is_empty())
         .ok_or_else(|| {
             UsageError::new(
@@ -258,25 +270,37 @@ fn sum_transcript_tree(
     target_day: NaiveDate,
     offset: FixedOffset,
 ) -> Result<u64, UsageError> {
-    if !root.is_dir() {
-        return Err(UsageError::new(
-            UsageErrorKind::NotLoggedIn,
-            "The local Claude usage history was not found.",
-        ));
+    match std::fs::metadata(root) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => {
+            return Err(UsageError::new(
+                UsageErrorKind::NotLoggedIn,
+                "The local Claude usage history was not found.",
+            ));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(UsageError::new(
+                UsageErrorKind::NotLoggedIn,
+                "The local Claude usage history was not found.",
+            ));
+        }
+        Err(_) => return Err(transcript_io_error()),
     }
     let mut directories = vec![root.to_path_buf()];
     let mut files = Vec::new();
     while let Some(directory) = directories.pop() {
-        let entries = std::fs::read_dir(directory).map_err(|_| {
-            UsageError::new(
-                UsageErrorKind::Io,
-                "Could not read the local Claude usage history.",
-            )
-        })?;
-        for entry in entries.flatten() {
+        let entries = std::fs::read_dir(directory).map_err(|_| transcript_io_error())?;
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(_) => return Err(transcript_io_error()),
+            };
             let path = entry.path();
-            let Ok(file_type) = entry.file_type() else {
-                continue;
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(_) => return Err(transcript_io_error()),
             };
             if file_type.is_dir() {
                 directories.push(path);
@@ -291,15 +315,23 @@ fn sum_transcript_tree(
     let mut seen = HashSet::new();
     let mut total = 0_u64;
     for path in files {
-        let Ok(file) = File::open(path) else {
-            continue;
+        let file = match File::open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(_) => return Err(transcript_io_error()),
         };
-        total = total.saturating_add(
-            sum_transcript_reader(BufReader::new(file), target_day, offset, &mut seen)
-                .unwrap_or_default(),
-        );
+        let file_total = sum_transcript_reader(BufReader::new(file), target_day, offset, &mut seen)
+            .map_err(|_| transcript_io_error())?;
+        total = total.saturating_add(file_total);
     }
     Ok(total)
+}
+
+fn transcript_io_error() -> UsageError {
+    UsageError::new(
+        UsageErrorKind::Io,
+        "Could not read the local Claude usage history.",
+    )
 }
 
 fn sum_transcript_reader<R: BufRead>(
@@ -348,6 +380,8 @@ mod tests {
     use super::*;
     use chrono::{FixedOffset, NaiveDate};
     use std::collections::HashSet;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn usage_response_keeps_standard_and_scoped_limits() {
@@ -413,18 +447,61 @@ mod tests {
         assert_eq!(seen.len(), 1);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn transcript_scan_reports_non_not_found_file_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        let transcript = temp.path().join("blocked.jsonl");
+        std::fs::write(&transcript, "{}\n").unwrap();
+        let mut permissions = std::fs::metadata(&transcript).unwrap().permissions();
+        permissions.set_mode(0o000);
+        std::fs::set_permissions(&transcript, permissions).unwrap();
+
+        let result = sum_transcript_tree(
+            temp.path(),
+            NaiveDate::from_ymd_opt(2026, 7, 14).unwrap(),
+            FixedOffset::east_opt(9 * 60 * 60).unwrap(),
+        );
+
+        let mut permissions = std::fs::metadata(&transcript).unwrap().permissions();
+        permissions.set_mode(0o600);
+        std::fs::set_permissions(&transcript, permissions).unwrap();
+        assert_eq!(result.unwrap_err().kind, UsageErrorKind::Io);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transcript_scan_reports_unreadable_root_as_io() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("blocked");
+        let root = parent.join("projects");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut permissions = std::fs::metadata(&parent).unwrap().permissions();
+        permissions.set_mode(0o000);
+        std::fs::set_permissions(&parent, permissions).unwrap();
+
+        let result = sum_transcript_tree(
+            &root,
+            NaiveDate::from_ymd_opt(2026, 7, 14).unwrap(),
+            FixedOffset::east_opt(9 * 60 * 60).unwrap(),
+        );
+
+        let mut permissions = std::fs::metadata(&parent).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&parent, permissions).unwrap();
+        assert_eq!(result.unwrap_err().kind, UsageErrorKind::Io);
+    }
+
     #[test]
     fn credential_parser_extracts_only_access_token() {
-        let value = serde_json::json!({
+        let raw = r#"{
             "claudeAiOauth": {
                 "accessToken": "access-secret",
                 "refreshToken": "refresh-secret"
-            }
-        });
+            },
+            "unrelated": "ignored"
+        }"#;
 
-        assert_eq!(
-            access_token_from_credentials(&value).unwrap(),
-            "access-secret"
-        );
+        assert_eq!(access_token_from_credentials(raw).unwrap(), "access-secret");
     }
 }
