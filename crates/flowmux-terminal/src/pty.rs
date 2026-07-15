@@ -247,6 +247,12 @@ impl Pty {
     /// SIGKILL (unignorable) to the process group and does one final
     /// blocking wait. The master fd is closed before returning.
     /// After this call the Pty is fully consumed — `Drop` becomes a no-op.
+    ///
+    /// Note: with the pty-tee topology the direct child is `flowmuxctl
+    /// pty-tee`, not the user's shell. pty-tee runs its own escalation
+    /// protocol against the inner shell's process group when the outer
+    /// PTY master closes (or when this SIGHUP reaches it). This method
+    /// provides a second backstop in case pty-tee itself is unresponsive.
     pub fn close(mut self, timeout: Duration) -> io::Result<i32> {
         self.hangup();
         let status = Self::reap_with_timeout(&mut self, timeout);
@@ -259,8 +265,12 @@ impl Pty {
     /// from the GTK main thread.
     ///
     /// The master fd is closed synchronously (fast syscall) before this
-    /// returns. The child is reaped on a background thread with the same
-    /// bounded-timeout + SIGKILL logic as [`Self::close`].
+    /// returns. Closing the master causes pty-tee (the direct child) to
+    /// see stdin EOF on the outer PTY, triggering its own bounded
+    /// escalation against the inner shell's process group. This method
+    /// adds a second backstop: the background thread reaps the pty-tee
+    /// process itself with the same bounded-timeout + SIGKILL logic as
+    /// [`Self::close`].
     pub fn close_and_reap_async(mut self, timeout: Duration) {
         self.close_master();
         self.hangup();
@@ -324,11 +334,16 @@ impl Drop for Pty {
         }
         if !self.reaped {
             let mut status: libc::c_int = 0;
-            // Non-blocking best-effort reap. After the master is closed,
-            // the child will typically receive EIO on its next read/write
-            // and exit on its own. Children that ignore SIGHUP and survive
-            // EIO will be reparented to init when this process exits.
-            // This must not block — Drop runs on the GTK main thread.
+            // Non-blocking best-effort reap. The direct child is pty-tee
+            // (not the user's shell). Closing the master triggers pty-tee's
+            // escalation protocol against the inner process group. If pty-tee
+            // has already exited (common case — it reaps its own inner child
+            // and exits cleanly), this waitpid returns immediately. If pty-tee
+            // is somehow still alive, it will be reaped when the background
+            // thread's SIGKILL lands. Must not block — Drop runs on the GTK
+            // main thread. The normal GUI path always registers VTE's
+            // `watch_child` as the external reaper; non-VTE owners must call
+            // `close` or `close_and_reap_async` instead of relying on Drop.
             // ECHILD means VTE's watch_child already reaped; treat as success.
             // SAFETY: standard waitpid usage on our child.
             let rc = unsafe { libc::waitpid(self.child, &mut status, libc::WNOHANG) };

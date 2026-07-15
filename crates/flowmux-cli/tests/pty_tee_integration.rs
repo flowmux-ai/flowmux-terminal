@@ -12,13 +12,16 @@
 //! legacy terminal-widget paths silently swallowed these escapes.
 
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
+
+use libc;
 
 fn flowmuxctl_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_flowmuxctl"))
@@ -466,4 +469,206 @@ fn pane_and_surface_ids_propagate_into_the_notify_envelope() {
         notify.contains("\"surface\":\"22222222-2222-2222-2222-222222222222\""),
         "surface id did not propagate from --surface into the daemon envelope: {notify}"
     );
+}
+
+// ---- Bounded process-lifecycle regression --------------------------
+
+fn with_deadline<T, F>(deadline: Instant, step: Duration, mut probe: F) -> Option<T>
+where
+    F: FnMut() -> Option<T>,
+{
+    loop {
+        if let Some(value) = probe() {
+            return Some(value);
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        thread::sleep(step.min(remaining));
+    }
+}
+
+fn set_nonblocking(fd: &impl AsRawFd) {
+    let fd = fd.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    assert!(
+        flags >= 0,
+        "F_GETFL failed: {}",
+        std::io::Error::last_os_error()
+    );
+    assert_eq!(
+        unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) },
+        0,
+        "F_SETFL(O_NONBLOCK) failed: {}",
+        std::io::Error::last_os_error()
+    );
+}
+
+fn process_state(pid: libc::pid_t) -> Option<u8> {
+    let stat = std::fs::read(format!("/proc/{pid}/stat")).ok()?;
+    let close_paren = stat.windows(2).rposition(|pair| pair == b") ")?;
+    stat.get(close_paren + 2).copied()
+}
+
+fn process_is_running(pid: libc::pid_t) -> bool {
+    match process_state(pid) {
+        None | Some(b'Z') => false,
+        Some(_) => unsafe { libc::kill(pid, 0) == 0 },
+    }
+}
+
+fn direct_children(pid: libc::pid_t) -> Vec<libc::pid_t> {
+    std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))
+        .ok()
+        .into_iter()
+        .flat_map(|children| {
+            children
+                .split_whitespace()
+                .filter_map(|pid| pid.parse().ok())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// Ensures a failed assertion or timeout cannot leave either pty-tee or its
+/// separate inner session alive. Before PID discovery, the inner shell is
+/// found through Linux's direct-children procfs entry.
+struct PtyTeeGuard {
+    child: Child,
+    inner_pgid: Option<libc::pid_t>,
+}
+
+impl Drop for PtyTeeGuard {
+    fn drop(&mut self) {
+        let outer_pid = self.child.id() as libc::pid_t;
+        let groups = self
+            .inner_pgid
+            .into_iter()
+            .chain(direct_children(outer_pid));
+        for pgid in groups {
+            unsafe {
+                libc::kill(-pgid, libc::SIGKILL);
+            }
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Closing pty-tee's outer input must boundedly kill a real inner session and
+/// all of its SIGHUP/SIGTERM-ignoring members. Every potentially blocking
+/// observation is non-blocking and guarded by a wall-clock deadline.
+#[test]
+fn pty_tee_escalates_to_sigkill_for_sighup_ignoring_descendant() {
+    const POLL_STEP: Duration = Duration::from_millis(20);
+    const PID_TIMEOUT: Duration = Duration::from_secs(3);
+    const EXIT_TIMEOUT: Duration = Duration::from_secs(3);
+    const GONE_TIMEOUT: Duration = Duration::from_secs(3);
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let socket = tmp.path().join("flowmux.sock");
+    let _rx = spawn_fake_daemon(socket.clone());
+
+    // The shell is the inner session/process-group leader. Ignored signal
+    // dispositions survive exec, so both shell and sleep require SIGKILL.
+    let script = r#"
+trap '' HUP TERM
+sleep 300 &
+DESC=$!
+printf 'PIDS:%d:%d\n' "$$" "$DESC"
+wait "$DESC"
+"#;
+
+    let mut command = Command::new(flowmuxctl_path());
+    command
+        .arg("pty-tee")
+        .arg("--pane")
+        .arg("11111111-1111-1111-1111-111111111111")
+        .arg("--surface")
+        .arg("22222222-2222-2222-2222-222222222222")
+        .arg("--")
+        .arg("/bin/sh")
+        .arg("-c")
+        .arg(script)
+        .env("FLOWMUX_SOCKET_PATH", &socket)
+        .env("FLOWMUX_LOG", "off")
+        .env("FLOWMUX_PTY_TEE_SIGHUP_GRACE_S", "0")
+        .env("FLOWMUX_PTY_TEE_SIGTERM_GRACE_S", "0")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+
+    let child = command.spawn().expect("spawn flowmuxctl pty-tee");
+    let mut guard = PtyTeeGuard {
+        child,
+        inner_pgid: None,
+    };
+    let stdin = guard.child.stdin.take().expect("pty-tee stdin");
+    let mut stdout = guard.child.stdout.take().expect("pty-tee stdout");
+    set_nonblocking(&stdout);
+
+    let mut captured = Vec::new();
+    let discovered = with_deadline(Instant::now() + PID_TIMEOUT, POLL_STEP, || {
+        let mut chunk = [0u8; 256];
+        loop {
+            match stdout.read(&mut chunk) {
+                Ok(0) => return None,
+                Ok(n) => {
+                    captured.extend_from_slice(&chunk[..n]);
+                    assert!(captured.len() <= 4096, "unexpectedly noisy test child");
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("read pty-tee stdout: {error}"),
+            }
+        }
+
+        String::from_utf8_lossy(&captured).lines().find_map(|line| {
+            let marker = line.find("PIDS:")?;
+            let mut pids = line[marker + "PIDS:".len()..].trim().split(':');
+            Some((pids.next()?.parse().ok()?, pids.next()?.parse().ok()?))
+        })
+    });
+    let (shell_pid, descendant_pid) = discovered.unwrap_or_else(|| {
+        panic!(
+            "pty-tee did not report inner shell and descendant PIDs within 3s; captured={:?}",
+            String::from_utf8_lossy(&captured)
+        )
+    });
+    guard.inner_pgid = Some(shell_pid);
+
+    assert!(process_is_running(shell_pid), "inner shell was not running");
+    assert!(
+        process_is_running(descendant_pid),
+        "inner descendant was not running"
+    );
+
+    let close_started = Instant::now();
+    drop(stdin);
+    let status = with_deadline(Instant::now() + EXIT_TIMEOUT, POLL_STEP, || {
+        guard.child.try_wait().expect("try_wait pty-tee")
+    })
+    .expect("pty-tee did not exit within 3s after outer EOF");
+
+    assert!(
+        close_started.elapsed() < EXIT_TIMEOUT,
+        "pty-tee close exceeded its deadline"
+    );
+    assert!(
+        !status.success(),
+        "SIGKILL-escalated inner shell unexpectedly exited successfully: {status:?}"
+    );
+
+    let both_gone = with_deadline(Instant::now() + GONE_TIMEOUT, POLL_STEP, || {
+        (!process_is_running(shell_pid) && !process_is_running(descendant_pid)).then_some(())
+    })
+    .is_some();
+    assert!(
+        both_gone,
+        "inner process group still has running members after bounded escalation: shell={shell_pid}, descendant={descendant_pid}"
+    );
+
+    // The group is confirmed gone; do not signal a potentially reused pgid
+    // from the guard's normal-success cleanup.
+    guard.inner_pgid = None;
 }

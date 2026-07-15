@@ -7,15 +7,15 @@
 //! as structured GUI events. flowmux therefore keeps notification parsing in
 //! a PTY-side sniffer instead of tying it to a toolkit-specific signal.
 //!
-//! `pty-tee` is that sniffer. It is invoked transparently as the
-//! "shell" command by `terminal_pane::spawn`, runs as the terminal pane's
-//! child process, and sits between the pane's outer PTY and the user's real
-//! shell:
+//! `pty-tee` is that sniffer. It is invoked transparently by the GUI as the
+//! direct child of the outer `forkpty()` (via `flowmuxctl pty-tee -- <shell>`),
+//! and in turn opens an *inner* PTY on which it runs the user's real shell in
+//! a fresh session/process-group:
 //!
 //! ```text
-//!     terminal pane  <-->  outer PTY (stdin/stdout)  <-->  pty-tee  <-->  inner PTY  <-->  shell
-//!                                                  |
-//!                                                  +--> OscExtractor --> Request::Notify
+//!   GUI (VTE) <--> outer PTY <-->(pane child process) pty-tee <--> inner PTY <--> shell (new session/pgid)
+//!                                                |
+//!                                                +--> OscExtractor --> IPC Request::Notify
 //! ```
 //!
 //! Bytes flow verbatim except for cursor-key normalization while a
@@ -25,6 +25,32 @@
 //! forwarded to the daemon over the existing IPC socket. The shell's
 //! view (its `tty`, its termios, its environment) is unchanged from a
 //! direct terminal spawn.
+//!
+//! ## Process topology & termination
+//!
+//! The GUI creates the outer PTY via `forkpty()` and spawns pty-tee as the
+//! child. pty-tee then opens a second (inner) PTY and forks the real shell
+//! inside it with `setsid()` + `TIOCSCTTY` — the shell runs in its own
+//! session and process group, isolated from the GUI's session.
+//!
+//! When the pane is closed, the GUI closes the outer PTY master (fast,
+//! on the GTK thread). pty-tee sees stdin EOF/HUP, which triggers a
+//! **bounded escalation protocol** against the *inner* process group:
+//!
+//!   1. SIGHUP  → inner process group (graceful "terminal hung up" signal)
+//!   2. Wait 2 s (poll with WNOHANG)
+//!   3. SIGTERM → inner process group (polite termination request)
+//!   4. Wait 2 s
+//!   5. SIGKILL → inner process group (unignorable kill)
+//!   6. Blocking waitpid for the direct child
+//!
+//! The grace durations are configurable via `FLOWMUX_PTY_TEE_SIGHUP_GRACE_S`
+//! and `FLOWMUX_PTY_TEE_SIGTERM_GRACE_S` for integration tests.
+//!
+//! SIGHUP, SIGTERM, SIGINT, SIGWINCH, and SIGCHLD wake the poll loop through
+//! a self-pipe. Termination signals additionally set an atomic flag; the loop
+//! then runs the same bounded escalation used for outer-PTY EOF/HUP. Signal
+//! handlers perform no process management themselves.
 //!
 //! ## Why a separate process
 //!
@@ -52,7 +78,7 @@ use std::os::fd::{AsRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -61,8 +87,12 @@ use std::time::{Duration, Instant};
 /// fds. A self-pipe is the only async-signal-safe way to compose
 /// `poll` with arbitrary signals on stable Rust.
 static SIGNAL_PIPE_WRITE: AtomicI32 = AtomicI32::new(-1);
+static TERMINATION_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-extern "C" fn signal_wakeup_handler(_sig: libc::c_int) {
+extern "C" fn signal_wakeup_handler(sig: libc::c_int) {
+    if matches!(sig, libc::SIGHUP | libc::SIGTERM | libc::SIGINT) {
+        TERMINATION_REQUESTED.store(true, Ordering::Relaxed);
+    }
     let fd = SIGNAL_PIPE_WRITE.load(Ordering::Relaxed);
     if fd >= 0 {
         let buf = [0u8; 1];
@@ -72,6 +102,18 @@ extern "C" fn signal_wakeup_handler(_sig: libc::c_int) {
             libc::write(fd, buf.as_ptr() as *const _, 1);
         }
     }
+}
+
+/// Default grace periods for the termination escalation protocol.
+/// Tunable via env vars for integration tests.
+const DEFAULT_SIGHUP_GRACE: Duration = Duration::from_secs(2);
+const DEFAULT_SIGTERM_GRACE: Duration = Duration::from_secs(2);
+
+fn sig_grace(name: &str, default: Duration) -> Duration {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok().map(Duration::from_secs))
+        .unwrap_or(default)
 }
 
 /// One snooped OSC notification, dispatched on the IPC worker thread.
@@ -163,13 +205,21 @@ fn run_pty_pump(
         let _ = termios::tcsetattr(std::io::stdin(), SetArg::TCSAFLUSH, &raw);
     }
 
-    // 5. Set up the self-pipe and signal handlers for SIGWINCH (window
-    //    resize forwarded to inner) and SIGCHLD (so a quick-exiting
-    //    child wakes the loop instead of blocking in poll for the
-    //    full timeout).
+    // 5. Set up the self-pipe and signal handlers.
+    //
+    // SIGWINCH: forwarded to the inner PTY's winsize so the shell
+    // sees resize events.
+    //
+    // SIGCHLD: wakes the poll loop so a quick-exiting child is reaped
+    // without waiting for the next I/O timeout.
+    //
+    // SIGHUP / SIGTERM / SIGINT: wake the loop and request bounded
+    // escalation instead of terminating pty-tee before it cleans up the
+    // separate inner session/process group.
     let (sig_r, sig_w) = nix::unistd::pipe().context("self-pipe for signal wakeup")?;
     set_nonblocking(sig_r.as_raw_fd())?;
     set_nonblocking(sig_w.as_raw_fd())?;
+    TERMINATION_REQUESTED.store(false, Ordering::Relaxed);
     SIGNAL_PIPE_WRITE.store(sig_w.as_raw_fd(), Ordering::Relaxed);
 
     let sa = nix::sys::signal::SigAction::new(
@@ -178,6 +228,9 @@ fn run_pty_pump(
         nix::sys::signal::SigSet::empty(),
     );
     unsafe {
+        let _ = signal::sigaction(Signal::SIGHUP, &sa);
+        let _ = signal::sigaction(Signal::SIGTERM, &sa);
+        let _ = signal::sigaction(Signal::SIGINT, &sa);
         let _ = signal::sigaction(Signal::SIGWINCH, &sa);
         let _ = signal::sigaction(Signal::SIGCHLD, &sa);
     }
@@ -241,14 +294,20 @@ fn run_pty_pump(
                     break;
                 }
             }
-            // Forward winsize on every wakeup. SIGWINCH is the common
-            // case but it's cheap to refresh on SIGCHLD too.
+            if TERMINATION_REQUESTED.swap(false, Ordering::Relaxed) {
+                exit_code =
+                    escalate_and_reap(child_pid, master_fd, &mut extractor, &pending, &notify_tx);
+                break;
+            }
+
+            // Forward winsize on every non-termination wakeup. SIGWINCH
+            // is the common case but it's cheap to refresh on SIGCHLD too.
             if let Some(ws) = winsize_from_fd(libc::STDIN_FILENO) {
                 let _ = set_winsize(master_fd, &ws);
             }
             cwd_tracker.emit_if_changed(child_pid);
             // Reap the child non-blockingly. If it's gone we drain the
-            // remaining inner-master bytes below and break.
+            // remaining inner-master bytes and break.
             if let Some(code) = try_reap(child_pid) {
                 drain_inner(master_fd, &mut extractor);
                 flush_pending(&pending, &notify_tx);
@@ -264,18 +323,28 @@ fn run_pty_pump(
                     let input = input_modes.rewrite_input(slice);
                     if let Err(e) = write_all(master_fd, input.as_ref()) {
                         tracing::warn!(error = %e, "write to inner master failed; exiting");
-                        let _ = signal::kill(child_pid, Signal::SIGHUP);
-                        drain_inner(master_fd, &mut extractor);
-                        flush_pending(&pending, &notify_tx);
-                        exit_code = 130;
+                        exit_code = escalate_and_reap(
+                            child_pid,
+                            master_fd,
+                            &mut extractor,
+                            &pending,
+                            &notify_tx,
+                        );
                         break;
                     }
                 }
                 ReadOutcome::WouldBlock => {}
                 ReadOutcome::Eof => {
                     // The terminal pane closed the outer end.
-                    // Send SIGHUP so the inner shell can clean up.
-                    let _ = signal::kill(child_pid, Signal::SIGHUP);
+                    // Escalate against the inner process group.
+                    exit_code = escalate_and_reap(
+                        child_pid,
+                        master_fd,
+                        &mut extractor,
+                        &pending,
+                        &notify_tx,
+                    );
+                    break;
                 }
                 ReadOutcome::Err(e) => {
                     tracing::warn!(error = %e, "read on outer stdin failed");
@@ -283,7 +352,9 @@ fn run_pty_pump(
             }
         }
         if fds[0].revents & (libc::POLLHUP | libc::POLLERR) != 0 {
-            let _ = signal::kill(child_pid, Signal::SIGHUP);
+            exit_code =
+                escalate_and_reap(child_pid, master_fd, &mut extractor, &pending, &notify_tx);
+            break;
         }
 
         // 7c. Inner shell → outer terminal + OSC sniffer.
@@ -294,10 +365,13 @@ fn run_pty_pump(
                     extractor.feed(slice);
                     if let Err(e) = write_all(libc::STDOUT_FILENO, slice) {
                         tracing::warn!(error = %e, "write to outer stdout failed; exiting");
-                        let _ = signal::kill(child_pid, Signal::SIGHUP);
-                        drain_inner(master_fd, &mut extractor);
-                        flush_pending(&pending, &notify_tx);
-                        exit_code = 130;
+                        exit_code = escalate_and_reap(
+                            child_pid,
+                            master_fd,
+                            &mut extractor,
+                            &pending,
+                            &notify_tx,
+                        );
                         break;
                     }
                     flush_pending(&pending, &notify_tx);
@@ -330,6 +404,74 @@ fn run_pty_pump(
     drop(_saved_termios);
 
     Ok(exit_code)
+}
+
+// ---- Termination escalation ---------------------------------------
+
+/// Escalate termination signals against the inner child's process
+/// group, then block until the direct child is reaped.
+///
+/// Protocol: SIGHUP → grace → SIGTERM → grace → SIGKILL → waitpid.
+/// Sends signals to `-child_pid` (process group) so *all* processes
+/// in the inner session — shells, agents, background jobs — receive
+/// each signal, not just the direct child.
+///
+/// Grace periods are configurable via `FLOWMUX_PTY_TEE_SIGHUP_GRACE_S`
+/// and `FLOWMUX_PTY_TEE_SIGTERM_GRACE_S` for integration tests.
+fn escalate_and_reap<F: FnMut(&str)>(
+    child_pid: Pid,
+    master_fd: RawFd,
+    extractor: &mut OscExtractor<F>,
+    pending: &Rc<RefCell<Vec<String>>>,
+    notify_tx: &mpsc::Sender<NotifyEvent>,
+) -> i32 {
+    let sighup_grace = sig_grace("FLOWMUX_PTY_TEE_SIGHUP_GRACE_S", DEFAULT_SIGHUP_GRACE);
+    let sigterm_grace = sig_grace("FLOWMUX_PTY_TEE_SIGTERM_GRACE_S", DEFAULT_SIGTERM_GRACE);
+    let poll_step = Duration::from_millis(100);
+
+    // Step 1: SIGHUP to the inner process group.
+    let pgid = -child_pid.as_raw();
+    // SAFETY: kill on negative pid targets the process group.
+    unsafe { libc::kill(pgid, libc::SIGHUP) };
+
+    if let Some(code) = reap_with_timeout(child_pid, sighup_grace, poll_step) {
+        drain_inner(master_fd, extractor);
+        flush_pending(pending, notify_tx);
+        return code;
+    }
+
+    // Step 2: SIGTERM to the inner process group.
+    unsafe { libc::kill(pgid, libc::SIGTERM) };
+
+    if let Some(code) = reap_with_timeout(child_pid, sigterm_grace, poll_step) {
+        drain_inner(master_fd, extractor);
+        flush_pending(pending, notify_tx);
+        return code;
+    }
+
+    // Step 3: SIGKILL (unignorable) to the inner process group.
+    unsafe { libc::kill(pgid, libc::SIGKILL) };
+
+    // Block until the direct child is reaped.
+    let code = wait_blocking(child_pid).unwrap_or(128 + libc::SIGKILL as i32);
+    drain_inner(master_fd, extractor);
+    flush_pending(pending, notify_tx);
+    code
+}
+
+/// Poll `try_reap` every `step` for up to `timeout`. Returns the exit
+/// code when the child is reaped, or `None` on timeout.
+fn reap_with_timeout(pid: Pid, timeout: Duration, step: Duration) -> Option<i32> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(code) = try_reap(pid) {
+            return Some(code);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(step);
+    }
 }
 
 // ---- Child path: exec the shell on the inner slave ----------------

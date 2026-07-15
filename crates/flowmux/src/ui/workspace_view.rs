@@ -607,8 +607,12 @@ impl PaneRegistry {
                 stack.remove(&child);
             }
         }
-        // Clean PaneRegistry indexes.
-        self.terminals.remove(&surface);
+        // Clean PaneRegistry indexes. A single-tab close needs the same
+        // bounded PTY backstop as pane/workspace teardown; merely dropping
+        // the terminal only performs best-effort non-blocking cleanup.
+        if let Some(terminal) = self.terminals.remove(&surface) {
+            terminal.close_pty();
+        }
         if let Some(browser) = self.browsers.remove(&surface) {
             browser.prepare_for_close();
         }

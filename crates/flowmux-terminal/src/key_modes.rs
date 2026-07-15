@@ -15,6 +15,15 @@ pub const LEGACY_INSERT_NEWLINE: &[u8] = b"\x1b\r";
 /// When set, Shift+Enter emits `\x1b[13;2u` instead of `ESC CR`.
 const KITTY_FLAG_DISAMBIGUATE: u32 = 1;
 
+/// Kitty keyboard `CSI = flags ; mode u` modes.
+const KITTY_MODE_SET: u32 = 1;
+const KITTY_MODE_OR: u32 = 2;
+const KITTY_MODE_AND_NOT: u32 = 3;
+
+/// Bound output-controlled stack growth. The Kitty protocol requires a
+/// finite implementation-defined limit and oldest-entry eviction.
+const KITTY_FLAG_STACK_LIMIT: usize = 16;
+
 #[derive(Debug, Default, Clone)]
 pub struct TerminalInputModes {
     application_cursor: bool,
@@ -190,16 +199,24 @@ impl TerminalInputModes {
 
     /// Handle Kitty keyboard progressive enhancement sequences ending in `u`.
     ///
-    /// Supported forms:
+    /// Supported forms (matching the Kitty keyboard protocol):
     /// * `CSI > flags u` — push current flags + set new flags.
-    /// * `CSI = flags ; mode u` — set flags with optional mode.
-    /// * `CSI < u` — pop flags from stack.
-    /// * `CSI < count ; flags u` — pop `count` entries then set `flags`.
+    /// * `CSI = flags ; mode u` — set/OR/AND-NOT flags (mode 1/2/3, default 1).
+    /// * `CSI < u` — pop one entry from the flag stack.
+    /// * `CSI < count u` — pop `count` entries, restoring flags each time.
     fn apply_csi_kitty(&mut self) {
         let params = &self.output_escape[2..self.output_escape.len() - 1];
-        // Push: CSI > flags u
+        // Push: CSI > flags u (flags default to zero when omitted).
         if let Some(flags_str) = params.strip_prefix(b">") {
-            if let Some(flags) = parse_decimal_u32(flags_str) {
+            let flags = if flags_str.is_empty() {
+                Some(0)
+            } else {
+                parse_decimal_u32(flags_str)
+            };
+            if let Some(flags) = flags {
+                if self.flag_stack.len() == KITTY_FLAG_STACK_LIMIT {
+                    self.flag_stack.remove(0);
+                }
                 self.flag_stack.push(self.kitty_flags);
                 self.kitty_flags = flags;
             }
@@ -209,52 +226,37 @@ impl TerminalInputModes {
         // Set: CSI = flags ; mode u
         if let Some(eq_params) = params.strip_prefix(b"=") {
             let mut parts = eq_params.split(|b| *b == b';');
-            if let Some(flags_bytes) = parts.next() {
-                if let Some(flags) = parse_decimal_u32(flags_bytes) {
-                    self.kitty_flags = flags;
-                }
+            let flags = parts.next().and_then(parse_decimal_u32).unwrap_or(0);
+            let mode = parts
+                .next()
+                .and_then(parse_decimal_u32)
+                .unwrap_or(KITTY_MODE_SET);
+            match mode {
+                KITTY_MODE_SET => self.kitty_flags = flags,
+                KITTY_MODE_OR => self.kitty_flags |= flags,
+                KITTY_MODE_AND_NOT => self.kitty_flags &= !flags,
+                _ => {} // Unknown mode: no-op per spec
             }
-            // mode (second parameter) is parsed but not used for
-            // Shift+Enter rewriting; all modes set the flags field.
             return;
         }
 
-        // Pop: CSI < [count] [; flags] u
+        // Pop: CSI < [count] u (count defaults to one). Popping past an
+        // empty stack resets all flags as required by the protocol.
         if let Some(pop_params) = params.strip_prefix(b"<") {
-            if pop_params.is_empty() {
-                // Simple pop: CSI < u — restore one saved state
-                if let Some(prev) = self.flag_stack.pop() {
-                    self.kitty_flags = prev;
-                }
-                return;
-            }
-            let mut parts = pop_params.split(|b| *b == b';');
-            let first = parts.next().unwrap_or(b"");
-            let second = parts.next();
-
-            if second.is_none() && !first.is_empty() {
-                // CSI < count u — pop count times, each restores flags
-                if let Some(count) = parse_decimal_u32(first) {
-                    for _ in 0..count {
-                        if let Some(prev) = self.flag_stack.pop() {
-                            self.kitty_flags = prev;
-                        } else {
+            let count = if pop_params.is_empty() {
+                Some(1)
+            } else {
+                parse_decimal_u32(pop_params)
+            };
+            if let Some(count) = count {
+                for _ in 0..count {
+                    match self.flag_stack.pop() {
+                        Some(prev) => self.kitty_flags = prev,
+                        None => {
+                            self.kitty_flags = 0;
                             break;
                         }
                     }
-                }
-            } else {
-                // CSI < count ; flags u — pop count (discard), then set flags
-                let count = parse_decimal_u32(first).unwrap_or(1);
-                for _ in 0..count {
-                    if self.flag_stack.pop().is_none() {
-                        break;
-                    }
-                }
-                if let Some(flags) = second.and_then(parse_decimal_u32) {
-                    self.kitty_flags = flags;
-                } else if let Some(&top) = self.flag_stack.last() {
-                    self.kitty_flags = top;
                 }
             }
         }
@@ -389,11 +391,51 @@ mod tests {
     }
 
     #[test]
-    fn kitty_set_with_mode() {
+    fn kitty_set_mode1_replace() {
         let mut modes = TerminalInputModes::default();
-        // CSI = 1 ; 1 u — set flags=1 with mode=1 (progressive enhancement)
+        // Start with flags=3 (disambiguate + report event types)
+        modes.observe_output(b"\x1b[>3u");
+        assert_eq!(modes.kitty_flags, 3);
+
+        // CSI = 1 ; 1 u — mode 1 (set/replace): flags = 1
         modes.observe_output(b"\x1b[=1;1u");
+        assert_eq!(modes.kitty_flags, 1);
         assert!(modes.kitty_keyboard_enabled());
+    }
+
+    #[test]
+    fn kitty_set_mode2_or() {
+        let mut modes = TerminalInputModes::default();
+        // Start with flags=2 (report event types, no disambiguate)
+        modes.observe_output(b"\x1b[>2u");
+        assert!(!modes.kitty_keyboard_enabled());
+
+        // CSI = 1 ; 2 u — mode 2 (OR): flags = 2 | 1 = 3
+        modes.observe_output(b"\x1b[=1;2u");
+        assert_eq!(modes.kitty_flags, 3);
+        assert!(modes.kitty_keyboard_enabled());
+    }
+
+    #[test]
+    fn kitty_set_mode3_and_not() {
+        let mut modes = TerminalInputModes::default();
+        // Start with flags=3 (disambiguate + report event types)
+        modes.observe_output(b"\x1b[>3u");
+        assert!(modes.kitty_keyboard_enabled());
+
+        // CSI = 1 ; 3 u — mode 3 (AND-NOT): flags = 3 & ~1 = 2
+        modes.observe_output(b"\x1b[=1;3u");
+        assert_eq!(modes.kitty_flags, 2);
+        assert!(!modes.kitty_keyboard_enabled());
+    }
+
+    #[test]
+    fn kitty_set_defaults_to_mode1() {
+        let mut modes = TerminalInputModes::default();
+        modes.observe_output(b"\x1b[>7u");
+        // CSI = 2 u — no explicit mode, defaults to mode 1 (set)
+        modes.observe_output(b"\x1b[=2u");
+        assert_eq!(modes.kitty_flags, 2);
     }
 
     #[test]
@@ -402,13 +444,24 @@ mod tests {
         modes.observe_output(b"\x1b[>1u");
         assert!(modes.kitty_keyboard_enabled());
 
-        // CSI = 0 ; 0 u — reset to defaults
-        modes.observe_output(b"\x1b[=0;0u");
+        // CSI = 0 ; 1 u — mode 1 (set), flags=0: disambiguate off
+        modes.observe_output(b"\x1b[=0;1u");
         assert!(!modes.kitty_keyboard_enabled());
     }
 
     #[test]
-    fn kitty_pop_with_count_and_flags() {
+    fn kitty_unknown_mode_is_noop() {
+        let mut modes = TerminalInputModes::default();
+        modes.observe_output(b"\x1b[>1u");
+        assert!(modes.kitty_keyboard_enabled());
+
+        // CSI = 0 ; 99 u — unknown mode 99: no-op, flags unchanged
+        modes.observe_output(b"\x1b[=0;99u");
+        assert!(modes.kitty_keyboard_enabled());
+    }
+
+    #[test]
+    fn kitty_pop_count_restores_flags() {
         let mut modes = TerminalInputModes::default();
         // Push three levels: 1, 2, 4
         modes.observe_output(b"\x1b[>1u");
@@ -417,19 +470,35 @@ mod tests {
         // Flag 4 does NOT include bit 0, so disambiguate is off
         assert!(!modes.kitty_keyboard_enabled());
 
-        // CSI < 2 ; 1 u — pop 2 entries, then set flags=1
-        modes.observe_output(b"\x1b[<2;1u");
+        // CSI < 2 u — pop 2 entries, restoring flags=1
+        modes.observe_output(b"\x1b[<2u");
         // After popping 2, we're at flags=1 → disambiguate on
         assert!(modes.kitty_keyboard_enabled());
         assert_eq!(modes.shift_enter_bytes(), KITTY_SHIFT_ENTER);
     }
 
     #[test]
-    fn kitty_pop_empty_stack_is_noop() {
+    fn kitty_pop_empty_stack_resets_flags() {
         let mut modes = TerminalInputModes::default();
-        // Pop on empty stack: should not panic, flags stay 0
+        modes.observe_output(b"\x1b[=1u");
+        assert!(modes.kitty_keyboard_enabled());
+
         modes.observe_output(b"\x1b[<u");
-        assert!(!modes.kitty_keyboard_enabled());
+        assert_eq!(modes.kitty_flags, 0);
+    }
+
+    #[test]
+    fn kitty_push_defaults_to_zero_and_bounds_stack() {
+        let mut modes = TerminalInputModes::default();
+        modes.observe_output(b"\x1b[=1u");
+        modes.observe_output(b"\x1b[>u");
+        assert_eq!(modes.kitty_flags, 0);
+
+        for flags in 1..=KITTY_FLAG_STACK_LIMIT as u32 + 1 {
+            modes.observe_output(format!("\x1b[>{flags}u").as_bytes());
+        }
+        assert_eq!(modes.flag_stack.len(), KITTY_FLAG_STACK_LIMIT);
+        assert_eq!(modes.flag_stack[0], 1);
     }
 
     #[test]
