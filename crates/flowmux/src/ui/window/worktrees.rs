@@ -28,6 +28,48 @@ fn remove_block_reason(_info: &WorktreeInfo, workspace_open: bool) -> Option<Str
 }
 
 impl WindowController {
+    pub(super) fn focus_worktree_panel(&self) {
+        if self.worktrees.panel.widget().is_visible() {
+            if let Some(pane) = self.focused_pane.get() {
+                self.worktrees.source_pane.set(Some(pane));
+            }
+            self.file_browser.active.set(false);
+            self.worktrees.active.set(true);
+            self.worktrees.panel.grab_focus();
+        }
+    }
+
+    pub(super) fn focus_out_of_worktree_panel(&self, dir: FocusDir) {
+        self.worktrees.active.set(false);
+        let Some(from) = self
+            .worktrees
+            .source_pane
+            .get()
+            .or_else(|| self.focused_pane.get())
+        else {
+            return;
+        };
+
+        if dir == FocusDir::Right && self.file_browser.panel.widget().is_visible() {
+            self.file_browser.source_pane.set(Some(from));
+            self.focus_file_browser();
+            return;
+        }
+
+        if dir == FocusDir::Left {
+            self.focused_pane.set(Some(from));
+            self.focus_pane(from);
+            return;
+        }
+
+        let before = self.focused_pane.get();
+        let moved = self.focus_in_direction(from, dir).is_some();
+        if !moved || self.focused_pane.get() == before || self.focused_pane.get().is_none() {
+            self.focused_pane.set(Some(from));
+            self.focus_pane(from);
+        }
+    }
+
     pub(super) async fn show_worktrees_for_pane(&self, pane: PaneId) {
         self.worktrees.source_pane.set(Some(pane));
         self.refresh_worktrees(true).await;

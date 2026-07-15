@@ -294,6 +294,8 @@ pub enum GtkCommand {
     },
     /// Open a worktree in a new workspace or activate its existing workspace.
     OpenWorktree { path: PathBuf },
+    /// Move keyboard focus out of the right-side Git worktree panel.
+    WorktreePanelFocusOut { dir: FocusDir },
     /// Close the worktree panel and restore focus to its source pane.
     WorktreePanelCloseAndRestoreFocus,
     /// Move keyboard focus out of the right-side FileBrowser.

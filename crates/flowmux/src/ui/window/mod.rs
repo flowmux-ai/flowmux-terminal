@@ -658,6 +658,16 @@ impl WindowController {
             worktree_active_for_focus.set(focused);
         });
         let worktree_bridge = bridge.clone();
+        worktree_panel.connect_focus_out(move |dir| {
+            let bridge = worktree_bridge.clone();
+            glib::MainContext::default().spawn_local(async move {
+                let _ = bridge
+                    .tx
+                    .send(GtkCommand::WorktreePanelFocusOut { dir })
+                    .await;
+            });
+        });
+        let worktree_bridge = bridge.clone();
         worktree_panel.connect_close(move || {
             let bridge = worktree_bridge.clone();
             glib::MainContext::default().spawn_local(async move {
@@ -1005,15 +1015,6 @@ impl WindowController {
     }
 
     async fn focus_direction_from_command(&self, from: Option<PaneId>, dir: FocusDir) {
-        // file_browser_active now means the browser actually holds keyboard focus
-        // (driven by connect_focus_changed), so it cleanly disambiguates the two
-        // jobs of this command:
-        //   * browser focused  -> Alt+arrow escapes OUT to a pane.
-        //   * a pane focused    -> Alt+arrow moves between panes / INTO the browser.
-        // `from` (from the keybinding's FocusedPane tracker) equals the source pane
-        // in BOTH cases because focusing the browser does not update that tracker, so
-        // gating on the focus flag is what makes the first Alt+arrow do the right
-        // thing instead of taking two presses.
         if self.file_browser.active.get()
             && self.file_browser.source_pane.get().is_some()
             && (from.is_none() || from == self.file_browser.source_pane.get())
@@ -1022,8 +1023,16 @@ impl WindowController {
             return;
         }
 
+        if self.worktrees.active.get()
+            && self.worktrees.source_pane.get().is_some()
+            && (from.is_none() || from == self.worktrees.source_pane.get())
+        {
+            self.focus_out_of_worktree_panel(dir);
+            return;
+        }
+
         match from {
-            Some(pane) => self.focus_direction_or_file_browser(pane, dir),
+            Some(pane) => self.focus_direction_or_right_tools(pane, dir),
             None => self.focus_first_leaf_of_active_workspace().await,
         }
     }
@@ -1450,6 +1459,7 @@ impl WindowController {
             | GtkCommand::RefreshWorktrees
             | GtkCommand::WorktreesLoaded { .. }
             | GtkCommand::OpenWorktree { .. }
+            | GtkCommand::WorktreePanelFocusOut { .. }
             | GtkCommand::WorktreePanelCloseAndRestoreFocus
             | GtkCommand::ToggleFileBrowser { .. }
             | GtkCommand::OpenImageViewer { .. }
@@ -3681,6 +3691,58 @@ mod tests {
             controller.right_tool_order_for_test(),
             ["content", "worktrees", "files"]
         );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[gtk::test]
+    async fn alt_right_enters_worktrees_then_files_and_alt_left_reverses() {
+        let (controller, _workspace, pane) =
+            build_single_workspace_controller("com.flowmux.App.UiTest.WorktreeFocusOrder").await;
+        controller.worktrees.panel.widget().set_visible(true);
+        controller.file_browser.panel.widget().set_visible(true);
+        controller.window.set_default_size(900, 600);
+        controller.window.present();
+        glib::timeout_future(std::time::Duration::from_millis(50)).await;
+        controller.focused_pane.set(Some(pane));
+        controller.worktrees.source_pane.set(Some(pane));
+        controller.file_browser.source_pane.set(Some(pane));
+
+        controller
+            .focus_direction_from_command(Some(pane), FocusDir::Right)
+            .await;
+        assert!(controller.worktrees.active.get());
+        assert!(!controller.file_browser.active.get());
+
+        controller
+            .focus_direction_from_command(Some(pane), FocusDir::Right)
+            .await;
+        assert!(!controller.worktrees.active.get());
+        assert!(controller.file_browser.active.get());
+
+        controller.focus_out_of_file_browser(FocusDir::Left);
+        assert!(controller.worktrees.active.get());
+        assert!(!controller.file_browser.active.get());
+
+        controller.focus_out_of_worktree_panel(FocusDir::Left);
+        assert!(!controller.worktrees.active.get());
+        assert_eq!(controller.focused_pane.get(), Some(pane));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[gtk::test]
+    async fn closed_worktree_panel_is_skipped() {
+        let (controller, _workspace, pane) =
+            build_single_workspace_controller("com.flowmux.App.UiTest.WorktreeFocusSkip").await;
+        controller.worktrees.panel.widget().set_visible(false);
+        controller.file_browser.panel.widget().set_visible(true);
+        controller.window.set_default_size(900, 600);
+        controller.window.present();
+        glib::timeout_future(std::time::Duration::from_millis(50)).await;
+        controller.focused_pane.set(Some(pane));
+        controller
+            .focus_direction_from_command(Some(pane), FocusDir::Right)
+            .await;
+        assert!(controller.file_browser.active.get());
     }
 
     #[cfg(not(target_os = "macos"))]

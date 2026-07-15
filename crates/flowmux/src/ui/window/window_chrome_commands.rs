@@ -104,6 +104,9 @@ impl WindowController {
             GtkCommand::OpenWorktree { path } => {
                 self.open_worktree_workspace(path).await;
             }
+            GtkCommand::WorktreePanelFocusOut { dir } => {
+                self.focus_out_of_worktree_panel(dir);
+            }
             GtkCommand::WorktreePanelCloseAndRestoreFocus => {
                 self.close_worktree_panel_and_restore_focus();
             }

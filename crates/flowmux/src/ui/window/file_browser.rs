@@ -111,6 +111,7 @@ impl WindowController {
             if let Some(pane) = self.focused_pane.get() {
                 self.file_browser.source_pane.set(Some(pane));
             }
+            self.worktrees.active.set(false);
             self.file_browser.active.set(true);
             self.file_browser.panel.grab_focus();
         }
@@ -130,6 +131,11 @@ impl WindowController {
         // to reach the browser, so the source pane is the one touching it.) Other
         // directions still move relative to the source pane.
         if dir == FocusDir::Left {
+            if self.worktrees.panel.widget().is_visible() {
+                self.worktrees.source_pane.set(Some(from));
+                self.focus_worktree_panel();
+                return;
+            }
             self.focused_pane.set(Some(from));
             self.focus_pane(from);
             return;
@@ -153,9 +159,15 @@ impl WindowController {
             self.focus_pane(pane);
         }
     }
-    pub(super) fn focus_direction_or_file_browser(&self, from: PaneId, dir: FocusDir) {
+    pub(super) fn focus_direction_or_right_tools(&self, from: PaneId, dir: FocusDir) {
         let moved = self.focus_in_direction(from, dir).is_some();
-        if dir == FocusDir::Right && self.file_browser.panel.widget().is_visible() && !moved {
+        if dir != FocusDir::Right || moved {
+            return;
+        }
+        if self.worktrees.panel.widget().is_visible() {
+            self.worktrees.source_pane.set(Some(from));
+            self.focus_worktree_panel();
+        } else if self.file_browser.panel.widget().is_visible() {
             self.file_browser.source_pane.set(Some(from));
             self.focus_file_browser();
         }
