@@ -282,6 +282,10 @@ pub enum GtkCommand {
     /// currently focused pane (used by the side-panel footer button and the
     /// Ctrl+Alt+F keybinding, neither of which has a pane context of its own).
     ToggleFileBrowser { pane: Option<PaneId> },
+    /// Toggle the right-side Git worktree panel for the focused pane.
+    ToggleWorktreePanel { pane: Option<PaneId> },
+    /// Close the worktree panel and restore focus to its source pane.
+    WorktreePanelCloseAndRestoreFocus,
     /// Move keyboard focus out of the right-side FileBrowser.
     FileBrowserFocusOut { dir: FocusDir },
     /// Close the right-side FileBrowser and restore focus to the source pane.

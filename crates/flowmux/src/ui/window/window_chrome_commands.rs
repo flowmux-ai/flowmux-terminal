@@ -88,6 +88,18 @@ impl WindowController {
             GtkCommand::FileBrowserCloseAndRestoreFocus => {
                 self.close_file_browser_and_restore_focus();
             }
+            GtkCommand::ToggleWorktreePanel { pane } => {
+                if self.worktrees.panel.widget().is_visible() {
+                    self.close_worktree_panel_and_restore_focus();
+                } else if let Some(pane) = pane.or_else(|| self.focused_pane.get()) {
+                    self.worktrees.source_pane.set(Some(pane));
+                    self.worktrees.panel.show_loading();
+                    self.position_right_tool_splits();
+                }
+            }
+            GtkCommand::WorktreePanelCloseAndRestoreFocus => {
+                self.close_worktree_panel_and_restore_focus();
+            }
             GtkCommand::ToggleFileBrowser { pane } => {
                 // `None` comes from the side-panel footer button / Ctrl+Alt+F,
                 // which have no pane context — target the focused pane.
@@ -222,6 +234,23 @@ impl WindowController {
                 crate::ui::show_in_folder::open_directory(&path);
             }
             other => unreachable!("non-chrome command routed to window dispatcher: {other:?}"),
+        }
+    }
+
+    fn close_worktree_panel_and_restore_focus(&self) {
+        self.worktrees
+            .generation
+            .set(self.worktrees.generation.get().wrapping_add(1));
+        self.worktrees.active.set(false);
+        self.worktrees.panel.hide();
+        if let Some(pane) = self
+            .worktrees
+            .source_pane
+            .get()
+            .or_else(|| self.focused_pane.get())
+        {
+            self.focused_pane.set(Some(pane));
+            self.focus_pane(pane);
         }
     }
 }

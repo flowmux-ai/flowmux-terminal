@@ -19,6 +19,7 @@ use crate::ui::workspace_view::{
     attach_surface_to_pane, build_surface, build_surface_tab_widget, solo_workspace_pane,
     split_pane_incremental, IncrementalSplitOutcome, MovingSurface, PaneRegistry, TornOffSurface,
 };
+use crate::ui::worktree_panel::WorktreePanel;
 use adw::prelude::*;
 use flowmux_config::cmux_json::{CmuxJson, CommandTarget, CustomCommand};
 use flowmux_core::{
@@ -273,6 +274,19 @@ struct FileBrowserState {
 }
 
 #[derive(Clone)]
+struct WorktreePanelState {
+    source_pane: FocusedPane,
+    active: Rc<Cell<bool>>,
+    generation: Rc<Cell<u64>>,
+    #[allow(dead_code)]
+    repository_root: Rc<RefCell<Option<PathBuf>>>,
+    #[allow(dead_code)]
+    tokio_handle: Option<tokio::runtime::Handle>,
+    split: gtk::Paned,
+    panel: WorktreePanel,
+}
+
+#[derive(Clone)]
 pub struct WindowController {
     pub window: adw::ApplicationWindow,
     pub focused_pane: FocusedPane,
@@ -280,6 +294,7 @@ pub struct WindowController {
     /// Outermost `gtk::Paned` separating the side panel and content area.
     /// Its position is saved to the store on exit and restored on next launch.
     sidebar_split: gtk::Paned,
+    worktrees: WorktreePanelState,
     file_browser: FileBrowserState,
     agent_bar: AgentBarState,
     callbacks: PaneCallbacks,
@@ -493,6 +508,11 @@ impl WindowController {
         let file_browser_source_pane: FocusedPane = Rc::new(Cell::new(None));
         let file_browser_active = Rc::new(Cell::new(false));
         let file_browser_pane_states = Rc::new(RefCell::new(HashMap::new()));
+        let worktree_source_pane: FocusedPane = Rc::new(Cell::new(None));
+        let worktree_active = Rc::new(Cell::new(false));
+        let worktree_generation = Rc::new(Cell::new(0));
+        let worktree_repository_root = Rc::new(RefCell::new(None));
+        let worktree_tokio_handle = tokio_handle.clone();
         let notifications = NotificationStore::new();
         let stack = gtk::Stack::new();
         stack.set_transition_type(gtk::StackTransitionType::Crossfade);
@@ -630,9 +650,37 @@ impl WindowController {
 
         file_browser.widget().set_vexpand(true);
 
-        let file_browser_split = gtk::Paned::builder()
+        let worktree_panel = WorktreePanel::new();
+        let worktree_active_for_focus = worktree_active.clone();
+        worktree_panel.connect_focus_changed(move |focused| {
+            worktree_active_for_focus.set(focused);
+        });
+        let worktree_bridge = bridge.clone();
+        worktree_panel.connect_close(move || {
+            let bridge = worktree_bridge.clone();
+            glib::MainContext::default().spawn_local(async move {
+                let _ = bridge
+                    .tx
+                    .send(GtkCommand::WorktreePanelCloseAndRestoreFocus)
+                    .await;
+            });
+        });
+        worktree_panel.widget().set_vexpand(true);
+
+        let worktree_split = gtk::Paned::builder()
             .orientation(gtk::Orientation::Horizontal)
             .start_child(&split)
+            .end_child(worktree_panel.widget())
+            .resize_start_child(true)
+            .resize_end_child(false)
+            .shrink_start_child(false)
+            .shrink_end_child(false)
+            .position(940)
+            .build();
+
+        let file_browser_split = gtk::Paned::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .start_child(&worktree_split)
             .end_child(file_browser.widget())
             .resize_start_child(true)
             .resize_end_child(false)
@@ -685,6 +733,15 @@ impl WindowController {
                 pane_registry,
             ),
             sidebar_split: split,
+            worktrees: WorktreePanelState {
+                source_pane: worktree_source_pane,
+                active: worktree_active,
+                generation: worktree_generation,
+                repository_root: worktree_repository_root,
+                tokio_handle: worktree_tokio_handle,
+                split: worktree_split,
+                panel: worktree_panel,
+            },
             file_browser: FileBrowserState {
                 source_pane: file_browser_source_pane,
                 active: file_browser_active,
@@ -716,6 +773,27 @@ impl WindowController {
         controller.install_scrollback_persistence();
         controller.install_agent_process_polling();
         controller
+    }
+
+    #[cfg(test)]
+    fn right_tool_order_for_test(&self) -> [&'static str; 3] {
+        assert_eq!(
+            self.file_browser.split.start_child(),
+            Some(self.worktrees.split.clone().upcast())
+        );
+        assert_eq!(
+            self.file_browser.split.end_child(),
+            Some(self.file_browser.panel.widget().clone().upcast())
+        );
+        assert_eq!(
+            self.worktrees.split.start_child(),
+            Some(self.sidebar_split.clone().upcast())
+        );
+        assert_eq!(
+            self.worktrees.split.end_child(),
+            Some(self.worktrees.panel.widget().clone().upcast())
+        );
+        ["content", "worktrees", "files"]
     }
 
     /// Replace the lazily-initialized notifier cell with one shared
@@ -1352,6 +1430,8 @@ impl WindowController {
             | GtkCommand::ShowCommandPalette
             | GtkCommand::FileBrowserFocusOut { .. }
             | GtkCommand::FileBrowserCloseAndRestoreFocus
+            | GtkCommand::ToggleWorktreePanel { .. }
+            | GtkCommand::WorktreePanelCloseAndRestoreFocus
             | GtkCommand::ToggleFileBrowser { .. }
             | GtkCommand::OpenImageViewer { .. }
             | GtkCommand::OpenMarkdownViewer { .. }
@@ -3466,6 +3546,51 @@ mod tests {
             Some(source)
         );
         assert_eq!(file_browser_return_pane(Some(focused), None), Some(focused));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[gtk::test]
+    async fn right_tool_layout_places_worktrees_before_file_browser() {
+        let (controller, _workspace, _pane) =
+            build_single_workspace_controller("com.flowmux.App.UiTest.WorktreeLayout").await;
+        assert_eq!(
+            controller.right_tool_order_for_test(),
+            ["content", "worktrees", "files"]
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[gtk::test]
+    async fn toggle_worktree_panel_command_shows_and_hides_for_focused_pane() {
+        let (controller, _workspace, pane) =
+            build_single_workspace_controller("com.flowmux.App.UiTest.WorktreeToggle").await;
+        controller.window.present();
+        glib::timeout_future(std::time::Duration::from_millis(50)).await;
+        controller.focused_pane.set(Some(pane));
+
+        controller
+            .dispatch(GtkCommand::ToggleWorktreePanel { pane: None })
+            .await;
+        assert_eq!(
+            controller.worktrees.source_pane.get(),
+            Some(pane),
+            "toggle command did not record its focused source pane"
+        );
+        assert!(
+            controller.worktrees.panel.is_open(),
+            "toggle command did not enter the panel's open state"
+        );
+        assert!(
+            controller.worktrees.panel.widget().is_visible(),
+            "toggle command recorded its source but did not reveal the panel"
+        );
+
+        controller
+            .dispatch(GtkCommand::ToggleWorktreePanel { pane: None })
+            .await;
+        assert!(!controller.worktrees.panel.widget().is_visible());
+        assert_eq!(controller.focused_pane.get(), Some(pane));
+        controller.window.close();
     }
 
     #[cfg(not(target_os = "macos"))]

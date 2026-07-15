@@ -312,6 +312,21 @@ pub fn install_actions(
             .build()
     };
 
+    let toggle_worktree_panel = {
+        let bridge = bridge.clone();
+        gtk::gio::ActionEntry::builder("toggle-worktree-panel")
+            .activate(move |_, _, _| {
+                let bridge = bridge.clone();
+                glib::MainContext::default().spawn_local(async move {
+                    let _ = bridge
+                        .tx
+                        .send(GtkCommand::ToggleWorktreePanel { pane: None })
+                        .await;
+                });
+            })
+            .build()
+    };
+
     // Toggle the right-side file browser for the focused pane. `None` lets the
     // window dispatcher resolve the focused pane (same path as the side-panel
     // footer button).
@@ -361,6 +376,7 @@ pub fn install_actions(
         paste,
         insert_newline,
         copy_pane_path,
+        toggle_worktree_panel,
         toggle_file_browser,
     ]);
 }
@@ -997,6 +1013,23 @@ mod tests {
         assert_eq!(
             ActionId::from_wire(ActionId::CopyPanePath.as_str()),
             Some(ActionId::CopyPanePath)
+        );
+    }
+
+    #[test]
+    fn toggle_worktree_panel_default_is_ctrl_alt_w() {
+        assert_eq!(
+            default_for(ActionId::ToggleWorktreePanel),
+            vec!["<Ctrl><Alt>w"]
+        );
+    }
+
+    #[test]
+    fn toggle_worktree_panel_is_user_editable_and_round_trips() {
+        assert!(ActionId::ToggleWorktreePanel.is_user_editable());
+        assert_eq!(
+            ActionId::from_wire("toggle-worktree-panel"),
+            Some(ActionId::ToggleWorktreePanel)
         );
     }
 

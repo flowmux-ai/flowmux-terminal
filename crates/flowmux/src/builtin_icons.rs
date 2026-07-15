@@ -96,6 +96,10 @@ const SYMBOLIC_ICONS: &[SymbolicIcon] = &[
         path: "M2 3h12v10H2zM3.5 4.5v7h9v-7zM4.5 6l1.8 2-1.8 2h1.8L8 8 6.3 6zM8 9.5h3v1H8z",
     },
     SymbolicIcon {
+        name: "vcs-branch-symbolic",
+        path: "M4 2a2 2 0 1 0 1.5 3.3v4.4A2 2 0 1 0 7 11.6V9.8c0-.8.6-1.4 1.4-1.4h1.1A2 2 0 1 0 9.5 7H8.4A2.9 2.9 0 0 0 7 7.4V5.3A2 2 0 0 0 4 2zm0 1.3a.7.7 0 1 1 0 1.4.7.7 0 0 1 0-1.4zm7 0a.7.7 0 1 1 0 1.4.7.7 0 0 1 0-1.4zm-5 8a.7.7 0 1 1 0 1.4.7.7 0 0 1 0-1.4z",
+    },
+    SymbolicIcon {
         name: "view-refresh-symbolic",
         path: "M12.7 5.2A5.2 5.2 0 1 0 13 8h-1.5a3.7 3.7 0 1 1-.9-2.4L8.5 5.6V7h5V2h-1.4z",
     },
@@ -217,6 +221,10 @@ mod tests {
         assert!(tmp
             .path()
             .join("hicolor/scalable/actions/window-close-symbolic.svg")
+            .exists());
+        assert!(tmp
+            .path()
+            .join("hicolor/scalable/actions/vcs-branch-symbolic.svg")
             .exists());
         assert!(tmp
             .path()

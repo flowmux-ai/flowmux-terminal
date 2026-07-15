@@ -239,7 +239,25 @@ impl Sidebar {
         let usage = UsagePopover::new(tokio_handle);
         footer.append(usage.button());
 
-        // File browser toggle, immediately right of the usage button. Sends
+        let worktree_btn = gtk::Button::from_icon_name("vcs-branch-symbolic");
+        worktree_btn.add_css_class("flat");
+        worktree_btn.set_tooltip_text(Some("Worktrees (Ctrl+Alt+W)"));
+        worktree_btn.set_focus_on_click(false);
+        worktree_btn.add_css_class("flowmux-sidebar-options");
+        worktree_btn.set_halign(gtk::Align::End);
+        let bridge_for_worktrees = bridge.clone();
+        worktree_btn.connect_clicked(move |_| {
+            let bridge = bridge_for_worktrees.clone();
+            gtk::glib::MainContext::default().spawn_local(async move {
+                let _ = bridge
+                    .tx
+                    .send(GtkCommand::ToggleWorktreePanel { pane: None })
+                    .await;
+            });
+        });
+        footer.append(&worktree_btn);
+
+        // File browser toggle, immediately right of the worktree button. Sends
         // `None` so the window dispatcher targets the focused pane (the footer
         // has no pane context). Same Ctrl+Alt+F path.
         let file_browser_btn = gtk::Button::from_icon_name("folder-symbolic");

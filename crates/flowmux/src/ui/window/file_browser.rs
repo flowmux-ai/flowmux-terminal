@@ -71,14 +71,30 @@ impl WindowController {
 
             self.save_file_browser_state_for_source();
             self.file_browser.source_pane.set(Some(pane));
-            let width = self.window.width();
-            if width > 420 {
-                self.file_browser.split.set_position((width - 320).max(240));
-            }
             let state = self.file_browser.pane_states.borrow().get(&pane).cloned();
             self.file_browser
                 .panel
                 .show_for_root_with_state(root, state);
+            self.position_right_tool_splits();
+        }
+    }
+    pub(super) fn position_right_tool_splits(&self) {
+        let window_width = self.window.width().max(640);
+        let files_width = if self.file_browser.panel.widget().is_visible() {
+            320
+        } else {
+            0
+        };
+        if files_width > 0 {
+            self.file_browser
+                .split
+                .set_position((window_width - files_width).max(240));
+        }
+        if self.worktrees.panel.widget().is_visible() {
+            let worktree_container_width = window_width - files_width;
+            self.worktrees
+                .split
+                .set_position((worktree_container_width - 340).max(240));
         }
     }
     pub(super) fn save_file_browser_state_for_source(&self) {
