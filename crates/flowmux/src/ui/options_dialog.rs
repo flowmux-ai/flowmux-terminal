@@ -281,7 +281,7 @@ fn about_body_with_version(version: &str) -> String {
         "FlowMux - Agent Workflow Multiplexer Terminal\n\n\
          FlowMux was inspired by the cmux (macOS) project.\n\n\
          Maintained by JSUYA (Junsu Choi).\n\
-         <a href=\"https://github.com/JSUYA/flowmux\">https://github.com/JSUYA/flowmux</a>\n\n\
+         <a href=\"https://github.com/flowmux-ai/flowmux-terminal\">https://github.com/flowmux-ai/flowmux-terminal</a>\n\n\
          Version: v{}",
         version
     )
@@ -765,7 +765,7 @@ mod tests {
         assert!(body.contains("FlowMux was inspired by the cmux (macOS) project."));
         assert!(body.contains("Maintained by JSUYA (Junsu Choi)."));
         assert!(body.contains(
-            "<a href=\"https://github.com/JSUYA/flowmux\">https://github.com/JSUYA/flowmux</a>"
+            "<a href=\"https://github.com/flowmux-ai/flowmux-terminal\">https://github.com/flowmux-ai/flowmux-terminal</a>"
         ));
         assert!(body.ends_with("Version: v9.8.7-6"));
     }
