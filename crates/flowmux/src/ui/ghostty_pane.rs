@@ -52,9 +52,9 @@ pub struct GhosttyPane {
     /// next primary-button press so a fresh click starts clean.
     last_selection: Rc<RefCell<Option<String>>>,
     /// Owns the forked child + PTY master. Kept alive for the pane's lifetime so
-    /// the shell survives; its `Drop` hangs up and reaps the child on pane close.
+    /// the shell survives; pane close starts bounded off-thread group reaping.
     /// VTE renders/IOs a dup of the same master.
-    _pty: Rc<flowmux_terminal::pty::Pty>,
+    _pty: Rc<RefCell<Option<flowmux_terminal::pty::Pty>>>,
 }
 
 /// Shift+Enter input sequence: VTE-era agent TUIs treat ESC+CR as "insert a
@@ -674,7 +674,7 @@ impl GhosttyPane {
             pid,
             last_polled_cwd: Rc::new(RefCell::new(None)),
             last_selection,
-            _pty: Rc::new(pty),
+            _pty: Rc::new(RefCell::new(Some(pty))),
         }
     }
 
@@ -753,6 +753,12 @@ impl GhosttyPane {
 
     pub fn add_controller(&self, controller: impl IsA<gtk::EventController>) {
         self.widget.add_controller(controller);
+    }
+
+    pub fn close_pty(&self) {
+        if let Some(pty) = self._pty.borrow_mut().take() {
+            pty.close_async();
+        }
     }
 }
 

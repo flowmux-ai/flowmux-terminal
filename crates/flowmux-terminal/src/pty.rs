@@ -9,6 +9,10 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::RawFd;
 use std::path::Path;
+use std::time::{Duration, Instant};
+
+const CLOSE_GRACE: Duration = Duration::from_secs(5);
+const REAP_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// A spawned child process attached to a PTY master fd.
 pub struct Pty {
@@ -210,8 +214,37 @@ impl Pty {
     /// Send SIGHUP to the child (used on pane close before reaping).
     pub fn hangup(&mut self) {
         if !self.reaped {
-            // SAFETY: kill on our own child pid.
-            unsafe { libc::kill(self.child, libc::SIGHUP) };
+            signal_process_group(self.child, libc::SIGHUP);
+        }
+    }
+
+    /// Close immediately and reap the child process group off-thread.
+    pub fn close_async(mut self) {
+        self.hangup();
+        self.close_master();
+        self.start_reaper();
+    }
+
+    fn close_master(&mut self) {
+        if self.master >= 0 {
+            // SAFETY: closing our owned fd once.
+            unsafe { libc::close(self.master) };
+            self.master = -1;
+        }
+    }
+
+    fn start_reaper(&mut self) {
+        if self.reaped {
+            return;
+        }
+        let child = self.child;
+        self.reaped = true;
+        if let Err(error) = std::thread::Builder::new()
+            .name("flowmux-pty-reaper".into())
+            .spawn(move || reap_process_group(child, CLOSE_GRACE))
+        {
+            signal_process_group(child, libc::SIGKILL);
+            eprintln!("failed to start PTY reaper: {error}");
         }
     }
 }
@@ -219,18 +252,63 @@ impl Pty {
 impl Drop for Pty {
     fn drop(&mut self) {
         self.hangup();
-        if self.master >= 0 {
-            // SAFETY: closing our owned fd once.
-            unsafe { libc::close(self.master) };
-            self.master = -1;
+        self.close_master();
+        self.start_reaper();
+    }
+}
+
+fn signal_process_group(pid: libc::pid_t, signal: libc::c_int) {
+    // SAFETY: forkpty creates the child as the leader of its own process group.
+    unsafe {
+        libc::kill(-pid, signal);
+    }
+}
+
+fn process_group_exists(pid: libc::pid_t) -> bool {
+    let rc = unsafe { libc::kill(-pid, 0) };
+    rc == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+fn reap_process_group(pid: libc::pid_t, grace: Duration) {
+    let deadline = Instant::now() + grace;
+    let mut child_reaped = false;
+    loop {
+        if !child_reaped {
+            let mut status = 0;
+            let rc = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+            if rc == pid
+                || (rc < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD))
+            {
+                child_reaped = true;
+            } else if rc < 0 && io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                return;
+            }
         }
-        if !self.reaped {
-            let mut status: libc::c_int = 0;
-            // Best-effort reap so we don't leak a zombie.
-            // SAFETY: standard waitpid usage on our child.
-            unsafe { libc::waitpid(self.child, &mut status, 0) };
-            self.reaped = true;
+        if child_reaped && !process_group_exists(pid) {
+            return;
         }
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(REAP_POLL_INTERVAL);
+    }
+
+    signal_process_group(pid, libc::SIGKILL);
+    let kill_deadline = Instant::now() + Duration::from_secs(1);
+    while Instant::now() < kill_deadline {
+        if !child_reaped {
+            let mut status = 0;
+            let rc = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+            if rc == pid
+                || (rc < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD))
+            {
+                child_reaped = true;
+            }
+        }
+        if child_reaped && !process_group_exists(pid) {
+            return;
+        }
+        std::thread::sleep(REAP_POLL_INTERVAL);
     }
 }
 
@@ -266,6 +344,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
     fn envp_strings(envp: Vec<CString>) -> Vec<String> {
@@ -376,5 +455,46 @@ mod tests {
             row.contains("30") && row.contains("100"),
             "stty size output was {row:?}"
         );
+    }
+
+    #[test]
+    fn drop_does_not_block_for_sighup_ignoring_child() {
+        let mut pty = Pty::spawn(
+            &["sh", "-c", "trap '' HUP TERM; printf ready; sleep 60"],
+            None,
+            &[],
+            80,
+            24,
+        )
+        .expect("spawn SIGHUP-ignoring child");
+        let child_pid = pty.child_pid();
+        let mut output = [0u8; 16];
+        let ready_deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match pty.read(&mut output) {
+                Ok(n) if output[..n].windows(5).any(|bytes| bytes == b"ready") => break,
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) => panic!("read child readiness: {error}"),
+            }
+            assert!(
+                Instant::now() < ready_deadline,
+                "timed out waiting for child readiness"
+            );
+        }
+        let (done_tx, done_rx) = mpsc::channel();
+
+        std::thread::spawn(move || {
+            drop(pty);
+            let _ = done_tx.send(());
+        });
+
+        let result = done_rx.recv_timeout(Duration::from_millis(300));
+        // Ensure a failing baseline run cannot leave the process group alive.
+        unsafe {
+            libc::kill(-child_pid, libc::SIGKILL);
+        }
+
+        assert!(result.is_ok(), "Pty::drop blocked waiting for its child");
     }
 }

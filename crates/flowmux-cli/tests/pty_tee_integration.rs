@@ -15,7 +15,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -465,5 +465,114 @@ fn pane_and_surface_ids_propagate_into_the_notify_envelope() {
     assert!(
         notify.contains("\"surface\":\"22222222-2222-2222-2222-222222222222\""),
         "surface id did not propagate from --surface into the daemon envelope: {notify}"
+    );
+}
+
+struct PtyTeeGuard {
+    child: Child,
+    inner_pgid: Option<libc::pid_t>,
+}
+
+impl Drop for PtyTeeGuard {
+    fn drop(&mut self) {
+        if let Some(pgid) = self.inner_pgid {
+            unsafe {
+                libc::kill(-pgid, libc::SIGKILL);
+            }
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn process_exists(pid: libc::pid_t) -> bool {
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+#[test]
+fn pty_tee_outer_eof_kills_signal_ignoring_inner_group() {
+    const POLL_STEP: Duration = Duration::from_millis(20);
+    const PID_TIMEOUT: Duration = Duration::from_secs(3);
+    const EXIT_TIMEOUT: Duration = Duration::from_secs(3);
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let socket = tmp.path().join("flowmux.sock");
+    let pid_file = tmp.path().join("inner-pids");
+    let _rx = spawn_fake_daemon(socket.clone());
+    let script = r#"
+trap '' HUP TERM INT
+sh -c 'trap "" HUP TERM INT; exec sleep 300' &
+printf '%s %s\n' "$$" "$!" > "$FLOWMUX_PTY_TEST_PIDS"
+wait
+"#;
+
+    let mut child = Command::new(flowmuxctl_path())
+        .arg("pty-tee")
+        .arg("--")
+        .arg("sh")
+        .arg("-c")
+        .arg(script)
+        .env("FLOWMUX_SOCKET_PATH", &socket)
+        .env("FLOWMUX_PTY_TEST_PIDS", &pid_file)
+        .env("FLOWMUX_PTY_TEE_SIGHUP_GRACE_MS", "50")
+        .env("FLOWMUX_PTY_TEE_SIGTERM_GRACE_MS", "50")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn pty-tee");
+    let stdin = child.stdin.take().expect("piped stdin");
+    let mut guard = PtyTeeGuard {
+        child,
+        inner_pgid: None,
+    };
+
+    let pid_deadline = Instant::now() + PID_TIMEOUT;
+    let (inner_pid, descendant_pid) = loop {
+        if let Ok(text) = std::fs::read_to_string(&pid_file) {
+            let mut fields = text.split_whitespace();
+            if let (Some(inner), Some(descendant)) = (fields.next(), fields.next()) {
+                if let (Ok(inner), Ok(descendant)) = (inner.parse(), descendant.parse()) {
+                    break (inner, descendant);
+                }
+            }
+        }
+        assert!(
+            Instant::now() < pid_deadline,
+            "timed out waiting for inner process ids"
+        );
+        thread::sleep(POLL_STEP);
+    };
+    guard.inner_pgid = Some(inner_pid);
+    assert!(process_exists(inner_pid), "inner shell was not running");
+    assert!(
+        process_exists(descendant_pid),
+        "inner descendant was not running"
+    );
+
+    drop(stdin);
+
+    let exit_deadline = Instant::now() + EXIT_TIMEOUT;
+    let _status = loop {
+        if let Some(status) = guard.child.try_wait().expect("try_wait pty-tee") {
+            break status;
+        }
+        assert!(
+            Instant::now() < exit_deadline,
+            "pty-tee did not exit after outer EOF"
+        );
+        thread::sleep(POLL_STEP);
+    };
+
+    let gone_deadline = Instant::now() + EXIT_TIMEOUT;
+    while (process_exists(inner_pid) || process_exists(descendant_pid))
+        && Instant::now() < gone_deadline
+    {
+        thread::sleep(POLL_STEP);
+    }
+    assert!(!process_exists(inner_pid), "inner shell survived outer EOF");
+    assert!(
+        !process_exists(descendant_pid),
+        "inner descendant survived outer EOF"
     );
 }

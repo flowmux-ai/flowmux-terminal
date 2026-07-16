@@ -52,7 +52,7 @@ use std::os::fd::{AsRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -61,8 +61,12 @@ use std::time::{Duration, Instant};
 /// fds. A self-pipe is the only async-signal-safe way to compose
 /// `poll` with arbitrary signals on stable Rust.
 static SIGNAL_PIPE_WRITE: AtomicI32 = AtomicI32::new(-1);
+static TERMINATION_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-extern "C" fn signal_wakeup_handler(_sig: libc::c_int) {
+extern "C" fn signal_wakeup_handler(sig: libc::c_int) {
+    if matches!(sig, libc::SIGHUP | libc::SIGTERM | libc::SIGINT) {
+        TERMINATION_REQUESTED.store(true, Ordering::Relaxed);
+    }
     let fd = SIGNAL_PIPE_WRITE.load(Ordering::Relaxed);
     if fd >= 0 {
         let buf = [0u8; 1];
@@ -170,6 +174,7 @@ fn run_pty_pump(
     let (sig_r, sig_w) = nix::unistd::pipe().context("self-pipe for signal wakeup")?;
     set_nonblocking(sig_r.as_raw_fd())?;
     set_nonblocking(sig_w.as_raw_fd())?;
+    TERMINATION_REQUESTED.store(false, Ordering::Relaxed);
     SIGNAL_PIPE_WRITE.store(sig_w.as_raw_fd(), Ordering::Relaxed);
 
     let sa = nix::sys::signal::SigAction::new(
@@ -178,6 +183,9 @@ fn run_pty_pump(
         nix::sys::signal::SigSet::empty(),
     );
     unsafe {
+        let _ = signal::sigaction(Signal::SIGHUP, &sa);
+        let _ = signal::sigaction(Signal::SIGTERM, &sa);
+        let _ = signal::sigaction(Signal::SIGINT, &sa);
         let _ = signal::sigaction(Signal::SIGWINCH, &sa);
         let _ = signal::sigaction(Signal::SIGCHLD, &sa);
     }
@@ -241,6 +249,16 @@ fn run_pty_pump(
                     break;
                 }
             }
+            if TERMINATION_REQUESTED.swap(false, Ordering::Relaxed) {
+                exit_code = terminate_inner_group(
+                    child_pid,
+                    master_fd,
+                    &mut extractor,
+                    &pending,
+                    &notify_tx,
+                );
+                break;
+            }
             // Forward winsize on every wakeup. SIGWINCH is the common
             // case but it's cheap to refresh on SIGCHLD too.
             if let Some(ws) = winsize_from_fd(libc::STDIN_FILENO) {
@@ -264,18 +282,26 @@ fn run_pty_pump(
                     let input = input_modes.rewrite_input(slice);
                     if let Err(e) = write_all(master_fd, input.as_ref()) {
                         tracing::warn!(error = %e, "write to inner master failed; exiting");
-                        let _ = signal::kill(child_pid, Signal::SIGHUP);
-                        drain_inner(master_fd, &mut extractor);
-                        flush_pending(&pending, &notify_tx);
-                        exit_code = 130;
+                        exit_code = terminate_inner_group(
+                            child_pid,
+                            master_fd,
+                            &mut extractor,
+                            &pending,
+                            &notify_tx,
+                        );
                         break;
                     }
                 }
                 ReadOutcome::WouldBlock => {}
                 ReadOutcome::Eof => {
-                    // The terminal pane closed the outer end.
-                    // Send SIGHUP so the inner shell can clean up.
-                    let _ = signal::kill(child_pid, Signal::SIGHUP);
+                    exit_code = terminate_inner_group(
+                        child_pid,
+                        master_fd,
+                        &mut extractor,
+                        &pending,
+                        &notify_tx,
+                    );
+                    break;
                 }
                 ReadOutcome::Err(e) => {
                     tracing::warn!(error = %e, "read on outer stdin failed");
@@ -283,7 +309,9 @@ fn run_pty_pump(
             }
         }
         if fds[0].revents & (libc::POLLHUP | libc::POLLERR) != 0 {
-            let _ = signal::kill(child_pid, Signal::SIGHUP);
+            exit_code =
+                terminate_inner_group(child_pid, master_fd, &mut extractor, &pending, &notify_tx);
+            break;
         }
 
         // 7c. Inner shell → outer terminal + OSC sniffer.
@@ -294,10 +322,13 @@ fn run_pty_pump(
                     extractor.feed(slice);
                     if let Err(e) = write_all(libc::STDOUT_FILENO, slice) {
                         tracing::warn!(error = %e, "write to outer stdout failed; exiting");
-                        let _ = signal::kill(child_pid, Signal::SIGHUP);
-                        drain_inner(master_fd, &mut extractor);
-                        flush_pending(&pending, &notify_tx);
-                        exit_code = 130;
+                        exit_code = terminate_inner_group(
+                            child_pid,
+                            master_fd,
+                            &mut extractor,
+                            &pending,
+                            &notify_tx,
+                        );
                         break;
                     }
                     flush_pending(&pending, &notify_tx);
@@ -330,6 +361,91 @@ fn run_pty_pump(
     drop(_saved_termios);
 
     Ok(exit_code)
+}
+
+fn terminate_inner_group<F: FnMut(&str)>(
+    child_pid: Pid,
+    master_fd: RawFd,
+    extractor: &mut OscExtractor<F>,
+    pending: &Rc<RefCell<Vec<String>>>,
+    notify_tx: &mpsc::Sender<NotifyEvent>,
+) -> i32 {
+    let sighup_grace = termination_grace("FLOWMUX_PTY_TEE_SIGHUP_GRACE_MS", Duration::from_secs(2));
+    let sigterm_grace =
+        termination_grace("FLOWMUX_PTY_TEE_SIGTERM_GRACE_MS", Duration::from_secs(2));
+    let mut exit_code = None;
+    let mut child_reaped = false;
+
+    signal_inner_group(child_pid, Signal::SIGHUP);
+    if !wait_for_group_exit(child_pid, &mut child_reaped, &mut exit_code, sighup_grace) {
+        signal_inner_group(child_pid, Signal::SIGTERM);
+        if !wait_for_group_exit(child_pid, &mut child_reaped, &mut exit_code, sigterm_grace) {
+            signal_inner_group(child_pid, Signal::SIGKILL);
+            let _ = wait_for_group_exit(
+                child_pid,
+                &mut child_reaped,
+                &mut exit_code,
+                Duration::from_secs(1),
+            );
+        }
+    }
+
+    drain_inner(master_fd, extractor);
+    flush_pending(pending, notify_tx);
+    exit_code.unwrap_or(128 + libc::SIGKILL)
+}
+
+fn termination_grace(name: &str, default: Duration) -> Duration {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(default)
+}
+
+fn signal_inner_group(pid: Pid, signal: Signal) {
+    unsafe {
+        libc::kill(-pid.as_raw(), signal as libc::c_int);
+    }
+}
+
+fn process_group_exists(pid: Pid) -> bool {
+    let rc = unsafe { libc::kill(-pid.as_raw(), 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+fn wait_for_group_exit(
+    pid: Pid,
+    child_reaped: &mut bool,
+    exit_code: &mut Option<i32>,
+    timeout: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if !*child_reaped {
+            match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
+                Ok(WaitStatus::Exited(_, code)) => {
+                    *child_reaped = true;
+                    *exit_code = Some(code);
+                }
+                Ok(WaitStatus::Signaled(_, sig, _)) => {
+                    *child_reaped = true;
+                    *exit_code = Some(128 + sig as i32);
+                }
+                Err(nix::errno::Errno::ECHILD) => *child_reaped = true,
+                Err(nix::errno::Errno::EINTR) | Ok(WaitStatus::StillAlive) => {}
+                Err(error) => tracing::warn!(%error, "waitpid failed during PTY shutdown"),
+                Ok(_) => {}
+            }
+        }
+        if *child_reaped && !process_group_exists(pid) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 // ---- Child path: exec the shell on the inner slave ----------------
