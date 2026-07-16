@@ -196,6 +196,20 @@ fn stderr_text(bytes: &[u8]) -> String {
         .collect()
 }
 
+#[cfg(unix)]
+fn path_from_bytes(bytes: &[u8]) -> Result<PathBuf, WorktreeListError> {
+    use std::os::unix::ffi::OsStringExt;
+
+    Ok(std::ffi::OsString::from_vec(bytes.to_vec()).into())
+}
+
+#[cfg(not(unix))]
+fn path_from_bytes(bytes: &[u8]) -> Result<PathBuf, WorktreeListError> {
+    String::from_utf8(bytes.to_vec())
+        .map(PathBuf::from)
+        .map_err(|error| WorktreeListError::InvalidPorcelain(format!("invalid path: {error}")))
+}
+
 async fn read_changes(path: &Path) -> Option<WorktreeChanges> {
     let output = git_output(
         path,
@@ -256,40 +270,40 @@ fn parse_worktree_porcelain(bytes: &[u8]) -> Result<Vec<RawWorktree>, WorktreeLi
             continue;
         }
 
-        let text = std::str::from_utf8(field).map_err(|error| {
-            WorktreeListError::InvalidPorcelain(format!("field is not UTF-8: {error}"))
-        })?;
-        let (key, value) = text.split_once(' ').unwrap_or((text, ""));
-        if key == "worktree" {
+        let (key, value) = field
+            .iter()
+            .position(|byte| *byte == b' ')
+            .map(|index| (&field[..index], &field[index + 1..]))
+            .unwrap_or((field, &[]));
+        if key == b"worktree" {
             if current.is_some() {
                 return Err(WorktreeListError::InvalidPorcelain(
                     "worktree record missing separator".into(),
                 ));
             }
             current = Some(RawWorktree {
-                path: PathBuf::from(value),
+                path: path_from_bytes(value)?,
                 ..RawWorktree::default()
             });
             continue;
         }
 
         let row = current.as_mut().ok_or_else(|| {
-            WorktreeListError::InvalidPorcelain(format!("field {key:?} appeared before worktree"))
+            WorktreeListError::InvalidPorcelain(format!(
+                "field {:?} appeared before worktree",
+                String::from_utf8_lossy(key)
+            ))
         })?;
         match key {
-            "HEAD" => row.head = value.to_string(),
-            "branch" => {
-                row.branch = Some(
-                    value
-                        .strip_prefix("refs/heads/")
-                        .unwrap_or(value)
-                        .to_string(),
-                )
+            b"HEAD" => row.head = String::from_utf8_lossy(value).into_owned(),
+            b"branch" => {
+                let value = value.strip_prefix(b"refs/heads/").unwrap_or(value);
+                row.branch = Some(String::from_utf8_lossy(value).into_owned())
             }
-            "detached" => row.branch = None,
-            "bare" => row.is_bare = true,
-            "locked" => row.lock_reason = Some(value.to_string()),
-            "prunable" => row.prunable_reason = Some(value.to_string()),
+            b"detached" => row.branch = None,
+            b"bare" => row.is_bare = true,
+            b"locked" => row.lock_reason = Some(String::from_utf8_lossy(value).into_owned()),
+            b"prunable" => row.prunable_reason = Some(String::from_utf8_lossy(value).into_owned()),
             _ => {}
         }
     }
@@ -583,6 +597,18 @@ worktree /repo/bare.git\0bare\0\0";
         );
         assert!(rows[3].is_bare);
         assert_eq!(rows[3].head, "");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preserves_non_utf8_worktree_paths() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let input = b"worktree /repo/nonutf-\xff\0HEAD 1111111111111111111111111111111111111111\0branch refs/heads/feature\0\0";
+        let rows = parse_worktree_porcelain(input).unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].path.as_os_str().as_bytes(), b"/repo/nonutf-\xff");
     }
 
     #[test]
