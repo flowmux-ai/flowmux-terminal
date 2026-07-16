@@ -495,6 +495,10 @@ impl WorktreePanel {
             else {
                 return glib::Propagation::Proceed;
             };
+            let button_focused = list
+                .root()
+                .and_then(|root| root.focus())
+                .is_some_and(|focus| focus.is::<gtk::Button>());
             dispatch_key(
                 &list,
                 &scroll,
@@ -504,6 +508,7 @@ impl WorktreePanel {
                 &on_focus_out,
                 key,
                 state,
+                button_focused,
             )
         });
         self.root.add_controller(key);
@@ -519,6 +524,7 @@ impl WorktreePanel {
             &self.on_focus_out,
             key,
             state,
+            false,
         )
     }
 
@@ -578,6 +584,7 @@ fn dispatch_key(
     on_focus_out: &RefCell<Option<Box<dyn Fn(FocusDir)>>>,
     key: gdk::Key,
     state: gdk::ModifierType,
+    button_focused: bool,
 ) -> glib::Propagation {
     if key == gdk::Key::Escape {
         if let Some(callback) = on_close.borrow().as_ref() {
@@ -604,6 +611,9 @@ fn dispatch_key(
             | gdk::ModifierType::CONTROL_MASK
             | gdk::ModifierType::SUPER_MASK,
     ) {
+        return glib::Propagation::Proceed;
+    }
+    if button_focused && (key == gdk::Key::Return || key == gdk::Key::KP_Enter) {
         return glib::Propagation::Proceed;
     }
     dispatch_navigation_key(list, scroll, rows, on_open, key)
@@ -1227,6 +1237,23 @@ mod tests {
             glib::Propagation::Stop
         );
         assert_eq!(*opened.borrow(), Some(PathBuf::from("/repo/feature")));
+
+        *opened.borrow_mut() = None;
+        assert_eq!(
+            dispatch_key(
+                &panel.list,
+                &panel.scroll,
+                &panel.rows,
+                &panel.on_open,
+                &panel.on_close,
+                &panel.on_focus_out,
+                gdk::Key::Return,
+                gdk::ModifierType::empty(),
+                true,
+            ),
+            glib::Propagation::Proceed
+        );
+        assert_eq!(*opened.borrow(), None);
 
         for (key, direction) in [
             (gdk::Key::Left, FocusDir::Left),
