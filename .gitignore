@@ -28,3 +28,4 @@ Thumbs.db
 /.upstream-cmux/
 /scripts/sync-upstream.sh
 /docs/upstream-mapping/
+.tokensave
