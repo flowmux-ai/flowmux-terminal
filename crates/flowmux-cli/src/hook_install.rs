@@ -1473,6 +1473,21 @@ mod tests {
         fake("flowmuxctl", "ctl");
         fake("tmux", "realtmux");
 
+        // A coreutils-only dir (bash + the externals the shim calls) that
+        // deliberately omits any system `tmux`. The "no real tmux installed"
+        // cases run with this on PATH instead of /usr/bin, so they stay
+        // reproducible on CI images that ship tmux in /usr/bin.
+        let tools_dir = dir.path().join("tools");
+        fs::create_dir_all(&tools_dir).unwrap();
+        for tool in ["bash", "dirname", "grep"] {
+            let src = ["/bin", "/usr/bin", "/usr/local/bin"]
+                .iter()
+                .map(|d| std::path::Path::new(d).join(tool))
+                .find(|p| p.exists())
+                .unwrap_or_else(|| panic!("required tool not found: {tool}"));
+            std::os::unix::fs::symlink(src, tools_dir.join(tool)).unwrap();
+        }
+
         let run = |args: &[&str], socket: Option<&str>, shim_env: Option<&str>| {
             let mut cmd = Command::new(shim_dir.join("tmux"));
             // Keep the system dirs so bash/dirname/grep resolve; our
@@ -1538,14 +1553,34 @@ mod tests {
         assert!(calls.starts_with("realtmux:"));
 
         // No real tmux installed: the availability probe still answers
-        // through tmux-compat inside a flowmux pane.
+        // through tmux-compat inside a flowmux pane. Runs on an isolated
+        // PATH (coreutils only, no system tmux) so this holds on CI.
         fs::remove_file(bin_dir.join("tmux")).unwrap();
-        let (status, calls) = run(&["-V"], Some("/tmp/flowmux.sock"), None);
+        let run_no_tmux = |args: &[&str], socket: Option<&str>| {
+            let mut cmd = Command::new(shim_dir.join("tmux"));
+            cmd.args(args).env_clear().env(
+                "PATH",
+                format!(
+                    "{}:{}:{}",
+                    shim_dir.display(),
+                    bin_dir.display(),
+                    tools_dir.display()
+                ),
+            );
+            if let Some(s) = socket {
+                cmd.env("FLOWMUX_SOCKET_PATH", s);
+            }
+            let status = cmd.status().unwrap();
+            let calls = fs::read_to_string(&log).unwrap_or_default();
+            fs::write(&log, "").unwrap();
+            (status, calls)
+        };
+        let (status, calls) = run_no_tmux(&["-V"], Some("/tmp/flowmux.sock"));
         assert!(status.success());
         assert_eq!(calls.trim(), "ctl: tmux-compat -V");
 
         // …but outside a pane it reports tmux as missing.
-        let (status, calls) = run(&["-V"], None, None);
+        let (status, calls) = run_no_tmux(&["-V"], None);
         assert_eq!(status.code(), Some(127));
         assert_eq!(calls.trim(), "");
     }
