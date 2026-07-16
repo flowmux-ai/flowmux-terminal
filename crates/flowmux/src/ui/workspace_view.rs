@@ -8,7 +8,7 @@
 use crate::theme::ResolvedTheme;
 use crate::ui::browser_pane::BrowserPane;
 use crate::ui::ghostty_pane::{is_flatpak_sandbox, GhosttyPane};
-use crate::ui::pane_terminal::{PaneCallbacks, PaneTerminal};
+use crate::ui::pane_terminal::{PaneCallbacks, PaneTerminal, TabDropCommand};
 use flowmux_core::{
     terminal_tab_title_for_cwd, Pane, PaneContent, PaneId, PaneSurface, SplitDirection, Surface,
     SurfaceId, SurfaceKind, Workspace, WorkspaceId,
@@ -1845,8 +1845,7 @@ fn attach_tab_dnd_handlers(
     let target_pane = pane_id;
     let target_surface = surface_id;
     let tab_for_drop = tab.clone();
-    let reorder_cb = callbacks.on_reorder_surface.clone();
-    let move_to_pane_cb = callbacks.on_move_surface_to_pane.clone();
+    let dispatch_tab_drop = callbacks.dispatch_tab_drop.clone();
     let position_of_surface_cb = callbacks.position_of_surface_in_pane.clone();
     let saw_target_for_drop = saw_tab_drop_target.clone();
     let committed_for_drop = committed_tab_drop.clone();
@@ -1860,8 +1859,7 @@ fn attach_tab_dnd_handlers(
         tab_for_drop.remove_css_class("flowmux-pane-tab-drop-after");
         let drop = drop.clone();
         let tab_for_drop = tab_for_drop.clone();
-        let reorder_cb = reorder_cb.clone();
-        let move_to_pane_cb = move_to_pane_cb.clone();
+        let dispatch_tab_drop = dispatch_tab_drop.clone();
         let position_of_surface_cb = position_of_surface_cb.clone();
         gtk::glib::MainContext::default().spawn_local(async move {
             let payload = match read_tab_dnd_payload_from_drop(&drop).await {
@@ -1932,18 +1930,37 @@ fn attach_tab_dnd_handlers(
                 after,
                 "tab drop: dispatching reorder callback"
             );
-            if src_pane == target_pane {
-                (reorder_cb.borrow_mut())(target_pane, src_surface, final_index);
+            let command = if src_pane == target_pane {
+                TabDropCommand::Reorder {
+                    pane: target_pane,
+                    surface: src_surface,
+                    target_index: final_index,
+                }
             } else {
-                (move_to_pane_cb.borrow_mut())(
+                TabDropCommand::MoveToPane {
                     src_pane,
-                    src_surface,
-                    src_surface_model,
-                    target_pane,
-                    final_index,
-                );
+                    surface: src_surface,
+                    surface_model: src_surface_model,
+                    dst_pane: target_pane,
+                    target_index: final_index,
+                }
+            };
+            let Some(ack) = dispatch_tab_drop(command) else {
+                tracing::warn!("tab drop: command bridge is unavailable");
+                drop.finish(gtk::gdk::DragAction::empty());
+                return;
+            };
+            match ack.await {
+                Ok(Ok(())) => drop.finish(gtk::gdk::DragAction::MOVE),
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "tab drop: move rejected");
+                    drop.finish(gtk::gdk::DragAction::empty());
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "tab drop: move acknowledgement dropped");
+                    drop.finish(gtk::gdk::DragAction::empty());
+                }
             }
-            drop.finish(gtk::gdk::DragAction::MOVE);
         });
         true
     });
@@ -2153,8 +2170,7 @@ fn attach_pane_body_dnd(
             false
         }
     });
-    let move_to_pane_cb = callbacks.on_move_surface_to_pane.clone();
-    let split_cb = callbacks.on_split_surface_into_pane.clone();
+    let dispatch_tab_drop = callbacks.dispatch_tab_drop.clone();
     let target_pane = pane_id;
     let saw_drop_target = callbacks.tab_drag_drop_seen.clone();
     let committed_drop = callbacks.tab_drag_drop_committed.clone();
@@ -2174,8 +2190,7 @@ fn attach_pane_body_dnd(
         preview.queue_draw();
 
         let drop = drop.clone();
-        let move_to_pane_cb = move_to_pane_cb.clone();
-        let split_cb = split_cb.clone();
+        let dispatch_tab_drop = dispatch_tab_drop.clone();
         gtk::glib::MainContext::default().spawn_local(async move {
             let payload = match read_tab_dnd_payload_from_drop(&drop).await {
                 Ok(payload) => payload,
@@ -2188,36 +2203,45 @@ fn attach_pane_body_dnd(
             let src_pane = payload.src_pane;
             let src_surface = payload.src_surface;
             let src_surface_model = payload.surface;
-            match landed {
-                PaneDropZone::SplitRight => {
-                    (split_cb.borrow_mut())(
-                        src_pane,
-                        src_surface,
-                        src_surface_model,
-                        target_pane,
-                        SplitDirection::Vertical,
-                    );
+            let command = match landed {
+                PaneDropZone::SplitRight => TabDropCommand::SplitIntoPane {
+                    src_pane,
+                    surface: src_surface,
+                    surface_model: src_surface_model,
+                    dst_pane: target_pane,
+                    direction: SplitDirection::Vertical,
+                },
+                PaneDropZone::SplitDown => TabDropCommand::SplitIntoPane {
+                    src_pane,
+                    surface: src_surface,
+                    surface_model: src_surface_model,
+                    dst_pane: target_pane,
+                    direction: SplitDirection::Horizontal,
+                },
+                PaneDropZone::Tab | PaneDropZone::None => TabDropCommand::MoveToPane {
+                    src_pane,
+                    surface: src_surface,
+                    surface_model: src_surface_model,
+                    dst_pane: target_pane,
+                    target_index: usize::MAX,
+                },
+            };
+            let Some(ack) = dispatch_tab_drop(command) else {
+                tracing::warn!("pane-body tab drop: command bridge is unavailable");
+                drop.finish(gtk::gdk::DragAction::empty());
+                return;
+            };
+            match ack.await {
+                Ok(Ok(())) => drop.finish(gtk::gdk::DragAction::MOVE),
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "pane-body tab drop: move rejected");
+                    drop.finish(gtk::gdk::DragAction::empty());
                 }
-                PaneDropZone::SplitDown => {
-                    (split_cb.borrow_mut())(
-                        src_pane,
-                        src_surface,
-                        src_surface_model,
-                        target_pane,
-                        SplitDirection::Horizontal,
-                    );
-                }
-                PaneDropZone::Tab | PaneDropZone::None => {
-                    (move_to_pane_cb.borrow_mut())(
-                        src_pane,
-                        src_surface,
-                        src_surface_model,
-                        target_pane,
-                        usize::MAX,
-                    );
+                Err(error) => {
+                    tracing::warn!(%error, "pane-body tab drop: move acknowledgement dropped");
+                    drop.finish(gtk::gdk::DragAction::empty());
                 }
             }
-            drop.finish(gtk::gdk::DragAction::MOVE);
         });
         true
     });

@@ -2,6 +2,7 @@
 //! Routes pane widget callbacks into GTK commands.
 
 use super::*;
+use crate::ui::pane_terminal::TabDropCommand;
 
 fn dispatch_detached(bridge: &Bridge, command: GtkCommand) {
     let bridge = bridge.clone();
@@ -21,6 +22,15 @@ fn dispatch_with_ack<T: 'static>(
             let _ = ack_rx.await;
         }
     });
+}
+
+fn dispatch_with_ack_result<T>(
+    bridge: &Bridge,
+    build: impl FnOnce(oneshot::Sender<T>) -> GtkCommand,
+) -> Option<oneshot::Receiver<T>> {
+    let (ack_tx, ack_rx) = oneshot::channel();
+    bridge.tx.try_send(build(ack_tx)).ok()?;
+    Some(ack_rx)
 }
 
 /// Owns the dependencies captured by pane callbacks and builds the callback
@@ -162,38 +172,12 @@ impl PaneCallbackRouter {
                     dispatch_detached(&bridge, GtkCommand::CopySurfaceText { pane, surface });
                 }))
             },
-            on_reorder_surface: {
-                let bridge = bridge.clone();
-                Rc::new(RefCell::new(move |pane, surface, target_index| {
-                    dispatch_with_ack(&bridge, move |ack| GtkCommand::ReorderSurface {
-                        pane,
-                        surface,
-                        target_index,
-                        ack,
-                    });
-                }))
-            },
             on_tab_drag_to_new_window: {
                 let bridge = bridge.clone();
                 Rc::new(RefCell::new(move |pane, surface| {
                     tracing::debug!(%pane, %surface, "tab drag requested tear-off window");
                     dispatch_detached(&bridge, GtkCommand::TearOffSurface { pane, surface });
                 }))
-            },
-            on_move_surface_to_pane: {
-                let bridge = bridge.clone();
-                Rc::new(RefCell::new(
-                    move |src_pane, surface, surface_model, dst_pane, target_index| {
-                        dispatch_with_ack(&bridge, move |ack| GtkCommand::MoveSurfaceToPane {
-                            src_pane,
-                            surface,
-                            surface_model,
-                            dst_pane,
-                            target_index,
-                            ack,
-                        });
-                    },
-                ))
             },
             on_move_surface_to_workspace: {
                 let bridge = bridge.clone();
@@ -228,6 +212,51 @@ impl PaneCallbackRouter {
                         });
                     },
                 ))
+            },
+            dispatch_tab_drop: {
+                let bridge = bridge.clone();
+                Rc::new(move |command| {
+                    dispatch_with_ack_result(&bridge, |ack| match command {
+                        TabDropCommand::MoveToPane {
+                            src_pane,
+                            surface,
+                            surface_model,
+                            dst_pane,
+                            target_index,
+                        } => GtkCommand::MoveSurfaceToPane {
+                            src_pane,
+                            surface,
+                            surface_model,
+                            dst_pane,
+                            target_index,
+                            ack,
+                        },
+                        TabDropCommand::SplitIntoPane {
+                            src_pane,
+                            surface,
+                            surface_model,
+                            dst_pane,
+                            direction,
+                        } => GtkCommand::SplitSurfaceIntoPane {
+                            src_pane,
+                            surface,
+                            surface_model,
+                            dst_pane,
+                            direction,
+                            ack,
+                        },
+                        TabDropCommand::Reorder {
+                            pane,
+                            surface,
+                            target_index,
+                        } => GtkCommand::ReorderSurface {
+                            pane,
+                            surface,
+                            target_index,
+                            ack,
+                        },
+                    })
+                })
             },
             tab_drag_drop_seen,
             tab_drag_drop_committed,
@@ -309,5 +338,41 @@ impl PaneCallbackRouter {
                 }))
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tab_drop_dispatch_exposes_controller_rejection() {
+        let (bridge, command_rx) = Bridge::new();
+        let pane = PaneId::new();
+        let surface = SurfaceId::new();
+        let mut result_rx =
+            dispatch_with_ack_result(&bridge, move |ack| GtkCommand::ReorderSurface {
+                pane,
+                surface,
+                target_index: 0,
+                ack,
+            })
+            .expect("drop command should enter the bridge");
+
+        assert!(matches!(
+            result_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        let command = command_rx.try_recv().expect("queued drop command");
+        let GtkCommand::ReorderSurface { ack, .. } = command else {
+            panic!("expected reorder command");
+        };
+        ack.send(Err("move rejected".to_string()))
+            .expect("drop receiver should still be alive");
+
+        assert_eq!(
+            result_rx.try_recv().expect("controller response"),
+            Err("move rejected".to_string())
+        );
     }
 }

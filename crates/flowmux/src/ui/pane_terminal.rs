@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use flowmux_core::{PaneId, PaneSurface, SplitDirection, SurfaceId, WorkspaceId};
+use tokio::sync::oneshot;
 
 use crate::ui::ghostty_pane::GhosttyPane;
 
@@ -20,6 +21,29 @@ pub type PaneTerminal = GhosttyPane;
 /// Shift+Enter input sequence: insert a literal newline at the prompt without
 /// submitting, after committing any in-progress IME text.
 pub use crate::ui::ghostty_pane::INSERT_NEWLINE_BYTES;
+
+#[derive(Debug, Clone)]
+pub enum TabDropCommand {
+    MoveToPane {
+        src_pane: PaneId,
+        surface: SurfaceId,
+        surface_model: Option<PaneSurface>,
+        dst_pane: PaneId,
+        target_index: usize,
+    },
+    SplitIntoPane {
+        src_pane: PaneId,
+        surface: SurfaceId,
+        surface_model: Option<PaneSurface>,
+        dst_pane: PaneId,
+        direction: SplitDirection,
+    },
+    Reorder {
+        pane: PaneId,
+        surface: SurfaceId,
+        target_index: usize,
+    },
+}
 
 /// Per-pane callbacks the surface backends invoke to drive the window
 /// controller (focus, tab/pane menu actions, title changes, …). Shared by
@@ -53,18 +77,10 @@ pub struct PaneCallbacks {
     /// the same callback is reused by both terminal and browser
     /// right-click menus.
     pub on_copy_surface_text: Rc<RefCell<dyn FnMut(PaneId, SurfaceId)>>,
-    /// Reorder a tab within the same pane by drag and drop. The third argument
-    /// is the final 0-based index after the move, clamped if it exceeds length.
-    pub on_reorder_surface: Rc<RefCell<dyn FnMut(PaneId, SurfaceId, usize)>>,
     /// A tab drag ended without landing on another tab drop target. The caller
     /// moves that live surface into a new top-level window and removes it from
     /// the source pane.
     pub on_tab_drag_to_new_window: Rc<RefCell<dyn FnMut(PaneId, SurfaceId)>>,
-    /// Move a tab into another pane (possibly in another workspace) by drag and
-    /// drop, preserving its live state. Args: source pane, surface, destination
-    /// pane, final 0-based index in the destination (clamped to the end).
-    pub on_move_surface_to_pane:
-        Rc<RefCell<dyn FnMut(PaneId, SurfaceId, Option<PaneSurface>, PaneId, usize)>>,
     /// Move a tab to the last position of the first pane of `dst_workspace`.
     /// Backs the right-click "Move" menu and drops onto a side-panel workspace.
     pub on_move_surface_to_workspace: Rc<RefCell<dyn FnMut(PaneId, SurfaceId, WorkspaceId)>>,
@@ -73,6 +89,9 @@ pub struct PaneCallbacks {
     /// bottom region of a pane body.
     pub on_split_surface_into_pane:
         Rc<RefCell<dyn FnMut(PaneId, SurfaceId, Option<PaneSurface>, PaneId, SplitDirection)>>,
+    /// Dispatch a DnD mutation and return its controller acknowledgement.
+    pub dispatch_tab_drop:
+        Rc<dyn Fn(TabDropCommand) -> Option<oneshot::Receiver<Result<(), String>>>>,
     /// Snapshot of the current workspaces (id + display name) at call time, used
     /// to populate the right-click "Move" submenu so it reflects live state.
     pub list_workspaces: Rc<dyn Fn() -> Vec<(WorkspaceId, String)>>,
@@ -140,11 +159,10 @@ impl PaneCallbacks {
             on_rename_surface: Rc::new(RefCell::new(|_, _| {})),
             on_show_surface_folder: Rc::new(RefCell::new(|_, _| {})),
             on_copy_surface_text: Rc::new(RefCell::new(|_, _| {})),
-            on_reorder_surface: Rc::new(RefCell::new(|_, _, _| {})),
             on_tab_drag_to_new_window: Rc::new(RefCell::new(|_, _| {})),
-            on_move_surface_to_pane: Rc::new(RefCell::new(|_, _, _, _, _| {})),
             on_move_surface_to_workspace: Rc::new(RefCell::new(|_, _, _| {})),
             on_split_surface_into_pane: Rc::new(RefCell::new(|_, _, _, _, _| {})),
+            dispatch_tab_drop: Rc::new(|_| None),
             list_workspaces: Rc::new(Vec::new),
             workspace_of_pane: Rc::new(|_| None),
             tab_drag_drop_seen: Rc::new(Cell::new(false)),
