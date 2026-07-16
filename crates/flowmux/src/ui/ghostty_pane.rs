@@ -930,25 +930,48 @@ fn terminal_current_dir(term: &vte::Terminal, pid: &Rc<Cell<Option<i32>>>) -> Op
         .and_then(|pid| std::fs::read_link(format!("/proc/{pid}/cwd")).ok())
 }
 
-/// AI-agent TUIs (Claude Code and friends) animate the OSC 0 window title
-/// with a spinner, so VTE's `window-title` can change hundreds of times per
-/// second. Every delivered change fans out into a bridge command plus
-/// side-panel, agent-bar, and window-title refreshes on the GTK side, and
-/// each label redraw leaks live heap on the GSK GL renderer (observed with
-/// NVIDIA; the cairo renderer is flat), which is how days of agent use
-/// ratcheted flowmux to 20+ GB resident. Deliver the first change of a
-/// burst immediately, then open a quiet window: while it is open only the
-/// newest title is kept, and the window re-arms for as long as titles keep
-/// changing, so a storm collapses to at most one delivery per window.
+/// AI-agent TUIs animate the OSC 0 title with a spinner. Repainting the tab,
+/// side panel, agent bar, and window title for every frame invalidates most of
+/// the GSK scene and can make adjacent terminal text shimmer. Deliver the first
+/// change immediately, suppress intermediate frames, and deliver the final
+/// title only after a complete quiet window.
 const TITLE_COALESCE_WINDOW_MS: u64 = 200;
 
 #[derive(Default)]
 struct TitleCoalesce {
     /// Last title actually delivered to the callback.
     last_sent: RefCell<String>,
-    /// Newest title seen while the quiet window is open.
+    /// Newest title seen during the current window.
     pending: RefCell<Option<String>>,
+    /// Candidate retained until a full window passes without a newer title.
+    settling: RefCell<Option<String>>,
     window_open: Cell<bool>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum TitleWindowResult {
+    Rearm,
+    Settled(Option<String>),
+}
+
+impl TitleCoalesce {
+    fn finish_window(&self) -> TitleWindowResult {
+        if let Some(title) = self.pending.borrow_mut().take() {
+            *self.settling.borrow_mut() = Some(title);
+            return TitleWindowResult::Rearm;
+        }
+
+        self.window_open.set(false);
+        let title = self
+            .settling
+            .borrow_mut()
+            .take()
+            .filter(|title| *title != *self.last_sent.borrow());
+        if let Some(title) = &title {
+            *self.last_sent.borrow_mut() = title.clone();
+        }
+        TitleWindowResult::Settled(title)
+    }
 }
 
 fn arm_title_coalesce_window(
@@ -959,15 +982,14 @@ fn arm_title_coalesce_window(
 ) {
     glib::timeout_add_local_once(
         std::time::Duration::from_millis(TITLE_COALESCE_WINDOW_MS),
-        move || {
-            let pending = coalesce.pending.borrow_mut().take();
-            match pending {
-                Some(title) if title != *coalesce.last_sent.borrow() => {
-                    *coalesce.last_sent.borrow_mut() = title.clone();
+        move || match coalesce.finish_window() {
+            TitleWindowResult::Rearm => {
+                arm_title_coalesce_window(coalesce, cb, pane_id, surface);
+            }
+            TitleWindowResult::Settled(title) => {
+                if let Some(title) = title {
                     (cb.borrow_mut())(pane_id.get(), surface, title);
-                    arm_title_coalesce_window(coalesce, cb, pane_id, surface);
                 }
-                _ => coalesce.window_open.set(false),
             }
         },
     );
@@ -2287,6 +2309,24 @@ except (ChildProcessError, ValueError):
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn animated_title_storm_only_settles_after_a_quiet_window() {
+        let coalesce = TitleCoalesce::default();
+        *coalesce.last_sent.borrow_mut() = "frame-0".into();
+        coalesce.window_open.set(true);
+
+        for frame in 1..100 {
+            *coalesce.pending.borrow_mut() = Some(format!("frame-{frame}"));
+            assert_eq!(coalesce.finish_window(), TitleWindowResult::Rearm);
+        }
+
+        assert_eq!(
+            coalesce.finish_window(),
+            TitleWindowResult::Settled(Some("frame-99".into()))
+        );
+        assert!(!coalesce.window_open.get());
+    }
 
     #[test]
     fn scrollback_replay_uses_terminal_safe_line_endings() {
