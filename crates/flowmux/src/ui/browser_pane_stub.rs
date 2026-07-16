@@ -102,6 +102,8 @@ impl BrowserPane {
 
     pub fn stop_loading(&self) {}
 
+    pub fn prepare_for_close(&self) {}
+
     pub fn grab_focus(&self) {
         self.web_view.grab_focus();
     }

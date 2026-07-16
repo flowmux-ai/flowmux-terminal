@@ -717,6 +717,10 @@ impl BrowserPane {
         }
     }
 
+    pub fn prepare_for_close(&self) {
+        self.stop_loading();
+    }
+
     pub fn grab_focus(&self) {
         focus_native_view(&self.native.web_view);
     }
