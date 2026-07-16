@@ -18,9 +18,43 @@ fn dispatch_with_ack<T: 'static>(
     glib::MainContext::default().spawn_local(async move {
         let (ack_tx, ack_rx) = oneshot::channel();
         if bridge.tx.send(build(ack_tx)).await.is_ok() {
-            let _ = ack_rx.await;
+            let result = ack_rx.await;
+            if let Err(e) = result.as_ref().map(|_| ()).map_err(|_| "channel closed") {
+                tracing::debug!(
+                    target: "flowmux::dnd",
+                    error = %e,
+                    "dispatch_with_ack: ack channel closed before response"
+                );
+            }
         }
     });
+}
+
+/// Synchronous dispatch with an ack channel returned to the caller so the
+/// drop handler can await the store + widget outcome before calling
+/// `drop.finish()`. Returns `None` if the bridge channel is full or closed.
+fn dispatch_with_ack_sync<T: 'static + std::fmt::Debug>(
+    bridge: &Bridge,
+    build: impl FnOnce(oneshot::Sender<T>) -> GtkCommand + 'static,
+) -> Option<oneshot::Receiver<T>> {
+    let (ack_tx, ack_rx) = oneshot::channel();
+    match bridge.tx.try_send(build(ack_tx)) {
+        Ok(_) => Some(ack_rx),
+        Err(async_channel::TrySendError::Full(_)) => {
+            tracing::warn!(
+                target: "flowmux::dnd",
+                "dispatch_with_ack_sync: bridge channel full, cannot dispatch drop"
+            );
+            None
+        }
+        Err(async_channel::TrySendError::Closed(_)) => {
+            tracing::warn!(
+                target: "flowmux::dnd",
+                "dispatch_with_ack_sync: bridge channel closed, cannot dispatch drop"
+            );
+            None
+        }
+    }
 }
 
 /// Owns the dependencies captured by pane callbacks and builds the callback
@@ -31,8 +65,7 @@ pub(super) struct PaneCallbackRouter {
     options: Rc<RefCell<flowmux_config::options::Options>>,
     pane_registry: Rc<RefCell<PaneRegistry>>,
     workspace_titles: Rc<RefCell<Vec<(WorkspaceId, String)>>>,
-    tab_drag_drop_seen: Rc<Cell<bool>>,
-    tab_drag_drop_committed: Rc<Cell<bool>>,
+    drag_state: Rc<RefCell<DragState>>,
 }
 
 impl PaneCallbackRouter {
@@ -42,8 +75,7 @@ impl PaneCallbackRouter {
         options: Rc<RefCell<flowmux_config::options::Options>>,
         pane_registry: Rc<RefCell<PaneRegistry>>,
         workspace_titles: Rc<RefCell<Vec<(WorkspaceId, String)>>>,
-        tab_drag_drop_seen: Rc<Cell<bool>>,
-        tab_drag_drop_committed: Rc<Cell<bool>>,
+        drag_state: Rc<RefCell<DragState>>,
     ) -> Self {
         Self {
             focused,
@@ -51,8 +83,7 @@ impl PaneCallbackRouter {
             options,
             pane_registry,
             workspace_titles,
-            tab_drag_drop_seen,
-            tab_drag_drop_committed,
+            drag_state,
         }
     }
 
@@ -63,8 +94,7 @@ impl PaneCallbackRouter {
             options,
             pane_registry,
             workspace_titles,
-            tab_drag_drop_seen,
-            tab_drag_drop_committed,
+            drag_state,
         } = self;
         use std::cell::RefCell;
         use std::rc::Rc;
@@ -229,9 +259,55 @@ impl PaneCallbackRouter {
                     },
                 ))
             },
-            tab_drag_drop_seen,
-            tab_drag_drop_committed,
+            drag_state: drag_state.clone(),
             tab_drag_split_candidate: Rc::new(RefCell::new(None)),
+            dispatch_tab_drop: {
+                let bridge = bridge.clone();
+                Rc::new(move |cmd| {
+                    use crate::ui::pane_terminal::TabDropCommand;
+                    dispatch_with_ack_sync(&bridge, |ack| match cmd {
+                        TabDropCommand::MoveToPane {
+                            src_pane,
+                            surface,
+                            surface_model,
+                            dst_pane,
+                            target_index,
+                        } => GtkCommand::MoveSurfaceToPane {
+                            src_pane,
+                            surface,
+                            surface_model,
+                            dst_pane,
+                            target_index,
+                            ack,
+                        },
+                        TabDropCommand::SplitIntoPane {
+                            src_pane,
+                            surface,
+                            surface_model,
+                            dst_pane,
+                            direction,
+                        } => GtkCommand::SplitSurfaceIntoPane {
+                            src_pane,
+                            surface,
+                            surface_model,
+                            dst_pane,
+                            direction,
+                            ack,
+                        },
+                        TabDropCommand::Reorder {
+                            pane,
+                            surface,
+                            target_index,
+                        } => GtkCommand::ReorderSurface {
+                            pane,
+                            surface,
+                            target_index,
+                            ack,
+                        },
+                    })
+                })
+            },
+            drag_in_flight: Rc::new(Cell::new(None)),
             on_terminal_cwd_changed: {
                 let bridge = bridge.clone();
                 Rc::new(RefCell::new(move |pane, surface, cwd| {

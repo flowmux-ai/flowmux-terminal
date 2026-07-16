@@ -656,10 +656,32 @@ impl WindowController {
             return Ok(());
         }
 
-        if !self.pane_registry.borrow().has_pane(dst_pane) {
-            return Err("destination pane is not rendered".to_string());
-        }
+        // Phase 1 — Commit the store transaction FIRST, before touching any
+        // widget. If the store rejects the move we haven't detached anything.
+        let outcome = match self
+            .store
+            .move_surface_to_pane(src_pane, surface, dst_pane, target_index)
+            .await
+        {
+            Some(outcome) => outcome,
+            None => return Err("destination pane no longer exists".to_string()),
+        };
 
+        // Phase 2 — Fetch the workspace snapshot needed for tab-building,
+        // still without mutating the widget tree.
+        let dst_workspace = outcome.dst_workspace;
+        let dst_pane_after = outcome.dst_pane;
+        let surface_after = outcome.surface;
+        let ws = self.store.get_workspace(dst_workspace).await;
+        let surface_model_for_tab = ws.as_ref().and_then(|ws| {
+            ws.surfaces
+                .iter()
+                .find_map(|s| s.root_pane.find_surface(dst_pane_after, surface_after))
+        });
+
+        // Phase 3 — Detach + mount in one uninterrupted section (no .await
+        // between detach and mount). The store is already committed so the
+        // model is the single source of truth.
         let moving = self
             .pane_registry
             .borrow_mut()
@@ -670,35 +692,60 @@ impl WindowController {
                     .import_surface_to_pane(surface_model, dst_pane, target_index)
                     .await;
             }
+            // Widget already absent from the registry; store is committed.
+            // Rerender from the model to repair.
+            if let Some(ws) = ws {
+                self.rerender_workspace(&ws);
+            }
             return Err("source surface is not rendered".to_string());
         };
 
-        let outcome = match self
-            .store
-            .move_surface_to_pane(src_pane, surface, dst_pane, target_index)
-            .await
-        {
-            Some(outcome) => outcome,
-            None => {
-                // Model rejected the move; restore the widget to its source.
-                self.reattach_surface(src_pane, surface, moving).await;
-                return Err("destination pane no longer exists".to_string());
-            }
+        let mounted = if let Some(ref sm) = surface_model_for_tab {
+            let (tab, label) = build_surface_tab_widget(dst_pane_after, sm, true, &self.callbacks);
+            self.pane_registry.borrow_mut().attach_moved_surface(
+                dst_pane_after,
+                dst_workspace,
+                moving,
+                tab.upcast(),
+                label,
+            )
+        } else {
+            Err(moving)
         };
 
-        let mounted = self
-            .mount_moved_surface(
-                outcome.dst_pane,
-                outcome.dst_workspace,
-                outcome.surface,
-                moving,
-                target_index,
-            )
-            .await;
-        if !mounted {
-            return Err("failed to mount moved surface".to_string());
+        match mounted {
+            Ok(()) => {
+                self.pane_registry.borrow_mut().reorder_surface_widget(
+                    dst_pane_after,
+                    surface_after,
+                    target_index,
+                );
+            }
+            Err(moving) => {
+                // Widget surgery failed after store commit. Drop the live
+                // handle (PTY killed) and rerender both affected workspaces
+                // from the model, which is the single source of truth.
+                tracing::error!(
+                    target: "flowmux::dnd",
+                    %src_pane,
+                    %surface,
+                    %dst_pane_after,
+                    "move_surface: mount failed after store commit; rerendering from model"
+                );
+                drop(moving);
+                if let Some(ws) = self.store.get_workspace(dst_workspace).await {
+                    self.rerender_workspace(&ws);
+                }
+                if outcome.src_workspace != dst_workspace && !outcome.src_workspace_removed {
+                    if let Some(ws) = self.store.get_workspace(outcome.src_workspace).await {
+                        self.rerender_workspace(&ws);
+                    }
+                }
+                return Err("failed to mount moved surface".to_string());
+            }
         }
 
+        // Phase 4 — Post-move cleanup (awaits are safe: widget is mounted).
         if outcome.src_workspace_removed {
             self.drop_workspace(outcome.src_workspace);
             self.activate_active_or_show_empty().await;
@@ -710,17 +757,17 @@ impl WindowController {
                 .await;
         }
 
-        if let Some(ws) = self.store.get_workspace(outcome.dst_workspace).await {
+        if let Some(ws) = self.store.get_workspace(dst_workspace).await {
             self.refresh_workspace_solo(&ws);
         }
-        self.sync_workspace_agent_status_from_store(outcome.dst_workspace)
+        self.sync_workspace_agent_status_from_store(dst_workspace)
             .await;
-        if outcome.src_workspace != outcome.dst_workspace && !outcome.src_workspace_removed {
+        if outcome.src_workspace != dst_workspace && !outcome.src_workspace_removed {
             self.sync_workspace_agent_status_from_store(outcome.src_workspace)
                 .await;
         }
         self.refresh_window_title().await;
-        self.focus_pane(outcome.dst_pane);
+        self.focus_pane(dst_pane_after);
         Ok(())
     }
     /// Move a live surface tab to the last position of the first pane of
@@ -752,57 +799,9 @@ impl WindowController {
     }
     /// Build a tab widget for `surface` in `dst_pane` and mount the detached
     /// live widget there, aligning the tab order with the model index.
-    pub(super) async fn mount_moved_surface(
-        &self,
-        dst_pane: PaneId,
-        dst_workspace: WorkspaceId,
-        surface: SurfaceId,
-        moving: MovingSurface,
-        target_index: usize,
-    ) -> bool {
-        let surface_model = self
-            .store
-            .get_workspace(dst_workspace)
-            .await
-            .and_then(|ws| {
-                ws.surfaces
-                    .iter()
-                    .find_map(|s| s.root_pane.find_surface(dst_pane, surface))
-            });
-        let Some(surface_model) = surface_model else {
-            return false;
-        };
-        let (tab, label) =
-            build_surface_tab_widget(dst_pane, &surface_model, true, &self.callbacks);
-        let ok = self.pane_registry.borrow_mut().attach_moved_surface(
-            dst_pane,
-            dst_workspace,
-            moving,
-            tab.upcast(),
-            label,
-        );
-        if ok {
-            self.pane_registry
-                .borrow_mut()
-                .reorder_surface_widget(dst_pane, surface, target_index);
-        }
-        ok
-    }
-    /// Best-effort restore of a detached surface back into its source pane when
-    /// a move is rejected by the store.
-    pub(super) async fn reattach_surface(
-        &self,
-        src_pane: PaneId,
-        surface: SurfaceId,
-        moving: MovingSurface,
-    ) {
-        let Some(ws_id) = self.store.workspace_of_pane(src_pane).await else {
-            return;
-        };
-        let _ = self
-            .mount_moved_surface(src_pane, ws_id, surface, moving, usize::MAX)
-            .await;
-    }
+    /// Mount `moving` into `dst_pane`. On success the MovingSurface is consumed;
+    /// on failure it is returned to the caller so the live widget can be
+    /// re-homed (reattach) instead of being dropped and freed while GSK render
     pub(super) async fn sync_pane_active_from_store(&self, workspace: WorkspaceId, pane: PaneId) {
         let Some(ws) = self.store.get_workspace(workspace).await else {
             return;
@@ -910,6 +909,11 @@ impl WindowController {
     }
     /// Split `dst_pane` and move the dragged tab (with its live state) into the
     /// new sibling. Backs dropping a tab on the right / bottom region of a pane.
+    ///
+    /// The store is committed FIRST so the model is always consistent; widget
+    /// surgery follows in one uninterrupted section (no .await between detach
+    /// and mount). On widget failure both workspaces are rerendered from the
+    /// model.
     pub(super) async fn split_surface_into_pane(
         &self,
         src_pane: PaneId,
@@ -918,10 +922,47 @@ impl WindowController {
         dst_pane: PaneId,
         direction: SplitDirection,
     ) -> Result<(), String> {
+        // Phase 1 — Commit the store transaction first, before touching any
+        // widget. A store rejection means no widget was detached.
+        let outcome = match self
+            .store
+            .split_surface_into_pane(src_pane, surface, dst_pane, direction)
+            .await
+        {
+            Some(outcome) => outcome,
+            None => return Err("destination pane no longer exists".to_string()),
+        };
+        let dst_ws = outcome.dst_workspace;
+        let new_pane = outcome.new_pane;
+        let dst_pane = outcome.dst_pane;
+        let surface = outcome.surface;
+
+        // Phase 2 — Fetch the workspace snapshot for tab-building and split
+        // construction, still without mutating the widget tree.
+        let Some(ws) = self.store.get_workspace(dst_ws).await else {
+            return Err("destination workspace vanished".to_string());
+        };
+        let surface_model_for_tab = ws
+            .surfaces
+            .iter()
+            .find_map(|s| s.root_pane.find_surface(new_pane, surface));
+        let Some(surface_model_for_tab) = surface_model_for_tab else {
+            return Err("surface model not found after store commit".to_string());
+        };
+        let new_split_id = ws
+            .surfaces
+            .iter()
+            .find_map(|s| s.root_pane.parent_split_id(new_pane));
+        let Some(new_split_id) = new_split_id else {
+            return Err("could not locate the new split node".to_string());
+        };
+
         if !self.pane_registry.borrow().has_pane(dst_pane) {
             return Err("destination pane is not rendered".to_string());
         }
 
+        // Phase 3 — Detach + incremental split + mount in one uninterrupted
+        // section. No .awaits between detach and the final mount.
         let moving = self
             .pane_registry
             .borrow_mut()
@@ -932,39 +973,10 @@ impl WindowController {
                     .split_imported_surface_into_pane(surface_model, dst_pane, direction)
                     .await;
             }
-            return Err("source surface is not rendered".to_string());
-        };
-
-        let outcome = match self
-            .store
-            .split_surface_into_pane(src_pane, surface, dst_pane, direction)
-            .await
-        {
-            Some(outcome) => outcome,
-            None => {
-                self.reattach_surface(src_pane, surface, moving).await;
-                return Err("destination pane no longer exists".to_string());
+            if let Some(ws) = self.store.get_workspace(dst_ws).await {
+                self.rerender_workspace(&ws);
             }
-        };
-        let dst_ws = outcome.dst_workspace;
-        let new_pane = outcome.new_pane;
-        let dst_pane = outcome.dst_pane;
-        let surface = outcome.surface;
-
-        // Build the new sibling pane empty, then mount the live tab into it.
-        let Some(ws) = self.store.get_workspace(dst_ws).await else {
-            return Err("destination workspace vanished".to_string());
-        };
-        let new_split_id = ws
-            .surfaces
-            .iter()
-            .find_map(|s| s.root_pane.parent_split_id(new_pane));
-        let Some(new_split_id) = new_split_id else {
-            // Could not locate the split node; fall back to a plain tab move so
-            // the live widget is not lost.
-            self.mount_moved_surface(dst_pane, dst_ws, surface, moving, usize::MAX)
-                .await;
-            return Err("could not locate the new split node".to_string());
+            return Err("source surface is not rendered".to_string());
         };
 
         let empty = flowmux_core::PaneContent::Tabs {
@@ -987,24 +999,69 @@ impl WindowController {
             self.theme.clone(),
             true,
         );
-        match split_outcome {
+        let split_ok = match split_outcome {
             IncrementalSplitOutcome::SucceededRoot { new_root } => {
                 self.surfaces.borrow_mut().insert(ws.id, new_root);
+                true
             }
-            IncrementalSplitOutcome::SucceededNested => {}
-            IncrementalSplitOutcome::Failed => {
-                // Sibling not built; keep the tab by re-homing it into dst.
-                self.mount_moved_surface(dst_pane, dst_ws, surface, moving, usize::MAX)
-                    .await;
-                return Err("incremental split failed".to_string());
-            }
-        }
+            IncrementalSplitOutcome::SucceededNested => true,
+            IncrementalSplitOutcome::Failed => false,
+        };
 
-        let mounted = self
-            .mount_moved_surface(new_pane, dst_ws, surface, moving, 0)
-            .await;
-        if !mounted {
-            return Err("failed to mount moved surface".to_string());
+        // Build tab and mount into the appropriate pane (new sibling or
+        // fallback dst). Both paths are sync — no awaits.
+        let mount_result = if split_ok {
+            let (tab, label) =
+                build_surface_tab_widget(new_pane, &surface_model_for_tab, true, &self.callbacks);
+            self.pane_registry
+                .borrow_mut()
+                .attach_moved_surface(new_pane, dst_ws, moving, tab.upcast(), label)
+                .map(|()| new_pane)
+        } else {
+            // Split failed — fall back to plain tab mount into dst_pane.
+            let (tab, label) =
+                build_surface_tab_widget(dst_pane, &surface_model_for_tab, true, &self.callbacks);
+            self.pane_registry
+                .borrow_mut()
+                .attach_moved_surface(dst_pane, dst_ws, moving, tab.upcast(), label)
+                .map(|()| dst_pane)
+        };
+
+        match mount_result {
+            Ok(mounted_pane) => {
+                self.pane_registry.borrow_mut().reorder_surface_widget(
+                    mounted_pane,
+                    surface,
+                    if mounted_pane == new_pane {
+                        0
+                    } else {
+                        usize::MAX
+                    },
+                );
+            }
+            Err(moving) => {
+                // Widget surgery failed after store commit. The incremental
+                // split may have left an empty sibling pane. Rerender from
+                // the model which is the single source of truth.
+                tracing::error!(
+                    target: "flowmux::dnd",
+                    %src_pane,
+                    %surface,
+                    %new_pane,
+                    %dst_pane,
+                    "split_surface_into_pane: mount failed after store commit; rerendering from model"
+                );
+                drop(moving);
+                if let Some(ws) = self.store.get_workspace(dst_ws).await {
+                    self.rerender_workspace(&ws);
+                }
+                if outcome.src_workspace != dst_ws && !outcome.src_workspace_removed {
+                    if let Some(ws) = self.store.get_workspace(outcome.src_workspace).await {
+                        self.rerender_workspace(&ws);
+                    }
+                }
+                return Err("failed to mount moved surface".to_string());
+            }
         }
 
         if outcome.src_workspace_removed {

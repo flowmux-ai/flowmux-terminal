@@ -20,13 +20,14 @@
 
 use crate::bridge::{Bridge, GtkCommand};
 use crate::notifications::{NotificationEntry, NotificationStore};
+use crate::ui::pane_terminal::DragState;
 use crate::ui::usage_popover::UsagePopover;
 use crate::ui::workspace_view::{
     read_tab_dnd_payload_from_drop, tab_dnd_content_formats, tab_dnd_formats_accept_payload,
 };
 use flowmux_core::{AgentStatus, NotificationLevel, PrState, Workspace, WorkspaceId};
 use gtk::prelude::*;
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use tokio::sync::oneshot;
@@ -84,8 +85,7 @@ pub struct Sidebar {
     /// workspace set and names at click time. Kept in sync by `upsert_inner`,
     /// `reorder`, and `remove`.
     titles: Rc<RefCell<Vec<(WorkspaceId, String)>>>,
-    tab_drag_drop_seen: Rc<Cell<bool>>,
-    tab_drag_drop_committed: Rc<Cell<bool>>,
+    drag_state: Rc<RefCell<DragState>>,
 }
 
 impl Sidebar {
@@ -299,8 +299,7 @@ impl Sidebar {
             bridge,
             subtitle_cache: Rc::new(RefCell::new(HashMap::new())),
             titles: Rc::new(RefCell::new(Vec::new())),
-            tab_drag_drop_seen: Rc::new(Cell::new(false)),
-            tab_drag_drop_committed: Rc::new(Cell::new(false)),
+            drag_state: Rc::new(RefCell::new(DragState::default())),
         }
     }
 
@@ -326,11 +325,8 @@ impl Sidebar {
         self.titles.clone()
     }
 
-    pub(crate) fn tab_drag_drop_state(&self) -> (Rc<Cell<bool>>, Rc<Cell<bool>>) {
-        (
-            self.tab_drag_drop_seen.clone(),
-            self.tab_drag_drop_committed.clone(),
-        )
+    pub(crate) fn drag_state(&self) -> Rc<RefCell<DragState>> {
+        self.drag_state.clone()
     }
 
     fn upsert_inner(&self, ws: &Workspace, details: &WorkspaceRowDetails) {
@@ -368,13 +364,7 @@ impl Sidebar {
         let status = self.agent_status.borrow().get(&ws.id).copied();
         apply_agent_status_class(&row, status);
         attach_dnd_handlers(&row, ws.id, self.bridge.clone(), self.rows.clone());
-        attach_tab_drop_to_row(
-            &row,
-            ws.id,
-            self.bridge.clone(),
-            self.tab_drag_drop_seen.clone(),
-            self.tab_drag_drop_committed.clone(),
-        );
+        attach_tab_drop_to_row(&row, ws.id, self.bridge.clone(), self.drag_state.clone());
         self.list.append(&row);
         rows.push((ws.id, row));
     }
@@ -902,8 +892,7 @@ fn attach_tab_drop_to_row(
     row: &gtk::ListBoxRow,
     ws_id: WorkspaceId,
     bridge: Bridge,
-    tab_drag_drop_seen: Rc<Cell<bool>>,
-    tab_drag_drop_committed: Rc<Cell<bool>>,
+    drag_state: Rc<RefCell<DragState>>,
 ) {
     let drop_target =
         gtk::DropTargetAsync::new(Some(tab_dnd_content_formats()), gtk::gdk::DragAction::MOVE);
@@ -924,11 +913,12 @@ fn attach_tab_drop_to_row(
         }
     });
     let bridge_drop = bridge.clone();
+    let drag_state_drop = drag_state.clone();
     drop_target.connect_drop(move |_, drop, _x, _y| {
-        tab_drag_drop_seen.set(true);
-        tab_drag_drop_committed.set(true);
+        drag_state_drop.borrow_mut().saw_motion();
         let drop = drop.clone();
         let bridge = bridge_drop.clone();
+        let drag_state = drag_state_drop.clone();
         gtk::glib::MainContext::default().spawn_local(async move {
             let payload = match read_tab_dnd_payload_from_drop(&drop).await {
                 Ok(payload) => payload,
@@ -940,6 +930,8 @@ fn attach_tab_drop_to_row(
             };
             let src_pane = payload.src_pane;
             let surface = payload.src_surface;
+            drag_state.borrow_mut().saw_target(surface);
+            drag_state.borrow_mut().commit(surface);
             let (ack_tx, ack_rx) = oneshot::channel();
             if let Err(error) = bridge
                 .tx
@@ -952,6 +944,8 @@ fn attach_tab_drop_to_row(
                 .await
             {
                 tracing::warn!(%error, "sidebar tab drop: bridge send failed");
+                // Revert the commit on failure.
+                drag_state.borrow_mut().begin_drag(surface, src_pane);
                 drop.finish(gtk::gdk::DragAction::empty());
                 return;
             }
@@ -959,10 +953,12 @@ fn attach_tab_drop_to_row(
                 Ok(Ok(())) => drop.finish(gtk::gdk::DragAction::MOVE),
                 Ok(Err(error)) => {
                     tracing::warn!(%error, "sidebar tab drop: move rejected");
+                    drag_state.borrow_mut().begin_drag(surface, src_pane);
                     drop.finish(gtk::gdk::DragAction::empty());
                 }
                 Err(error) => {
                     tracing::warn!(%error, "sidebar tab drop: move acknowledgement dropped");
+                    drag_state.borrow_mut().begin_drag(surface, src_pane);
                     drop.finish(gtk::gdk::DragAction::empty());
                 }
             }

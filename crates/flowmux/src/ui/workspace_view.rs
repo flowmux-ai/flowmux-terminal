@@ -8,6 +8,7 @@
 use crate::theme::ResolvedTheme;
 use crate::ui::browser_pane::BrowserPane;
 use crate::ui::ghostty_pane::{is_flatpak_sandbox, GhosttyPane};
+use crate::ui::pane_terminal::TabDropCommand;
 use crate::ui::pane_terminal::{PaneCallbacks, PaneTerminal};
 use flowmux_core::{
     terminal_tab_title_for_cwd, Pane, PaneContent, PaneId, PaneSurface, SplitDirection, Surface,
@@ -758,9 +759,9 @@ impl PaneRegistry {
 
     /// Mount a [`MovingSurface`] (produced by [`Self::detach_surface_for_move`])
     /// into `dst_pane`, appending its tab to the bar and re-registering the live
-    /// handle under `dst_workspace`. The moved tab becomes active. Returns
-    /// `false` if `dst_pane` is not currently rendered (caller should ensure the
-    /// destination workspace is built first).
+    /// handle under `dst_workspace`. The moved tab becomes active. On success
+    /// the MovingSurface is consumed; on failure it is returned to the caller
+    /// so the live widget can be re-homed instead of being dropped.
     pub fn attach_moved_surface(
         &mut self,
         dst_pane: PaneId,
@@ -768,17 +769,20 @@ impl PaneRegistry {
         moving: MovingSurface,
         tab: gtk::Widget,
         label: gtk::Label,
-    ) -> bool {
+    ) -> Result<(), MovingSurface> {
         let Some(stack) = self.surface_stacks.get(&dst_pane).cloned() else {
-            return false;
+            return Err(moving);
         };
         let Some(tabs_box) = self.pane_tab_containers.get(&dst_pane).cloned() else {
-            return false;
+            return Err(moving);
         };
-        let surface = moving.surface;
-        stack.add_named(&moving.content, Some(&surface.to_string()));
+        // Destructure MovingSurface via into_parts() so the Drop impl
+        // (which warns) never fires on the success path. On error the
+        // caller receives the intact MovingSurface to re-home elsewhere.
+        let (surface, content, handle) = moving.into_parts();
+        stack.add_named(&content, Some(&surface.to_string()));
         tabs_box.append(&tab);
-        match moving.handle {
+        match handle {
             MovingHandle::Terminal(terminal) => {
                 terminal.set_pane_id(dst_pane);
                 self.terminals.insert(surface, terminal);
@@ -796,7 +800,7 @@ impl PaneRegistry {
             .push((surface, tab));
         self.activate_surface(dst_pane, surface);
         self.refresh_tab_multi_class(dst_pane);
-        true
+        Ok(())
     }
 }
 
@@ -808,10 +812,45 @@ pub struct MovingSurface {
     pub handle: MovingHandle,
 }
 
+impl MovingSurface {
+    /// Consume `self` and return the parts. The Drop warning is suppressed
+    /// because the struct is taken apart via ManuallyDrop and ownership of
+    /// each field is transferred to the caller without running the destructor.
+    pub fn into_parts(self) -> (SurfaceId, gtk::Widget, MovingHandle) {
+        // Wrap in ManuallyDrop to suppress the Drop impl. Each field is
+        // read exactly once; no double-free or use-after-move.
+        let this = std::mem::ManuallyDrop::new(self);
+        unsafe {
+            (
+                std::ptr::read(&this.surface),
+                std::ptr::read(&this.content),
+                std::ptr::read(&this.handle),
+            )
+        }
+    }
+}
+
 /// The live backend handle carried by a [`MovingSurface`].
 pub enum MovingHandle {
     Terminal(PaneTerminal),
     Browser(BrowserPane),
+}
+
+/// A [`MovingSurface`] must never be silently dropped — it carries a live
+/// PTY child process or WebView whose disposal must be intentional.
+///
+/// This Drop impl is a safety net that fires only when a MovingSurface is
+/// abandoned (e.g. widget surgery after store commit) or dropped on error.
+/// The success path in [`PaneRegistry::attach_moved_surface`] destructures
+/// the struct, so the Drop impl does NOT fire for successful re-homes.
+impl Drop for MovingSurface {
+    fn drop(&mut self) {
+        tracing::warn!(
+            target: "flowmux::dnd",
+            surface = %self.surface,
+            "MovingSurface dropped without being consumed by attach_moved_surface"
+        );
+    }
 }
 
 /// Apply a `gtk::Paned` ratio immediately after its first allocation.
@@ -1189,7 +1228,9 @@ fn build_leaf_pane(
     // The File browser toggle lives in the side-panel footer (next to the
     // Options button), not in the per-pane tool row.
 
-    stack.set_visible_child_name(&active.to_string());
+    if !empty {
+        stack.set_visible_child_name(&active.to_string());
+    }
     tabbar.append(&tabs);
     tabbar.append(&spacer);
     tabbar.append(&tools);
@@ -1237,7 +1278,9 @@ fn build_leaf_pane(
         r.surface_tabs.insert(pane_id, tab_widgets);
         r.pane_tab_containers.insert(pane_id, tabs);
         r.pane_workspace.insert(pane_id, workspace);
-        r.activate_surface(pane_id, active);
+        if !empty {
+            r.activate_surface(pane_id, active);
+        }
         r.refresh_tab_multi_class(pane_id);
     }
 
@@ -1636,10 +1679,8 @@ fn attach_tab_dnd_handlers(
         .first_child()
         .map(|child| child.upcast::<gtk::Widget>())
         .unwrap_or_else(|| tab.clone().upcast::<gtk::Widget>());
-    let saw_tab_drop_target = callbacks.tab_drag_drop_seen.clone();
-    let committed_tab_drop = callbacks.tab_drag_drop_committed.clone();
     let split_candidate = callbacks.tab_drag_split_candidate.clone();
-    let opened_new_window = Rc::new(Cell::new(false));
+    let drag_state = callbacks.drag_state.clone();
 
     let drag_source = gtk::DragSource::new();
     drag_source.set_actions(gtk::gdk::DragAction::MOVE);
@@ -1653,62 +1694,73 @@ fn attach_tab_dnd_handlers(
         )))
     });
     let tab_for_begin = tab.clone();
-    let saw_target_for_begin = saw_tab_drop_target.clone();
-    let committed_for_begin = committed_tab_drop.clone();
     let split_candidate_for_begin = split_candidate.clone();
-    let opened_for_begin = opened_new_window.clone();
+    let drag_state_begin = drag_state.clone();
     drag_source.connect_drag_begin(move |_, _| {
-        saw_target_for_begin.set(false);
-        committed_for_begin.set(false);
+        // Per-surface lifecycle: a drag_begin for this surface inserts its own
+        // entry without touching any other surface's lifecycle.
+        drag_state_begin.borrow_mut().reset_motion();
+        drag_state_begin
+            .borrow_mut()
+            .begin_drag(surface_id, pane_id);
         split_candidate_for_begin.borrow_mut().take();
-        opened_for_begin.set(false);
         tab_for_begin.set_opacity(0.4);
         tab_for_begin.add_css_class("flowmux-pane-tab-dragging");
     });
     let tab_for_end = tab.clone();
-    let saw_target_for_end = saw_tab_drop_target.clone();
-    let committed_for_end = committed_tab_drop.clone();
-    let opened_for_end = opened_new_window.clone();
     let new_window_cb_for_end = callbacks.on_tab_drag_to_new_window.clone();
     let close_cb_for_remote_move = callbacks.on_close_surface.clone();
     let split_candidate_for_end = split_candidate.clone();
     let split_cb_for_end = callbacks.on_split_surface_into_pane.clone();
     let surface_for_end = surface.clone();
+    let drag_state_end = drag_state.clone();
     drag_source.connect_drag_end(move |_, drag, delete_data| {
         let selected_action = drag.selected_action();
+        let entry = drag_state_end.borrow_mut().end_drag(surface_id);
+        let committed = entry.as_ref().is_some_and(|e| e.committed);
+        let saw_target = entry.as_ref().is_some_and(|e| e.saw_drop_target);
         tracing::debug!(
             %pane_id,
             %surface_id,
             delete_data,
             selected_action = ?selected_action,
-            saw_tab_drop_target = saw_target_for_end.get(),
+            ?committed,
+            saw_target,
             "tab drag end"
         );
-        if !committed_for_end.get() && !opened_for_end.get() {
-            if let Some((target_pane, direction)) = split_candidate_for_end.borrow_mut().take() {
-                saw_target_for_end.set(true);
-                committed_for_end.set(true);
-                opened_for_end.set(true);
-                tracing::info!(
-                    %pane_id,
-                    %surface_id,
-                    %target_pane,
-                    ?direction,
-                    "tab drag ended without a drop target; committing previewed split"
-                );
-                (split_cb_for_end.borrow_mut())(
-                    pane_id,
-                    surface_id,
-                    Some(surface_for_end.clone()),
-                    target_pane,
-                    direction,
-                );
-            }
+
+        // If a drop handler already committed this surface, do nothing:
+        // the surface was already re-homed in the destination pane.
+        // Skip split-fallback, tearoff, and remote-close entirely.
+        if committed {
+            split_candidate_for_end.borrow_mut().take();
+            tab_for_end.set_opacity(1.0);
+            tab_for_end.remove_css_class("flowmux-pane-tab-dragging");
+            return;
         }
-        if selected_action.contains(gtk::gdk::DragAction::MOVE)
-            && delete_data
-            && !saw_target_for_end.get()
-            && !committed_for_end.get()
+
+        // Not committed. Try split-candidate fallback first.
+        if let Some((target_pane, direction)) = split_candidate_for_end.borrow_mut().take() {
+            tracing::info!(
+                %pane_id,
+                %surface_id,
+                %target_pane,
+                ?direction,
+                "tab drag ended without a drop target; committing previewed split"
+            );
+            // Re-insert a committed entry so drag_cancel (if it fires later)
+            // also sees this as committed.
+            let mut state = drag_state_end.borrow_mut();
+            state.begin_drag(surface_id, pane_id);
+            state.commit(surface_id);
+            (split_cb_for_end.borrow_mut())(
+                pane_id,
+                surface_id,
+                Some(surface_for_end.clone()),
+                target_pane,
+                direction,
+            );
+        } else if selected_action.contains(gtk::gdk::DragAction::MOVE) && delete_data && !saw_target
         {
             tracing::info!(
                 %pane_id,
@@ -1716,12 +1768,7 @@ fn attach_tab_dnd_handlers(
                 "tab drag moved to another window; closing source tab"
             );
             (close_cb_for_remote_move.borrow_mut())(pane_id, surface_id);
-        } else if selected_action.is_empty()
-            && !delete_data
-            && !saw_target_for_end.get()
-            && !opened_for_end.get()
-        {
-            opened_for_end.set(true);
+        } else if selected_action.is_empty() && !delete_data && !saw_target {
             tracing::info!(
                 %pane_id,
                 %surface_id,
@@ -1729,60 +1776,63 @@ fn attach_tab_dnd_handlers(
             );
             (new_window_cb_for_end.borrow_mut())(pane_id, surface_id);
         }
-        split_candidate_for_end.borrow_mut().take();
-        saw_target_for_end.set(false);
         tab_for_end.set_opacity(1.0);
         tab_for_end.remove_css_class("flowmux-pane-tab-dragging");
     });
     let tab_for_cancel = tab.clone();
-    let saw_target_for_cancel = saw_tab_drop_target.clone();
-    let committed_for_cancel = committed_tab_drop.clone();
     let new_window_cb = callbacks.on_tab_drag_to_new_window.clone();
-    let opened_for_cancel = opened_new_window.clone();
     let split_candidate_for_cancel = split_candidate.clone();
     let split_cb_for_cancel = callbacks.on_split_surface_into_pane.clone();
     let surface_for_cancel = surface.clone();
+    let drag_state_cancel = drag_state.clone();
     drag_source.connect_drag_cancel(move |_, drag, reason| {
         let selected_action = drag.selected_action();
         tab_for_cancel.set_opacity(1.0);
         tab_for_cancel.remove_css_class("flowmux-pane-tab-dragging");
+        let entry = drag_state_cancel.borrow_mut().end_drag(surface_id);
+        let committed = entry.as_ref().is_some_and(|e| e.committed);
+        let saw_target = entry.as_ref().is_some_and(|e| e.saw_drop_target);
         tracing::debug!(
             %pane_id,
             %surface_id,
             ?reason,
             selected_action = ?selected_action,
-            saw_tab_drop_target = saw_target_for_cancel.get(),
+            ?committed,
+            saw_target,
             "tab drag cancel"
         );
-        if !committed_for_cancel.get() && !opened_for_cancel.get() {
-            if let Some((target_pane, direction)) = split_candidate_for_cancel.borrow_mut().take() {
-                saw_target_for_cancel.set(true);
-                committed_for_cancel.set(true);
-                opened_for_cancel.set(true);
-                tracing::info!(
-                    %pane_id,
-                    %surface_id,
-                    %target_pane,
-                    ?direction,
-                    "tab drag canceled without a drop target; committing previewed split"
-                );
-                (split_cb_for_cancel.borrow_mut())(
-                    pane_id,
-                    surface_id,
-                    Some(surface_for_cancel.clone()),
-                    target_pane,
-                    direction,
-                );
-            }
+
+        // If a drop handler already committed this surface, do nothing.
+        if committed {
+            split_candidate_for_cancel.borrow_mut().take();
+            return false;
         }
-        if matches!(
+
+        // Not committed. Try split-candidate fallback first.
+        if let Some((target_pane, direction)) = split_candidate_for_cancel.borrow_mut().take() {
+            tracing::info!(
+                %pane_id,
+                %surface_id,
+                %target_pane,
+                ?direction,
+                "tab drag canceled without a drop target; committing previewed split"
+            );
+            let mut state = drag_state_cancel.borrow_mut();
+            state.begin_drag(surface_id, pane_id);
+            state.commit(surface_id);
+            (split_cb_for_cancel.borrow_mut())(
+                pane_id,
+                surface_id,
+                Some(surface_for_cancel.clone()),
+                target_pane,
+                direction,
+            );
+        } else if matches!(
             reason,
             gtk::gdk::DragCancelReason::NoTarget | gtk::gdk::DragCancelReason::Error
         ) && selected_action.is_empty()
-            && !saw_target_for_cancel.get()
-            && !opened_for_cancel.get()
+            && !saw_target
         {
-            opened_for_cancel.set(true);
             tracing::info!(
                 %pane_id,
                 %surface_id,
@@ -1790,8 +1840,6 @@ fn attach_tab_dnd_handlers(
             );
             (new_window_cb.borrow_mut())(pane_id, surface_id);
         }
-        split_candidate_for_cancel.borrow_mut().take();
-        saw_target_for_cancel.set(false);
         false
     });
     drag_widget.add_controller(drag_source);
@@ -1803,9 +1851,7 @@ fn attach_tab_dnd_handlers(
         pane_id,
         surface,
         callbacks,
-        saw_tab_drop_target.clone(),
-        committed_tab_drop.clone(),
-        opened_new_window.clone(),
+        drag_state.clone(),
     );
 
     let drop_target =
@@ -1847,33 +1893,40 @@ fn attach_tab_dnd_handlers(
     let target_pane = pane_id;
     let target_surface = surface_id;
     let tab_for_drop = tab.clone();
-    let reorder_cb = callbacks.on_reorder_surface.clone();
-    let move_to_pane_cb = callbacks.on_move_surface_to_pane.clone();
     let position_of_surface_cb = callbacks.position_of_surface_in_pane.clone();
-    let saw_target_for_drop = saw_tab_drop_target.clone();
-    let committed_for_drop = committed_tab_drop.clone();
     let split_candidate_for_drop = split_candidate.clone();
+    let dispatch_drop = callbacks.dispatch_tab_drop.clone();
+    let drag_in_flight = callbacks.drag_in_flight.clone();
+    let drag_state_drop = drag_state.clone();
     drop_target.connect_drop(move |_, drop, x, _y| {
-        saw_target_for_drop.set(true);
-        committed_for_drop.set(true);
+        drag_state_drop.borrow_mut().saw_motion();
         split_candidate_for_drop.borrow_mut().take();
         tracing::debug!(%target_pane, %target_surface, "tab drop fired");
         tab_for_drop.remove_css_class("flowmux-pane-tab-drop-before");
         tab_for_drop.remove_css_class("flowmux-pane-tab-drop-after");
         let drop = drop.clone();
         let tab_for_drop = tab_for_drop.clone();
-        let reorder_cb = reorder_cb.clone();
-        let move_to_pane_cb = move_to_pane_cb.clone();
         let position_of_surface_cb = position_of_surface_cb.clone();
+        let dispatch_drop = dispatch_drop.clone();
+        let drag_in_flight = drag_in_flight.clone();
+        let drag_state = drag_state_drop.clone();
         gtk::glib::MainContext::default().spawn_local(async move {
             let payload = match read_tab_dnd_payload_from_drop(&drop).await {
                 Ok(payload) => payload,
                 Err(error) => {
-                    tracing::warn!(error = %error, "tab drop: failed to read payload");
+                    tracing::warn!(
+                        target: "flowmux::dnd",
+                        error = %error,
+                        "tab drop: failed to read payload, aborting"
+                    );
                     drop.finish(gtk::gdk::DragAction::empty());
                     return;
                 }
             };
+            // Payload read succeeded — mark the source surface as having seen
+            // a target. On failure, the entry stays uncommitted so drag_end
+            // may tear off the surface (which is still in its source pane).
+            drag_state.borrow_mut().saw_target(payload.src_surface);
             let src_pane = payload.src_pane;
             let src_surface = payload.src_surface;
             let src_surface_model = payload.surface;
@@ -1909,13 +1962,6 @@ fn attach_tab_dnd_handlers(
                 false
             };
 
-            // In the same box:
-            // - When the source is left of the target (src_idx < target_index),
-            //   "before target" means target_index - 1, and "after target" means target_index.
-            // - When the source is right of the target (src_idx > target_index),
-            //   "before target" means target_index, and "after target" means target_index + 1.
-            // The final_index is computed after removing the source and inserting
-            // next to target, using the source position exposed from PaneRegistry::surface_tabs.
             let src_index = (position_of_surface_cb)(target_pane, src_surface);
             let final_index = match (after, src_index) {
                 (false, Some(s)) if s < target_index => target_index.saturating_sub(1),
@@ -1925,6 +1971,7 @@ fn attach_tab_dnd_handlers(
             };
 
             tracing::info!(
+                target: "flowmux::dnd",
                 %target_pane,
                 %src_surface,
                 %target_surface,
@@ -1932,20 +1979,81 @@ fn attach_tab_dnd_handlers(
                 src_index = ?src_index,
                 final_index,
                 after,
-                "tab drop: dispatching reorder callback"
+                "tab drop: dispatching"
             );
-            if src_pane == target_pane {
-                (reorder_cb.borrow_mut())(target_pane, src_surface, final_index);
-            } else {
-                (move_to_pane_cb.borrow_mut())(
-                    src_pane,
-                    src_surface,
-                    src_surface_model,
-                    target_pane,
-                    final_index,
+
+            // Acquire the per-surface in-flight guard to serialise drops on
+            // the same surface. If another drop is already in flight for this
+            // surface, reject the duplicate.
+            if drag_in_flight.get().is_some() {
+                tracing::warn!(
+                    target: "flowmux::dnd",
+                    %src_surface,
+                    in_flight = ?drag_in_flight.get(),
+                    "tab drop: rejecting duplicate dispatch for surface"
                 );
+                drop.finish(gtk::gdk::DragAction::empty());
+                return;
             }
-            drop.finish(gtk::gdk::DragAction::MOVE);
+            drag_in_flight.set(Some(src_surface));
+
+            let res: Result<(), String> = if src_pane == target_pane {
+                // Reorder within same pane: dispatch through the ack-aware path.
+                let cmd = TabDropCommand::Reorder {
+                    pane: target_pane,
+                    surface: src_surface,
+                    target_index: final_index,
+                };
+                match dispatch_drop(cmd) {
+                    Some(ack_rx) => match ack_rx.await {
+                        Ok(r) => r,
+                        Err(_) => Err("ack channel closed".into()),
+                    },
+                    None => Err("bridge dispatch failed".into()),
+                }
+            } else {
+                let cmd = TabDropCommand::MoveToPane {
+                    src_pane,
+                    surface: src_surface,
+                    surface_model: src_surface_model,
+                    dst_pane: target_pane,
+                    target_index: final_index,
+                };
+                match dispatch_drop(cmd) {
+                    Some(ack_rx) => match ack_rx.await {
+                        Ok(r) => r,
+                        Err(_) => Err("ack channel closed".into()),
+                    },
+                    None => Err("bridge dispatch failed".into()),
+                }
+            };
+
+            match res {
+                Ok(()) => {
+                    tracing::info!(
+                        target: "flowmux::dnd",
+                        src_pane = %src_pane,
+                        src_surface = %src_surface,
+                        dst_pane = %target_pane,
+                        "tab drop: committed successfully"
+                    );
+                    drag_state.borrow_mut().commit(src_surface);
+                    drag_in_flight.set(None);
+                    drop.finish(gtk::gdk::DragAction::MOVE);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "flowmux::dnd",
+                        src_pane = %src_pane,
+                        src_surface = %src_surface,
+                        dst_pane = %target_pane,
+                        error = %e,
+                        "tab drop: store+widget move failed, rolling back"
+                    );
+                    drag_in_flight.set(None);
+                    drop.finish(gtk::gdk::DragAction::empty());
+                }
+            }
         });
         true
     });
@@ -1959,22 +2067,19 @@ fn install_macos_tab_split_drag_fallback(
     pane_id: PaneId,
     surface: &PaneSurface,
     callbacks: &PaneCallbacks,
-    saw_tab_drop_target: Rc<Cell<bool>>,
-    committed_tab_drop: Rc<Cell<bool>>,
-    opened_new_window: Rc<Cell<bool>>,
+    drag_state: Rc<RefCell<DragState>>,
 ) {
     let gesture = gtk::GestureDrag::new();
     gesture.set_propagation_phase(gtk::PropagationPhase::Capture);
     gesture.set_button(gtk::gdk::BUTTON_PRIMARY);
 
     let tab_for_begin = tab.clone();
-    let saw_target_for_begin = saw_tab_drop_target.clone();
-    let committed_for_begin = committed_tab_drop.clone();
-    let opened_for_begin = opened_new_window.clone();
+    let drag_state_begin = drag_state.clone();
     gesture.connect_drag_begin(move |_, _, _| {
-        saw_target_for_begin.set(false);
-        committed_for_begin.set(false);
-        opened_for_begin.set(false);
+        drag_state_begin.borrow_mut().reset_motion();
+        drag_state_begin
+            .borrow_mut()
+            .begin_drag(surface.id, pane_id);
         tab_for_begin.set_opacity(0.4);
         tab_for_begin.add_css_class("flowmux-pane-tab-dragging");
     });
@@ -1983,18 +2088,20 @@ fn install_macos_tab_split_drag_fallback(
     let split_cb = callbacks.on_split_surface_into_pane.clone();
     let surface_model = surface.clone();
     let surface_id = surface.id;
+    let drag_state_end = drag_state.clone();
     gesture.connect_drag_end(move |_, dx, dy| {
         tab_for_end.set_opacity(1.0);
         tab_for_end.remove_css_class("flowmux-pane-tab-dragging");
-        if committed_tab_drop.get() || opened_new_window.get() {
+        let entry = drag_state_end.borrow_mut().end_drag(surface_id);
+        if entry.as_ref().is_some_and(|e| e.committed) {
             return;
         }
         let Some(direction) = tab_drag_split_direction_from_delta(dx, dy) else {
             return;
         };
-        saw_tab_drop_target.set(true);
-        committed_tab_drop.set(true);
-        opened_new_window.set(true);
+        let mut state = drag_state_end.borrow_mut();
+        state.begin_drag(surface_id, pane_id);
+        state.commit(surface_id);
         tracing::info!(
             %pane_id,
             %surface_id,
@@ -2086,23 +2193,31 @@ fn attach_pane_body_dnd(
     preview: gtk::DrawingArea,
     callbacks: &PaneCallbacks,
 ) {
-    let frame: gtk::Widget = widget.clone().upcast();
+    // Use a weak reference to the frame in every closure to avoid a
+    // reference cycle: widget → controller → closure → widget. When the
+    // pane frame is destroyed the weak ref goes dead and the closure
+    // becomes a no-op instead of keeping the frame alive.
+    let frame_weak: gtk::glib::WeakRef<gtk::Widget> =
+        widget.clone().upcast::<gtk::Widget>().downgrade();
 
     // Preview: track the pointer during the drag and repaint the overlay.
     let motion = gtk::DropControllerMotion::new();
     motion.set_propagation_phase(gtk::PropagationPhase::Capture);
     {
-        let frame = frame.clone();
+        let frame_weak = frame_weak.clone();
         let zone = zone.clone();
         let preview = preview.clone();
-        let saw_drop_target = callbacks.tab_drag_drop_seen.clone();
+        let drag_state_motion = callbacks.drag_state.clone();
         let split_candidate = callbacks.tab_drag_split_candidate.clone();
         motion.connect_motion(move |motion, x, y| {
+            let Some(frame) = frame_weak.upgrade() else {
+                return;
+            };
             if motion
                 .drop()
                 .is_some_and(|drop| tab_dnd_formats_accept_payload(&drop.formats()))
             {
-                saw_drop_target.set(true);
+                drag_state_motion.borrow_mut().saw_motion();
             }
             let (w, h) = (frame.width() as f64, frame.height() as f64);
             let new = if w > 0.0 && h > 0.0 {
@@ -2124,17 +2239,15 @@ fn attach_pane_body_dnd(
     {
         let zone = zone.clone();
         let preview = preview.clone();
-        let saw_drop_target = callbacks.tab_drag_drop_seen.clone();
-        let committed_drop = callbacks.tab_drag_drop_committed.clone();
+        let drag_state_leave = callbacks.drag_state.clone();
         let split_candidate = callbacks.tab_drag_split_candidate.clone();
         motion.connect_leave(move |_| {
-            if !committed_drop.get() {
-                if zone.get().split_direction().is_some() {
-                    saw_drop_target.set(true);
-                } else {
-                    saw_drop_target.set(false);
-                    split_candidate.borrow_mut().take();
-                }
+            // If a split was being previewed, record that motion was seen.
+            // Otherwise clear the split candidate.
+            if zone.get().split_direction().is_some() {
+                drag_state_leave.borrow_mut().saw_motion();
+            } else {
+                split_candidate.borrow_mut().take();
             }
             if zone.get() != PaneDropZone::None {
                 zone.set(PaneDropZone::None);
@@ -2155,16 +2268,19 @@ fn attach_pane_body_dnd(
             false
         }
     });
-    let move_to_pane_cb = callbacks.on_move_surface_to_pane.clone();
-    let split_cb = callbacks.on_split_surface_into_pane.clone();
     let target_pane = pane_id;
-    let saw_drop_target = callbacks.tab_drag_drop_seen.clone();
-    let committed_drop = callbacks.tab_drag_drop_committed.clone();
     let split_candidate = callbacks.tab_drag_split_candidate.clone();
+    let dispatch_drop = callbacks.dispatch_tab_drop.clone();
+    let drag_in_flight = callbacks.drag_in_flight.clone();
+    let drag_state_drop = callbacks.drag_state.clone();
+    let frame_weak_drop = frame_weak.clone();
     drop_target.connect_drop(move |_, drop, x, y| {
-        saw_drop_target.set(true);
-        committed_drop.set(true);
+        drag_state_drop.borrow_mut().saw_motion();
         split_candidate.borrow_mut().take();
+        let Some(frame) = frame_weak_drop.upgrade() else {
+            drop.finish(gtk::gdk::DragAction::empty());
+            return true;
+        };
         let (w, h) = (frame.width() as f64, frame.height() as f64);
         let landed = landed_drop_zone(
             zone.get(),
@@ -2176,50 +2292,117 @@ fn attach_pane_body_dnd(
         preview.queue_draw();
 
         let drop = drop.clone();
-        let move_to_pane_cb = move_to_pane_cb.clone();
-        let split_cb = split_cb.clone();
+        let dispatch_drop = dispatch_drop.clone();
+        let drag_in_flight = drag_in_flight.clone();
+        let drag_state = drag_state_drop.clone();
         gtk::glib::MainContext::default().spawn_local(async move {
             let payload = match read_tab_dnd_payload_from_drop(&drop).await {
                 Ok(payload) => payload,
                 Err(error) => {
-                    tracing::warn!(error = %error, "pane-body tab drop: failed to read payload");
+                    tracing::warn!(
+                        target: "flowmux::dnd",
+                        error = %error,
+                        "pane-body drop: failed to read payload, aborting"
+                    );
                     drop.finish(gtk::gdk::DragAction::empty());
                     return;
                 }
             };
+            // Payload read succeeded — mark the source surface as having
+            // seen a target. On failure the entry stays uncommitted.
             let src_pane = payload.src_pane;
             let src_surface = payload.src_surface;
             let src_surface_model = payload.surface;
-            match landed {
-                PaneDropZone::SplitRight => {
-                    (split_cb.borrow_mut())(
-                        src_pane,
-                        src_surface,
-                        src_surface_model,
-                        target_pane,
-                        SplitDirection::Vertical,
+            drag_state.borrow_mut().saw_target(src_surface);
+
+            let cmd = match landed {
+                PaneDropZone::SplitRight => TabDropCommand::SplitIntoPane {
+                    src_pane,
+                    surface: src_surface,
+                    surface_model: src_surface_model,
+                    dst_pane: target_pane,
+                    direction: SplitDirection::Vertical,
+                },
+                PaneDropZone::SplitDown => TabDropCommand::SplitIntoPane {
+                    src_pane,
+                    surface: src_surface,
+                    surface_model: src_surface_model,
+                    dst_pane: target_pane,
+                    direction: SplitDirection::Horizontal,
+                },
+                PaneDropZone::Tab | PaneDropZone::None => TabDropCommand::MoveToPane {
+                    src_pane,
+                    surface: src_surface,
+                    surface_model: src_surface_model,
+                    dst_pane: target_pane,
+                    target_index: usize::MAX,
+                },
+            };
+
+            // Acquire the per-surface in-flight guard to serialise drops on
+            // the same surface.
+            if drag_in_flight.get().is_some() {
+                tracing::warn!(
+                    target: "flowmux::dnd",
+                    %src_surface,
+                    in_flight = ?drag_in_flight.get(),
+                    "pane-body drop: rejecting duplicate dispatch"
+                );
+                drop.finish(gtk::gdk::DragAction::empty());
+                return;
+            }
+            drag_in_flight.set(Some(src_surface));
+
+            let Some(ack_rx) = dispatch_drop(cmd) else {
+                tracing::error!(
+                    target: "flowmux::dnd",
+                    src_pane = %src_pane,
+                    src_surface = %src_surface,
+                    dst_pane = %target_pane,
+                    "pane-body drop: bridge dispatch failed, aborting"
+                );
+                drag_in_flight.set(None);
+                drop.finish(gtk::gdk::DragAction::empty());
+                return;
+            };
+
+            match ack_rx.await {
+                Ok(Ok(())) => {
+                    tracing::info!(
+                        target: "flowmux::dnd",
+                        src_pane = %src_pane,
+                        src_surface = %src_surface,
+                        dst_pane = %target_pane,
+                        "pane-body drop: committed successfully"
                     );
+                    drag_state.borrow_mut().commit(src_surface);
+                    drag_in_flight.set(None);
+                    drop.finish(gtk::gdk::DragAction::MOVE);
                 }
-                PaneDropZone::SplitDown => {
-                    (split_cb.borrow_mut())(
-                        src_pane,
-                        src_surface,
-                        src_surface_model,
-                        target_pane,
-                        SplitDirection::Horizontal,
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        target: "flowmux::dnd",
+                        src_pane = %src_pane,
+                        src_surface = %src_surface,
+                        dst_pane = %target_pane,
+                        error = %e,
+                        "pane-body drop: store+widget move failed, rolling back"
                     );
+                    drag_in_flight.set(None);
+                    drop.finish(gtk::gdk::DragAction::empty());
                 }
-                PaneDropZone::Tab | PaneDropZone::None => {
-                    (move_to_pane_cb.borrow_mut())(
-                        src_pane,
-                        src_surface,
-                        src_surface_model,
-                        target_pane,
-                        usize::MAX,
+                Err(_) => {
+                    tracing::warn!(
+                        target: "flowmux::dnd",
+                        src_pane = %src_pane,
+                        src_surface = %src_surface,
+                        dst_pane = %target_pane,
+                        "pane-body drop: ack channel closed, rolling back"
                     );
+                    drag_in_flight.set(None);
+                    drop.finish(gtk::gdk::DragAction::empty());
                 }
             }
-            drop.finish(gtk::gdk::DragAction::MOVE);
         });
         true
     });

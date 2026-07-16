@@ -7,12 +7,112 @@
 //! `PaneTerminal`; spawn-time wiring lives in `workspace_view.rs`.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
 use flowmux_core::{PaneId, PaneSurface, SplitDirection, SurfaceId, WorkspaceId};
+use tokio::sync::oneshot;
 
 use crate::ui::ghostty_pane::GhosttyPane;
+
+/// Per-drag lifecycle entry. Each surface gets its own entry so a new drag on
+/// surface B never resets the state of surface A's concurrent drag.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DragEntry {
+    /// The pane the drag originated from.
+    pub src_pane: PaneId,
+    /// True if the store+widget move committed successfully.
+    pub committed: bool,
+    /// True if a drop target has seen this drag (accept/drop fired).
+    /// Set by the drop handler before calling drop.finish().
+    pub saw_drop_target: bool,
+}
+
+impl DragEntry {
+    pub fn new(src_pane: PaneId) -> Self {
+        Self {
+            src_pane,
+            committed: false,
+            saw_drop_target: false,
+        }
+    }
+}
+
+/// Window-wide DnD lifecycle state, keyed by source surface id.
+/// A `drag_begin` for surface S inserts/updates S's entry without touching
+/// other surfaces; `drag_end` for S removes S's entry and reads the outcome.
+#[derive(Clone, Debug, Default)]
+pub struct DragState {
+    entries: HashMap<SurfaceId, DragEntry>,
+    /// True while any drop target is seeing pointer motion from a tab drag.
+    /// Used by the pane-body split-preview logic (motion/leave).
+    pub any_motion_seen: bool,
+}
+
+impl DragState {
+    /// Insert or update the entry for `surface`, returning the previous entry
+    /// if any.
+    pub fn begin_drag(&mut self, surface: SurfaceId, src_pane: PaneId) {
+        self.entries.insert(surface, DragEntry::new(src_pane));
+    }
+
+    /// Mark the drop target as seen for `surface`.
+    pub fn saw_target(&mut self, surface: SurfaceId) {
+        if let Some(entry) = self.entries.get_mut(&surface) {
+            entry.saw_drop_target = true;
+        }
+    }
+
+    /// Mark the drop as committed for `surface`.
+    pub fn commit(&mut self, surface: SurfaceId) {
+        if let Some(entry) = self.entries.get_mut(&surface) {
+            entry.committed = true;
+            entry.saw_drop_target = true;
+        }
+    }
+
+    /// Remove and return the entry for `surface`, finalising its drag lifecycle.
+    pub fn end_drag(&mut self, surface: SurfaceId) -> Option<DragEntry> {
+        self.entries.remove(&surface)
+    }
+
+    /// Reset motion state — called by drag_begin.
+    pub fn reset_motion(&mut self) {
+        self.any_motion_seen = false;
+    }
+
+    /// Called by drop target motion handlers.
+    pub fn saw_motion(&mut self) {
+        self.any_motion_seen = true;
+    }
+}
+
+/// Commands the tab drag-drop handlers can dispatch through the ack-aware
+/// bridge path, so they can await the store+widget outcome before calling
+/// `drop.finish()`.
+#[derive(Debug, Clone)]
+pub enum TabDropCommand {
+    MoveToPane {
+        src_pane: PaneId,
+        surface: SurfaceId,
+        surface_model: Option<PaneSurface>,
+        dst_pane: PaneId,
+        target_index: usize,
+    },
+    SplitIntoPane {
+        src_pane: PaneId,
+        surface: SurfaceId,
+        surface_model: Option<PaneSurface>,
+        dst_pane: PaneId,
+        direction: SplitDirection,
+    },
+    Reorder {
+        pane: PaneId,
+        surface: SurfaceId,
+        target_index: usize,
+    },
+}
 
 /// The terminal pane type used throughout the GUI.
 pub type PaneTerminal = GhosttyPane;
@@ -60,6 +160,7 @@ pub struct PaneCallbacks {
     pub on_copy_surface_text: Rc<RefCell<dyn FnMut(PaneId, SurfaceId)>>,
     /// Reorder a tab within the same pane by drag and drop. The third argument
     /// is the final 0-based index after the move, clamped if it exceeds length.
+    #[allow(dead_code)]
     pub on_reorder_surface: Rc<RefCell<dyn FnMut(PaneId, SurfaceId, usize)>>,
     /// A tab drag ended without landing on another tab drop target. The caller
     /// moves that live surface into a new top-level window and removes it from
@@ -68,6 +169,7 @@ pub struct PaneCallbacks {
     /// Move a tab into another pane (possibly in another workspace) by drag and
     /// drop, preserving its live state. Args: source pane, surface, destination
     /// pane, final 0-based index in the destination (clamped to the end).
+    #[allow(dead_code)]
     pub on_move_surface_to_pane:
         Rc<RefCell<dyn FnMut(PaneId, SurfaceId, Option<PaneSurface>, PaneId, usize)>>,
     /// Move a tab to the last position of the first pane of `dst_workspace`.
@@ -84,13 +186,10 @@ pub struct PaneCallbacks {
     /// The workspace a given pane currently lives in, queried synchronously so
     /// the "Move" submenu can exclude the tab's own workspace at click time.
     pub workspace_of_pane: Rc<dyn Fn(PaneId) -> Option<WorkspaceId>>,
-    /// Shared across all surface tabs in one window for the duration of a drag.
-    /// The source tab uses this to distinguish a true no-target drag from a
-    /// rejected drop on a known tab (self/cross-pane/invalid payload).
-    pub tab_drag_drop_seen: Rc<Cell<bool>>,
-    /// Set once a same-window tab drop callback has started. This keeps a
-    /// post-drop leave event from making the source treat the move as remote.
-    pub tab_drag_drop_committed: Rc<Cell<bool>>,
+    /// Per-surface drag lifecycle state, shared across all panes in one window.
+    /// Each surface's drag lifecycle is independent: a drag_begin on surface B
+    /// never resets the state of surface A's concurrent drag.
+    pub drag_state: Rc<RefCell<DragState>>,
     /// Last split preview shown while dragging a tab over a pane body. GTK can
     /// report the final drop as having no target near zone edges; in that case
     /// drag end commits the previewed split instead of tearing off.
@@ -127,6 +226,18 @@ pub struct PaneCallbacks {
     /// Called when Ctrl+click selects a Markdown path inside the terminal.
     /// The caller opens it in the Markdown viewer binary.
     pub on_open_markdown: Rc<RefCell<dyn FnMut(PaneId, PathBuf)>>,
+    /// Dispatch a tab-drag command with an ack channel so the drop handler
+    /// can await the store+widget outcome before calling drop.finish().
+    /// Returns None if the bridge channel is full or closed.
+    pub dispatch_tab_drop:
+        Rc<dyn Fn(TabDropCommand) -> Option<oneshot::Receiver<Result<(), String>>>>,
+    /// Per-surface in-flight guard: only one drop-initiated command per surface
+    /// may be in flight at a time. The drop handler sets the surface before
+    /// dispatching and clears it when the ack arrives (or the channel closes).
+    /// In-flight guard: only one drop-initiated command per surface may be
+    /// in flight at a time. The drop handler sets the surface before
+    /// dispatching and clears it when the ack arrives.
+    pub drag_in_flight: Rc<Cell<Option<SurfaceId>>>,
 }
 
 #[cfg(test)]
@@ -152,8 +263,7 @@ impl PaneCallbacks {
             on_split_surface_into_pane: Rc::new(RefCell::new(|_, _, _, _, _| {})),
             list_workspaces: Rc::new(Vec::new),
             workspace_of_pane: Rc::new(|_| None),
-            tab_drag_drop_seen: Rc::new(Cell::new(false)),
-            tab_drag_drop_committed: Rc::new(Cell::new(false)),
+            drag_state: Rc::new(RefCell::new(DragState::default())),
             tab_drag_split_candidate: Rc::new(RefCell::new(None)),
             on_terminal_cwd_changed: Rc::new(RefCell::new(|_, _, _| {})),
             on_browser_uri_changed: Rc::new(RefCell::new(|_, _, _| {})),
@@ -164,6 +274,8 @@ impl PaneCallbacks {
             on_open_url: Rc::new(RefCell::new(|_, _| {})),
             on_open_image: Rc::new(RefCell::new(|_, _| {})),
             on_open_markdown: Rc::new(RefCell::new(|_, _| {})),
+            dispatch_tab_drop: Rc::new(|_| None),
+            drag_in_flight: Rc::new(Cell::new(None)),
         }
     }
 }
