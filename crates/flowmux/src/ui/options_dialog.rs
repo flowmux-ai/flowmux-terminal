@@ -28,6 +28,7 @@ use flowmux_config::options::{
     FOCUS_BORDER_OPACITY_MAX, FOCUS_BORDER_OPACITY_MIN, ZOOM_MAX, ZOOM_MIN,
 };
 use flowmux_core::AgentNotificationTarget;
+use std::rc::Rc;
 
 /// Present the modal options dialog. If the user clicks OK, `on_apply` is
 /// called with the new [`Options`]. Cancel or window close does not call back.
@@ -40,6 +41,7 @@ pub fn present(
     default_font_size: f32,
     on_apply: impl Fn(Options) + 'static,
     on_preview: impl Fn(&Options) + 'static,
+    on_update: impl Fn(crate::update::check::Version) -> bool + 'static,
 ) {
     let dialog = build_dialog(
         parent,
@@ -48,6 +50,7 @@ pub fn present(
         default_font_size,
         on_apply,
         on_preview,
+        on_update,
     );
     dialog.present();
 }
@@ -61,6 +64,7 @@ fn build_dialog(
     default_font_size: f32,
     on_apply: impl Fn(Options) + 'static,
     on_preview: impl Fn(&Options) + 'static,
+    on_update: impl Fn(crate::update::check::Version) -> bool + 'static,
 ) -> adw::Window {
     // Intentionally NOT modal. A modal transient dialog gets attached to its
     // parent's titlebar by window managers that honour the "attach modal
@@ -303,14 +307,19 @@ fn build_dialog(
     }
     {
         let dialog = dialog.clone();
-        about_btn.connect_clicked(move |_| show_about_popup(&dialog));
+        let on_update: Rc<dyn Fn(crate::update::check::Version) -> bool> = Rc::new(on_update);
+        about_btn.connect_clicked(move |_| show_about_popup(&dialog, on_update.clone()));
     }
 
     dialog
 }
 
-fn show_about_popup(parent: &impl IsA<gtk::Widget>) {
-    let body = about_body();
+fn show_about_popup(
+    parent: &impl IsA<gtk::Widget>,
+    on_update: Rc<dyn Fn(crate::update::check::Version) -> bool>,
+) {
+    let available = *crate::update::AVAILABLE.lock().unwrap();
+    let body = about_body_with_version(&about_version(), available);
     let dialog = adw::AlertDialog::builder()
         .heading("About")
         .body(body.as_str())
@@ -318,6 +327,10 @@ fn show_about_popup(parent: &impl IsA<gtk::Widget>) {
         .default_response("ok")
         .close_response("ok")
         .build();
+    if let Some(version) = available {
+        let controls = build_about_update_control(version, on_update);
+        dialog.set_extra_child(Some(&controls));
+    }
     dialog.add_response("ok", "OK");
     dialog.connect_response(None, move |dialog, _| {
         dialog.close();
@@ -325,8 +338,42 @@ fn show_about_popup(parent: &impl IsA<gtk::Widget>) {
     dialog.present(Some(parent));
 }
 
-fn about_body() -> String {
-    about_body_with_version(&about_version(), *crate::update::AVAILABLE.lock().unwrap())
+fn build_about_update_control(
+    version: crate::update::check::Version,
+    on_update: Rc<dyn Fn(crate::update::check::Version) -> bool>,
+) -> gtk::Box {
+    let button = gtk::Button::with_label(&format!("Update to v{version}"));
+    button.add_css_class("suggested-action");
+    button.set_halign(gtk::Align::Center);
+    button.set_widget_name("flowmux-about-update-button");
+
+    let status = gtk::Label::new(None);
+    status.add_css_class("caption");
+    status.add_css_class("dim-label");
+    status.set_wrap(true);
+    status.set_justify(gtk::Justification::Center);
+    status.set_widget_name("flowmux-about-update-status");
+    status.set_visible(false);
+
+    let button_for_click = button.clone();
+    let status_for_click = status.clone();
+    button.connect_clicked(move |_| {
+        let started = on_update(version);
+        button_for_click.set_sensitive(false);
+        if started {
+            button_for_click.set_label("Update started");
+            status_for_click.set_label("Progress is shown in the sidebar.");
+        } else {
+            button_for_click.set_label("Update unavailable");
+            status_for_click.set_label("This update is already running or installed.");
+        }
+        status_for_click.set_visible(true);
+    });
+
+    let controls = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    controls.append(&button);
+    controls.append(&status);
+    controls
 }
 
 fn about_body_with_version(
@@ -841,6 +888,41 @@ mod tests {
             body.ends_with("Update available: v0.8.0"),
             "body should announce the newer release: {body}"
         );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[gtk::test]
+    fn about_update_control_starts_the_available_version() {
+        if gtk::init().is_err() {
+            return;
+        }
+        use crate::update::check::Version;
+        use std::cell::Cell;
+
+        let selected = Rc::new(Cell::new(None));
+        let selected_for_click = selected.clone();
+        let controls = build_about_update_control(
+            Version(0, 8, 0),
+            Rc::new(move |version| {
+                selected_for_click.set(Some(version));
+                true
+            }),
+        );
+        let button = controls
+            .first_child()
+            .and_then(|widget| widget.downcast::<gtk::Button>().ok())
+            .expect("first control should be the update button");
+        button.emit_clicked();
+
+        assert_eq!(selected.get(), Some(Version(0, 8, 0)));
+        assert!(!button.is_sensitive());
+        assert_eq!(button.label().as_deref(), Some("Update started"));
+        let status = button
+            .next_sibling()
+            .and_then(|widget| widget.downcast::<gtk::Label>().ok())
+            .expect("second control should be the progress status");
+        assert!(status.is_visible());
+        assert_eq!(status.label(), "Progress is shown in the sidebar.");
     }
 
     #[test]

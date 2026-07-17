@@ -15,6 +15,7 @@ impl WindowController {
                 let theme = self.current_theme();
                 let default_font_family = theme.font_family();
                 let default_font_size = theme.font_size();
+                let update_banner = self.workspace_presenter.sidebar.update_banner();
                 crate::ui::options_dialog::present(
                     &self.window,
                     current,
@@ -73,6 +74,7 @@ impl WindowController {
                     move |opts| {
                         preview_controller.apply_runtime_theme(opts);
                     },
+                    move |version| update_banner.start_install(version),
                 );
             }
             GtkCommand::ShowCommandPalette => {

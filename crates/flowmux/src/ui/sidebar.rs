@@ -88,6 +88,7 @@ pub struct Sidebar {
     titles: Rc<RefCell<Vec<(WorkspaceId, String)>>>,
     tab_drag_drop_seen: Rc<Cell<bool>>,
     tab_drag_drop_committed: Rc<Cell<bool>>,
+    update_banner: UpdateBanner,
 }
 
 impl Sidebar {
@@ -303,7 +304,12 @@ impl Sidebar {
             titles: Rc::new(RefCell::new(Vec::new())),
             tab_drag_drop_seen: Rc::new(Cell::new(false)),
             tab_drag_drop_committed: Rc::new(Cell::new(false)),
+            update_banner,
         }
+    }
+
+    pub(crate) fn update_banner(&self) -> UpdateBanner {
+        self.update_banner.clone()
     }
 
     /// Add or redraw a workspace row using cached subtitles. Used by paths
