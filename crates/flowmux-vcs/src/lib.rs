@@ -10,7 +10,6 @@
 
 use flowmux_core::{GitInfo, LinkedPr, PrState};
 use std::path::Path;
-use tokio::process::Command;
 use tracing::warn;
 
 pub mod worktree;
@@ -68,11 +67,25 @@ fn local_info(root: &Path) -> Result<Option<Local>, VcsError> {
 }
 
 async fn linked_pr(root: &Path, branch: &str) -> Result<Option<LinkedPr>, VcsError> {
-    let out = Command::new("gh")
-        .args(["pr", "view", branch, "--json", "number,state,url,isDraft"])
-        .current_dir(root)
-        .output()
-        .await;
+    // std::process on the blocking pool, not tokio::process — see
+    // `worktree::git_output` for the GLib SIGCHLD conflict this avoids.
+    let root_owned = root.to_path_buf();
+    let branch_owned = branch.to_string();
+    let out = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("gh")
+            .args([
+                "pr",
+                "view",
+                &branch_owned,
+                "--json",
+                "number,state,url,isDraft",
+            ])
+            .current_dir(&root_owned)
+            .output()
+    })
+    .await
+    .map_err(std::io::Error::other)
+    .and_then(|r| r);
     let out = match out {
         Ok(o) if o.status.success() => o,
         Ok(o) => {

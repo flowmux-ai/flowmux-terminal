@@ -453,7 +453,15 @@ impl WindowController {
         let start = normalized_existing_path(&start);
         let same_source =
             same_source_directory(self.worktrees.source_directory.borrow().as_deref(), &start);
+        tracing::debug!(
+            start = %start.display(),
+            same_source,
+            loading = self.worktrees.loading.get(),
+            force,
+            "worktrees: refresh requested"
+        );
         if same_source && (self.worktrees.loading.get() || !force) {
+            tracing::debug!("worktrees: refresh skipped (same source, loading or not forced)");
             return;
         }
         *self.worktrees.source_directory.borrow_mut() = Some(start.clone());
@@ -490,6 +498,11 @@ impl WindowController {
                     )))
                 }
             };
+            tracing::debug!(
+                generation,
+                ok = result.is_ok(),
+                "worktrees: listing finished, delivering"
+            );
             let _ = bridge
                 .tx
                 .send(GtkCommand::WorktreesLoaded { generation, result })
@@ -502,11 +515,13 @@ impl WindowController {
         generation: u64,
         result: Result<WorktreeList, WorktreeListError>,
     ) {
-        match worktrees_result_disposition(
+        let disposition = worktrees_result_disposition(
             generation,
             self.worktrees.generation.get(),
             self.worktrees.panel.is_open(),
-        ) {
+        );
+        tracing::debug!(generation, ?disposition, "worktrees: result arrived");
+        match disposition {
             WorktreesResultDisposition::IgnoreStale => return,
             WorktreesResultDisposition::ClearLoadingOnly => {
                 self.worktrees.loading.set(false);
@@ -520,6 +535,7 @@ impl WindowController {
             Ok(list) => {
                 let rows = self.annotate_worktree_rows(&list).await;
                 let name = repository_name(&list.repository_root);
+                tracing::debug!(rows = rows.len(), repository = %name, "worktrees: rendering rows");
                 *self.worktrees.repository_root.borrow_mut() =
                     Some(normalized_existing_path(&list.current_worktree));
                 self.worktrees.panel.set_rows(&name, rows);

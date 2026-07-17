@@ -125,18 +125,13 @@ pub async fn remove_worktree(
     force: bool,
 ) -> Result<(), RemoveWorktreeError> {
     let path = normalize_existing_path(path);
-    let mut command = tokio::process::Command::new("git");
-    command
-        .current_dir(repository_root)
-        .env("LC_ALL", "C")
-        .arg("worktree")
-        .arg("remove");
+    let mut args = vec!["worktree", "remove"];
     if force {
-        command.arg("--force");
+        args.push("--force");
     }
-    let output = command
-        .arg(&path)
-        .output()
+    let path_arg = path.to_string_lossy().into_owned();
+    args.push(&path_arg);
+    let output = git_output(repository_root, &args)
         .await
         .map_err(|error| RemoveWorktreeError::CommandFailed(error.to_string()))?;
     if output.status.success() {
@@ -167,13 +162,25 @@ pub async fn remove_worktree(
     Err(RemoveWorktreeError::CommandFailed(message))
 }
 
+/// Run git and wait for it on the blocking pool via `std::process`.
+///
+/// Deliberately NOT `tokio::process`: inside the GUI process GLib's
+/// child-watch (VTE terminal children) owns the `SIGCHLD` handler, so
+/// tokio's signal-driven child wait never wakes on macOS and every
+/// `.output().await` stalls until an unrelated wakeup. `std`'s
+/// `output()` waitpid()s the child directly — no signals involved.
 async fn git_output(dir: &Path, args: &[&str]) -> Result<std::process::Output, std::io::Error> {
-    tokio::process::Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .env("LC_ALL", "C")
-        .output()
-        .await
+    let dir = dir.to_path_buf();
+    let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+    tokio::task::spawn_blocking(move || {
+        std::process::Command::new("git")
+            .args(&args)
+            .current_dir(&dir)
+            .env("LC_ALL", "C")
+            .output()
+    })
+    .await
+    .map_err(std::io::Error::other)?
 }
 
 fn map_list_io(error: std::io::Error) -> WorktreeListError {
