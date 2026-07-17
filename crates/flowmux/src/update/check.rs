@@ -62,6 +62,7 @@ pub fn update_available(current: &str, latest: Version) -> bool {
 }
 
 /// Repo-relative install script for the given `std::env::consts::OS`.
+/// WSL reports `linux` and intentionally uses the same installer as Ubuntu.
 pub fn install_script(os: &str) -> &'static str {
     if os == "macos" {
         "scripts/install-macos.sh"

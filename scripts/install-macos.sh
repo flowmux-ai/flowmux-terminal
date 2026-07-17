@@ -114,6 +114,21 @@ EOF
     fi
 }
 
+configure_macos_path() {
+    local dir
+    for dir in \
+        /usr/local/sbin \
+        /usr/local/bin \
+        /opt/homebrew/sbin \
+        /opt/homebrew/bin \
+        "$HOME/.cargo/bin"; do
+        if [ -d "$dir" ] && [[ ":${PATH:-}:" != *":$dir:"* ]]; then
+            PATH="$dir${PATH:+:$PATH}"
+        fi
+    done
+    export PATH
+}
+
 workspace_version() {
     awk -F '"' '/^version = / { print $2; exit }' "$REPO_ROOT/Cargo.toml"
 }
@@ -187,6 +202,7 @@ elif [ "$PROFILE" != "debug" ]; then
     exit 2
 fi
 
+configure_macos_path
 preflight_macos
 if [ "$CHECK_ONLY" = true ]; then
     echo "==> macOS native preflight checks passed"
