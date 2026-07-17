@@ -130,6 +130,7 @@ pub struct PaneRegistry {
     /// Tab-bar `gtk::Box` so incremental tab additions can `append`
     /// into the same row instead of rebuilding the whole pane.
     pane_tab_containers: HashMap<PaneId, gtk::Box>,
+    pane_zoom_badges: HashMap<PaneId, gtk::Label>,
     surface_tab_labels: HashMap<SurfaceId, gtk::Label>,
     pane_workspace: HashMap<PaneId, WorkspaceId>,
     surface_workspace: HashMap<SurfaceId, WorkspaceId>,
@@ -172,6 +173,31 @@ impl PaneRegistry {
 
     pub fn pane_frame(&self, pane: PaneId) -> Option<gtk::Widget> {
         self.pane_frames.get(&pane).cloned()
+    }
+
+    pub fn set_pane_zoomed(&mut self, pane: PaneId, zoomed: bool) {
+        let Some(frame) = self.pane_frames.get(&pane) else {
+            return;
+        };
+        if zoomed {
+            frame.add_css_class("flowmux-pane-zoomed");
+            if self.pane_zoom_badges.contains_key(&pane) {
+                return;
+            }
+            let Some(tabs) = self.pane_tab_containers.get(&pane) else {
+                return;
+            };
+            let badge = gtk::Label::new(Some("Zoomed"));
+            badge.add_css_class("flowmux-pane-zoom-badge");
+            badge.set_tooltip_text(Some("This pane is temporarily maximized"));
+            tabs.append(&badge);
+            self.pane_zoom_badges.insert(pane, badge);
+        } else {
+            frame.remove_css_class("flowmux-pane-zoomed");
+            if let Some(badge) = self.pane_zoom_badges.remove(&pane) {
+                badge.unparent();
+            }
+        }
     }
 
     pub fn mark_focused_pane(&self, focused: PaneId) {
@@ -361,6 +387,7 @@ impl PaneRegistry {
             self.surface_stacks.remove(&pane);
             self.surface_tabs.remove(&pane);
             self.pane_tab_containers.remove(&pane);
+            self.pane_zoom_badges.remove(&pane);
             self.pane_workspace.remove(&pane);
         }
 
@@ -557,6 +584,7 @@ impl PaneRegistry {
         self.surface_stacks.remove(&pane);
         self.pane_frames.remove(&pane);
         self.pane_tab_containers.remove(&pane);
+        self.pane_zoom_badges.remove(&pane);
         self.active_terminal_by_pane.remove(&pane);
         self.active_browser_by_pane.remove(&pane);
         // pane_workspace is keyed by this same leaf PaneId; dropping it here

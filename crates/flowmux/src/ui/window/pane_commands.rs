@@ -5,6 +5,25 @@ use super::*;
 
 impl WindowController {
     pub(super) async fn dispatch_pane_command(&self, cmd: GtkCommand) {
+        let zoomed = self.zoomed_pane();
+        let clears_zoom = match &cmd {
+            GtkCommand::PaneSplitApplied { .. }
+            | GtkCommand::SplitFocused { .. }
+            | GtkCommand::CloseFocused { .. }
+            | GtkCommand::FocusDirection { .. }
+            | GtkCommand::CloseSurface { .. }
+            | GtkCommand::TearOffSurface { .. }
+            | GtkCommand::MoveSurfaceToPane { .. }
+            | GtkCommand::MoveSurfaceToWorkspace { .. }
+            | GtkCommand::SplitSurfaceIntoPane { .. }
+            | GtkCommand::ResizePane { .. } => zoomed.is_some(),
+            GtkCommand::FocusPane { pane, .. } => zoomed.is_some_and(|zoom| zoom != *pane),
+            _ => false,
+        };
+        if clears_zoom {
+            self.clear_pane_zoom();
+        }
+
         match cmd {
             GtkCommand::PaneSplitApplied {
                 id,
@@ -468,6 +487,9 @@ impl WindowController {
                 } else {
                     let _ = ack.send(Err(format!("pane not found: {pane}")));
                 }
+            }
+            GtkCommand::TogglePaneZoom { pane } => {
+                self.toggle_pane_zoom(pane);
             }
             GtkCommand::ResizePane { pane, ratio, ack } => {
                 let res = self.resize_pane_ratio(pane, ratio).await;

@@ -67,6 +67,7 @@ pub enum ActionId {
     NewWindow,
     CommandPalette,
     TerminalSearch,
+    TogglePaneZoom,
     /// Copy the focused pane's current working directory to the system
     /// clipboard and surface a toast confirming what was copied.
     CopyPanePath,
@@ -107,6 +108,7 @@ impl ActionId {
             Self::NewWindow => "new-window",
             Self::CommandPalette => "command-palette",
             Self::TerminalSearch => "terminal-search",
+            Self::TogglePaneZoom => "toggle-pane-zoom",
             Self::CopyPanePath => "copy-pane-path",
             Self::ToggleWorktreePanel => "toggle-worktree-panel",
             Self::ToggleFileBrowser => "toggle-file-browser",
@@ -144,6 +146,7 @@ impl ActionId {
             Self::NewWindow => "New window",
             Self::CommandPalette => "Command palette",
             Self::TerminalSearch => "Find in terminal or page",
+            Self::TogglePaneZoom => "Toggle pane zoom",
             Self::CopyPanePath => "Copy focused pane path",
             Self::ToggleWorktreePanel => "Toggle worktree panel",
             Self::ToggleFileBrowser => "Toggle file browser",
@@ -184,6 +187,7 @@ impl ActionId {
             Self::NewWindow,
             Self::CommandPalette,
             Self::TerminalSearch,
+            Self::TogglePaneZoom,
             Self::CopyPanePath,
             Self::ToggleWorktreePanel,
             Self::ToggleFileBrowser,
@@ -247,6 +251,7 @@ const DEFAULTS: &[(ActionId, &[&str])] = &[
     (ActionId::NewWindow, &["<Ctrl><Shift>n"]),
     (ActionId::CommandPalette, &["<Ctrl><Shift>p"]),
     (ActionId::TerminalSearch, &["<Ctrl><Shift>f"]),
+    (ActionId::TogglePaneZoom, &["<Ctrl><Shift>z"]),
     (ActionId::CopyPanePath, &["<Ctrl><Shift>k"]),
     (ActionId::ToggleWorktreePanel, &["<Ctrl><Alt>w"]),
     (ActionId::ToggleFileBrowser, &["<Ctrl><Alt>f"]),
@@ -296,6 +301,7 @@ const DEFAULTS: &[(ActionId, &[&str])] = &[
     (ActionId::NewWindow, &["<Meta><Shift>n"]),
     (ActionId::CommandPalette, &["<Meta><Shift>p"]),
     (ActionId::TerminalSearch, &["<Ctrl><Shift>f"]),
+    (ActionId::TogglePaneZoom, &["<Ctrl><Shift>z"]),
     (ActionId::CopyPanePath, &["<Meta><Shift>k"]),
     (ActionId::ToggleWorktreePanel, &["<Meta><Alt>w"]),
     (ActionId::ToggleFileBrowser, &["<Meta><Alt>f"]),
@@ -502,6 +508,26 @@ mod tests {
             .find(|(action, _)| *action == ActionId::TerminalSearch)
             .unwrap();
         assert_eq!(search.1, vec!["<Alt>f".to_string()]);
+    }
+
+    #[test]
+    fn pane_zoom_default_serializes_and_can_be_rebound() {
+        assert_eq!(
+            default_accels(ActionId::TogglePaneZoom),
+            &["<Ctrl><Shift>z"]
+        );
+
+        let mut overrides = KeybindingOverrides::new();
+        overrides.set(ActionId::TogglePaneZoom, vec!["<Alt>z".to_string()]);
+        let json = serde_json::to_string(&overrides).unwrap();
+        assert!(json.contains(r#""toggle-pane-zoom":["<Alt>z"]"#));
+
+        let resolved = overrides.resolve();
+        let zoom = resolved
+            .iter()
+            .find(|(action, _)| *action == ActionId::TogglePaneZoom)
+            .unwrap();
+        assert_eq!(zoom.1, vec!["<Alt>z".to_string()]);
     }
 
     #[test]

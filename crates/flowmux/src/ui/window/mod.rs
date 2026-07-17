@@ -287,6 +287,26 @@ struct WorktreePanelState {
     panel: WorktreePanel,
 }
 
+const PANE_ZOOM_PAGE: &str = "__pane_zoom";
+
+struct ActivePaneZoom {
+    pane: PaneId,
+    workspace: WorkspaceId,
+    frame: gtk::Widget,
+    origin: PaneZoomOrigin,
+}
+
+enum PaneZoomOrigin {
+    PanedStart { paned: gtk::Paned, position: i32 },
+    PanedEnd { paned: gtk::Paned, position: i32 },
+    WorkspaceRoot,
+}
+
+#[derive(Clone, Default)]
+struct PaneZoomState {
+    active: Rc<RefCell<Option<ActivePaneZoom>>>,
+}
+
 #[derive(Clone)]
 pub struct WindowController {
     pub window: adw::ApplicationWindow,
@@ -298,6 +318,7 @@ pub struct WindowController {
     worktrees: WorktreePanelState,
     file_browser: FileBrowserState,
     agent_bar: AgentBarState,
+    pane_zoom: PaneZoomState,
     callbacks: PaneCallbacks,
     bridge: Bridge,
     /// Currently applied visual theme. Swapped in place by
@@ -330,6 +351,50 @@ fn wsl_resize_handles_enabled() -> bool {
     !crate::platform::env_flag_enabled("FLOWMUX_NO_WSL_RESIZE_HANDLES")
         && (crate::platform::running_under_wsl()
             || crate::platform::env_flag_enabled("FLOWMUX_WSL_RESIZE_HANDLES"))
+}
+
+fn restore_paned_position(paned: gtk::Paned, position: i32) {
+    paned.set_position(position);
+    glib::idle_add_local_once(move || paned.set_position(position));
+}
+
+fn detach_pane_for_zoom(frame: &gtk::Widget, stack: &gtk::Stack) -> Option<PaneZoomOrigin> {
+    let parent = frame.parent()?;
+    let origin = if let Ok(paned) = parent.clone().downcast::<gtk::Paned>() {
+        let position = paned.position();
+        if paned.start_child().as_ref() == Some(frame) {
+            paned.set_start_child(gtk::Widget::NONE);
+            PaneZoomOrigin::PanedStart { paned, position }
+        } else if paned.end_child().as_ref() == Some(frame) {
+            paned.set_end_child(gtk::Widget::NONE);
+            PaneZoomOrigin::PanedEnd { paned, position }
+        } else {
+            return None;
+        }
+    } else if parent == stack.clone().upcast::<gtk::Widget>() {
+        return Some(PaneZoomOrigin::WorkspaceRoot);
+    } else {
+        return None;
+    };
+    stack.add_named(frame, Some(PANE_ZOOM_PAGE));
+    stack.set_visible_child_name(PANE_ZOOM_PAGE);
+    Some(origin)
+}
+
+fn restore_pane_from_zoom(frame: &gtk::Widget, stack: &gtk::Stack, origin: PaneZoomOrigin) {
+    match origin {
+        PaneZoomOrigin::PanedStart { paned, position } => {
+            stack.remove(frame);
+            paned.set_start_child(Some(frame));
+            restore_paned_position(paned, position);
+        }
+        PaneZoomOrigin::PanedEnd { paned, position } => {
+            stack.remove(frame);
+            paned.set_end_child(Some(frame));
+            restore_paned_position(paned, position);
+        }
+        PaneZoomOrigin::WorkspaceRoot => {}
+    }
 }
 
 fn set_window_content(window: &adw::ApplicationWindow, content: &impl IsA<gtk::Widget>) {
@@ -542,6 +607,60 @@ impl WindowController {
     /// Snapshot of the currently applied theme.
     pub(super) fn current_theme(&self) -> Arc<ResolvedTheme> {
         self.theme.borrow().clone()
+    }
+
+    fn zoomed_pane(&self) -> Option<PaneId> {
+        self.pane_zoom
+            .active
+            .borrow()
+            .as_ref()
+            .map(|zoom| zoom.pane)
+    }
+
+    fn toggle_pane_zoom(&self, pane: PaneId) {
+        if self.zoomed_pane() == Some(pane) {
+            self.clear_pane_zoom();
+            self.focus_pane(pane);
+            return;
+        }
+        self.clear_pane_zoom();
+
+        let (frame, workspace) = {
+            let registry = self.pane_registry.borrow();
+            let Some(frame) = registry.pane_frame(pane) else {
+                return;
+            };
+            let Some(workspace) = registry.workspace_of_pane(pane) else {
+                return;
+            };
+            (frame, workspace)
+        };
+        let Some(origin) = detach_pane_for_zoom(&frame, &self.stack) else {
+            tracing::warn!(%pane, "pane zoom: unsupported parent");
+            return;
+        };
+        self.pane_registry.borrow_mut().set_pane_zoomed(pane, true);
+        *self.pane_zoom.active.borrow_mut() = Some(ActivePaneZoom {
+            pane,
+            workspace,
+            frame,
+            origin,
+        });
+        self.focus_pane(pane);
+    }
+
+    fn clear_pane_zoom(&self) -> Option<PaneId> {
+        let active = self.pane_zoom.active.borrow_mut().take()?;
+        self.pane_registry
+            .borrow_mut()
+            .set_pane_zoomed(active.pane, false);
+
+        restore_pane_from_zoom(&active.frame, &self.stack, active.origin);
+        if self.surfaces.borrow().contains_key(&active.workspace) {
+            self.stack
+                .set_visible_child_name(&active.workspace.to_string());
+        }
+        Some(active.pane)
     }
 
     /// Re-resolve the theme from `opts` and repaint everything that
@@ -858,6 +977,7 @@ impl WindowController {
                 bar: agent_bar,
                 attentions: agent_bar_attentions,
             },
+            pane_zoom: PaneZoomState::default(),
             callbacks,
             bridge,
             theme: Rc::new(RefCell::new(theme)),
@@ -950,6 +1070,9 @@ impl WindowController {
     }
 
     fn render_workspace_with_activation(&self, ws: &Workspace, activate: bool) {
+        if activate {
+            self.clear_pane_zoom();
+        }
         self.sidebar.upsert(ws);
         let mut surfaces = self.surfaces.borrow_mut();
         if surfaces.contains_key(&ws.id) {
@@ -971,6 +1094,7 @@ impl WindowController {
     }
 
     pub fn rerender_workspace(&self, ws: &Workspace) {
+        self.clear_pane_zoom();
         self.sidebar.upsert(ws);
         let name = ws.id.to_string();
         self.pane_registry.borrow_mut().clear_workspace(ws.id);
@@ -1222,6 +1346,15 @@ impl WindowController {
     /// Drop the workspace's stack page entirely (used when its last
     /// surface is closed).
     pub fn drop_workspace(&self, id: WorkspaceId) {
+        let dropping_zoomed_workspace = self
+            .pane_zoom
+            .active
+            .borrow()
+            .as_ref()
+            .is_some_and(|zoom| zoom.workspace == id);
+        if dropping_zoomed_workspace {
+            self.clear_pane_zoom();
+        }
         self.sidebar.remove(id);
         self.pane_registry.borrow_mut().clear_workspace(id);
         let mut surfaces = self.surfaces.borrow_mut();
@@ -1478,6 +1611,9 @@ impl WindowController {
     }
 
     pub async fn dispatch(&self, cmd: GtkCommand) {
+        if matches!(&cmd, GtkCommand::BrowserOpenSplit { .. }) {
+            self.clear_pane_zoom();
+        }
         match cmd {
             command @ (GtkCommand::BrowserEval { .. }
             | GtkCommand::BrowserAction { .. }
@@ -1544,6 +1680,7 @@ impl WindowController {
             | GtkCommand::PaneSendKeys { .. }
             | GtkCommand::PaneReadScreen { .. }
             | GtkCommand::FocusPane { .. }
+            | GtkCommand::TogglePaneZoom { .. }
             | GtkCommand::ResizePane { .. }) => {
                 self.dispatch_pane_command(command).await;
             }
@@ -1647,6 +1784,7 @@ impl WindowController {
     /// active workspace, and grab focus on its first leaf so keyboard
     /// shortcuts work immediately.
     async fn activate_workspace(&self, id: WorkspaceId) {
+        self.clear_pane_zoom();
         if self.surfaces.borrow().contains_key(&id) {
             self.stack.set_visible_child_name(&id.to_string());
         }
@@ -2467,6 +2605,39 @@ mod tests {
 
     fn agent_bar_visible(controller: &WindowController) -> bool {
         controller.agent_bar.bar.root.property::<bool>("visible")
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[gtk::test]
+    fn pane_zoom_view_round_trip_preserves_split_position_and_model() {
+        let pane = PaneId::new();
+        let workspace = workspace_with_tabbed_surface(
+            pane,
+            PaneSurface::terminal("zoom", None),
+            PathBuf::from("/tmp/flowmux-zoom"),
+        );
+        let model_before = serde_json::to_string(&workspace).unwrap();
+
+        let zoomed = gtk::Box::new(gtk::Orientation::Vertical, 0).upcast::<gtk::Widget>();
+        let sibling = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let paned = gtk::Paned::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .start_child(&zoomed)
+            .end_child(&sibling)
+            .position(321)
+            .build();
+        let stack = gtk::Stack::new();
+        stack.add_named(&paned, Some(&workspace.id.to_string()));
+
+        let origin = detach_pane_for_zoom(&zoomed, &stack).expect("split pane can zoom");
+        assert!(paned.start_child().is_none());
+        assert_eq!(stack.visible_child_name().as_deref(), Some(PANE_ZOOM_PAGE));
+
+        restore_pane_from_zoom(&zoomed, &stack, origin);
+        assert_eq!(paned.start_child().as_ref(), Some(&zoomed));
+        assert_eq!(paned.position(), 321);
+        assert!(stack.child_by_name(PANE_ZOOM_PAGE).is_none());
+        assert_eq!(serde_json::to_string(&workspace).unwrap(), model_before);
     }
 
     fn workspace_with_tabbed_surface(

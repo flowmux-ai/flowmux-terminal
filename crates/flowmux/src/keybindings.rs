@@ -219,6 +219,19 @@ pub fn install_actions(
             })
             .build()
     };
+    let toggle_pane_zoom = make_pane_action(
+        "toggle-pane-zoom",
+        focused.clone(),
+        Box::new({
+            let bridge = bridge.clone();
+            move |pane| {
+                let bridge = bridge.clone();
+                glib::MainContext::default().spawn_local(async move {
+                    let _ = bridge.tx.send(GtkCommand::TogglePaneZoom { pane }).await;
+                });
+            }
+        }),
+    );
     let new_surface = make_pane_action(
         "new-surface",
         focused.clone(),
@@ -381,6 +394,7 @@ pub fn install_actions(
         new_window,
         command_palette,
         terminal_search,
+        toggle_pane_zoom,
         next_workspace,
         prev_workspace,
         w1,
@@ -769,6 +783,15 @@ mod tests {
             vec!["<Ctrl><Shift>f"]
         );
         assert!(ActionId::TerminalSearch.is_user_editable());
+    }
+
+    #[test]
+    fn ctrl_shift_z_toggles_focused_pane_zoom() {
+        assert_eq!(
+            default_for(ActionId::TogglePaneZoom),
+            vec!["<Ctrl><Shift>z"]
+        );
+        assert!(ActionId::TogglePaneZoom.is_user_editable());
     }
 
     #[test]

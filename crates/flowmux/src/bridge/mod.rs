@@ -247,6 +247,8 @@ pub enum GtkCommand {
         pane: PaneId,
         ack: oneshot::Sender<Result<(), String>>,
     },
+    /// Temporarily expand one pane without changing the persisted split tree.
+    TogglePaneZoom { pane: PaneId },
     ResizePane {
         pane: PaneId,
         ratio: f32,

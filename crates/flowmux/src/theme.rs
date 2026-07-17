@@ -270,6 +270,13 @@ impl ResolvedTheme {
 .flowmux-pane-tabs {{
     margin: 0;
 }}
+.flowmux-pane-zoom-badge {{
+    color: {focus_full};
+    border: 1px solid {focus};
+    border-radius: 4px;
+    margin: 3px 4px 3px 5px;
+    padding: 0 5px;
+}}
 .flowmux-pane-tab {{
     margin: 2px 1px 0 0;
     border: 0;
