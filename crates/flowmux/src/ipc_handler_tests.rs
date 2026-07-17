@@ -132,9 +132,11 @@ async fn surface_create_dispatches_to_gtk_and_returns_surface_with_pane() {
     let (handler, rx, pane, _tab) = single_pane_handler().await;
     let workspace = handler.inner.store().active_or_first().await.unwrap();
     let cwd = std::path::PathBuf::from("/tmp/flowmux-new-tab");
+    let shell = "/bin/dash".to_string();
     let response = handler.handle(Request::SurfaceCreate {
         workspace,
         cwd: Some(cwd.clone()),
+        shell: Some(shell.clone()),
     });
     tokio::pin!(response);
 
@@ -145,6 +147,7 @@ async fn surface_create_dispatches_to_gtk_and_returns_surface_with_pane() {
     let GtkCommand::CreateSurface {
         workspace: command_workspace,
         cwd: command_cwd,
+        shell: command_shell,
         ack,
     } = command
     else {
@@ -152,6 +155,7 @@ async fn surface_create_dispatches_to_gtk_and_returns_surface_with_pane() {
     };
     assert_eq!(command_workspace, workspace);
     assert_eq!(command_cwd, Some(cwd));
+    assert_eq!(command_shell, Some(shell));
     let id = SurfaceId::new();
     ack.send(Ok((pane, id))).unwrap();
 
@@ -172,6 +176,7 @@ async fn surface_create_rejects_unknown_workspace_without_dispatch() {
             .handle(Request::SurfaceCreate {
                 workspace,
                 cwd: None,
+                shell: None,
             })
             .await,
         Response::Error(RpcError::NotFound(_))

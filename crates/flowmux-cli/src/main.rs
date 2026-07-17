@@ -240,6 +240,8 @@ enum Cmd {
         workspace: Option<WorkspaceId>,
         #[arg(long)]
         cwd: Option<PathBuf>,
+        #[arg(long)]
+        shell: Option<String>,
     },
 
     /// In-app browser automation: `flowmux browser <op> …`. This is the

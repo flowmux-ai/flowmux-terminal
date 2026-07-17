@@ -233,11 +233,13 @@ pub enum Request {
         workspace: WorkspaceId,
     },
 
-    /// `flowmux new-tab [--workspace <workspace>] [--cwd <dir>]` —
+    /// `flowmux new-tab [--workspace <workspace>] [--cwd <dir>] [--shell <path>]` —
     /// opens a new terminal tab.
     SurfaceCreate {
         workspace: WorkspaceId,
         cwd: Option<PathBuf>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shell: Option<String>,
     },
 
     /// `flowmux pane split <pane> --right|--down`
@@ -832,12 +834,23 @@ mod tests {
         let request = Request::SurfaceCreate {
             workspace,
             cwd: Some(PathBuf::from("/tmp/new-tab")),
+            shell: Some("/bin/dash".into()),
         };
         let request_json = serde_json::to_string(&request).unwrap();
         assert!(matches!(
             serde_json::from_str::<Request>(&request_json).unwrap(),
-            Request::SurfaceCreate { workspace: got, cwd: Some(cwd) }
-                if got == workspace && cwd == std::path::Path::new("/tmp/new-tab")
+            Request::SurfaceCreate { workspace: got, cwd: Some(cwd), shell: Some(shell) }
+                if got == workspace
+                    && cwd == std::path::Path::new("/tmp/new-tab")
+                    && shell == "/bin/dash"
+        ));
+
+        let legacy_json =
+            format!(r#"{{"verb":"surface_create","workspace":"{workspace}","cwd":null}}"#);
+        assert!(matches!(
+            serde_json::from_str::<Request>(&legacy_json).unwrap(),
+            Request::SurfaceCreate { workspace: got, cwd: None, shell: None }
+                if got == workspace
         ));
 
         let id = SurfaceId::new();

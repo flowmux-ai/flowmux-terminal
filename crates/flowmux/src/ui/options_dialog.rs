@@ -115,6 +115,7 @@ fn build_dialog(
     let auto_resume_check = build_persist_check(current.auto_resume_agent_sessions);
     let scrollback_check = build_persist_check(current.restore_terminal_scrollback);
     let scrollback_lines_spin = build_scrollback_lines_spin(current.scrollback_lines_or_default());
+    let default_shell_entry = build_default_shell_entry(current.default_shell.as_deref());
     let system_notify_switch = build_system_notify_switch(current.system_notifications_enabled);
     let agent_bar_switch = build_agent_bar_switch(current.agent_bar_enabled);
     let cursor_blink_switch = build_cursor_blink_switch(current.cursor_blink);
@@ -136,6 +137,7 @@ fn build_dialog(
     general.append(&row("Resume agent sessions on reopen", &auto_resume_check));
     general.append(&row("Restore terminal scrollback", &scrollback_check));
     general.append(&row("Terminal scrollback lines", &scrollback_lines_spin));
+    general.append(&row("Default shell", &default_shell_entry));
     general.append(&row("System notifications", &system_notify_switch));
     general.append(&row("Agent Bar", &agent_bar_switch));
     general.append(&row("Cursor blink", &cursor_blink_switch));
@@ -295,6 +297,7 @@ fn build_dialog(
         let auto_resume_check = auto_resume_check.clone();
         let scrollback_check = scrollback_check.clone();
         let scrollback_lines_spin = scrollback_lines_spin.clone();
+        let default_shell_entry = default_shell_entry.clone();
         let system_notify_switch = system_notify_switch.clone();
         let agent_bar_switch = agent_bar_switch.clone();
         let cursor_blink_switch = cursor_blink_switch.clone();
@@ -325,6 +328,7 @@ fn build_dialog(
                 &auto_resume_check,
                 &scrollback_check,
                 &scrollback_lines_spin,
+                &default_shell_entry,
                 &system_notify_switch,
                 &agent_bar_switch,
                 &cursor_blink_switch,
@@ -889,6 +893,7 @@ fn collect_options(
     auto_resume_check: &gtk::CheckButton,
     scrollback_check: &gtk::CheckButton,
     scrollback_lines_spin: &gtk::SpinButton,
+    default_shell_entry: &gtk::Entry,
     system_notify_switch: &gtk::Switch,
     agent_bar_switch: &gtk::Switch,
     cursor_blink_switch: &gtk::Switch,
@@ -933,6 +938,9 @@ fn collect_options(
         restore_terminal_scrollback: scrollback_check.is_active(),
         scrollback_lines: Some(Options::clamp_scrollback_lines(
             scrollback_lines_spin.value_as_int().max(0) as u32,
+        )),
+        default_shell: Options::normalize_default_shell(Some(
+            default_shell_entry.text().to_string(),
         )),
         system_notifications_enabled: system_notify_switch.is_active(),
         agent_bar_enabled: agent_bar_switch.is_active(),
@@ -1187,6 +1195,14 @@ fn build_scrollback_lines_spin(initial: u32) -> gtk::SpinButton {
     spin.set_halign(gtk::Align::End);
     spin.set_tooltip_text(Some("Applies to new terminal tabs only"));
     spin
+}
+
+fn build_default_shell_entry(initial: Option<&str>) -> gtk::Entry {
+    let entry = gtk::Entry::new();
+    entry.set_text(initial.unwrap_or_default());
+    entry.set_placeholder_text(Some("$SHELL 사용"));
+    entry.set_tooltip_text(Some("Applies to newly created terminal tabs."));
+    entry
 }
 
 /// Toggle for [`Options::system_notifications_enabled`]. When off,
@@ -1444,6 +1460,7 @@ mod tests {
         let auto_resume_off = build_persist_check(false);
         let scrollback_on = build_persist_check(true);
         let scrollback_lines = build_scrollback_lines_spin(42_000);
+        let default_shell = build_default_shell_entry(Some("/bin/dash"));
         // Two-entry font picker: index 0 = inherit, index 1 = a concrete family.
         let family_drop = gtk::DropDown::from_strings(&["System default", "Fira Code"]);
         let families = vec![None, Some("Fira Code".to_string())];
@@ -1466,6 +1483,7 @@ mod tests {
             &auto_resume_off,
             &scrollback_on,
             &scrollback_lines,
+            &default_shell,
             &notify_on,
             &agent_bar_on,
             &blink_on,
@@ -1492,6 +1510,7 @@ mod tests {
         assert!(!opts.auto_resume_agent_sessions);
         assert!(opts.restore_terminal_scrollback);
         assert_eq!(opts.scrollback_lines, Some(42_000));
+        assert_eq!(opts.default_shell.as_deref(), Some("/bin/dash"));
         // Index 0 selected + size left at the theme default → font inherits.
         assert_eq!(opts.font_family, None);
         assert_eq!(opts.font_size, None);
@@ -1506,6 +1525,7 @@ mod tests {
         let agent_bar_off = build_agent_bar_switch(false);
         let blink_off = build_cursor_blink_switch(false);
         let blink_interval = build_blink_interval_spin(800);
+        default_shell.set_text("  ");
         let opts = collect_options(
             &zoom,
             &engine,
@@ -1515,6 +1535,7 @@ mod tests {
             &auto_resume_on,
             &scrollback_off,
             &scrollback_lines,
+            &default_shell,
             &notify_off,
             &agent_bar_off,
             &blink_off,
@@ -1538,6 +1559,7 @@ mod tests {
         assert!(!opts.restore_terminal_scrollback);
         assert!(!opts.system_notifications_enabled);
         assert!(!opts.agent_bar_enabled);
+        assert_eq!(opts.default_shell, None);
         assert_eq!(opts.font_family, Some("Fira Code".to_string()));
         assert_eq!(opts.font_size, Some(15.0));
     }

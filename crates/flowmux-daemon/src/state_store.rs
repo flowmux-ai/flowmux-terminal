@@ -1687,6 +1687,16 @@ impl StateStore {
         pane: PaneId,
         cwd: Option<std::path::PathBuf>,
     ) -> Option<(WorkspaceId, SurfaceId)> {
+        self.add_terminal_surface_to_pane_with_shell(pane, cwd, None)
+            .await
+    }
+
+    pub async fn add_terminal_surface_to_pane_with_shell(
+        &self,
+        pane: PaneId,
+        cwd: Option<std::path::PathBuf>,
+        shell: Option<String>,
+    ) -> Option<(WorkspaceId, SurfaceId)> {
         let mut s = self.inner.lock().await;
         for ws in s.workspaces.iter_mut() {
             for surface in ws.surfaces.iter_mut() {
@@ -1695,7 +1705,13 @@ impl StateStore {
                     .or_else(|| surface.root_pane.terminal_surface_cwd(pane))
                     .or_else(|| Some(ws.root_dir.clone()));
                 let title = terminal_tab_title_for_cwd(resolved_cwd.as_deref());
-                let tab = PaneSurface::terminal(title, resolved_cwd);
+                let mut tab = PaneSurface::terminal(title, resolved_cwd);
+                if let SurfaceKind::Terminal {
+                    shell: tab_shell, ..
+                } = &mut tab.kind
+                {
+                    *tab_shell = shell.clone();
+                }
                 if let Some(surface_id) = surface.root_pane.add_surface_to_leaf(pane, tab) {
                     let ws_id = ws.id;
                     drop(s);
@@ -3397,6 +3413,29 @@ Do you want to continue?";
             CloseOutcome::WorkspaceRemoved { workspace } if workspace == ws_id
         ));
         assert!(store.snapshot().await.workspaces.is_empty());
+    }
+
+    #[tokio::test]
+    async fn terminal_tab_shell_override_is_stored_on_the_new_surface() {
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("shell".into()), std::path::PathBuf::from("/tmp"))
+            .await;
+        let pane = first_pane(&store.get_workspace(ws_id).await.unwrap());
+        let (_, surface) = store
+            .add_terminal_surface_to_pane_with_shell(pane, None, Some("/bin/dash".to_string()))
+            .await
+            .unwrap();
+
+        let workspace = store.get_workspace(ws_id).await.unwrap();
+        let tab = workspace.surfaces[0]
+            .root_pane
+            .find_surface(pane, surface)
+            .unwrap();
+        assert!(matches!(
+            &tab.kind,
+            SurfaceKind::Terminal { shell: Some(shell), .. } if shell == "/bin/dash"
+        ));
     }
 
     #[tokio::test]

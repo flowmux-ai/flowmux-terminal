@@ -506,14 +506,18 @@ fn new_tab_parses_explicit_workspace_cwd_and_json() {
         &workspace_ref,
         "--cwd",
         "/tmp/new-tab",
+        "--shell",
+        "/bin/dash",
         "--json",
     ])
     .unwrap();
     assert!(cli.json);
     assert!(matches!(
         build_request(cli.cmd).unwrap(),
-        Request::SurfaceCreate { workspace: got, cwd: Some(cwd) }
-            if got == workspace && cwd == std::path::Path::new("/tmp/new-tab")
+        Request::SurfaceCreate { workspace: got, cwd: Some(cwd), shell: Some(shell) }
+            if got == workspace
+                && cwd == std::path::Path::new("/tmp/new-tab")
+                && shell == "/bin/dash"
     ));
 }
 
@@ -531,7 +535,7 @@ fn new_tab_falls_back_to_workspace_env() {
     }
     assert!(matches!(
         request.unwrap(),
-        Request::SurfaceCreate { workspace: got, cwd: None } if got == workspace
+        Request::SurfaceCreate { workspace: got, cwd: None, shell: None } if got == workspace
     ));
 }
 

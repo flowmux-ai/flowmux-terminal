@@ -2484,7 +2484,32 @@ fn build_panel(
 ) -> gtk::Widget {
     match &surface.kind {
         SurfaceKind::Terminal { cwd, shell } => {
-            let mut argv = shell.clone().map(|s| vec![s]).unwrap_or(argv);
+            let opts = (callbacks.read_options)();
+            let inherited_shell = argv.first().map(String::as_str);
+            let requested_shell = preferred_shell(
+                shell.as_deref().or(inherited_shell),
+                opts.default_shell.as_deref(),
+            )
+            .map(str::to_string);
+            let mut argv = argv;
+            let mut resolved_shell = None;
+            let mut shell_warning = None;
+            if let Some(requested_shell) = requested_shell.as_deref() {
+                match flowmux_terminal::validate_shell_command(requested_shell) {
+                    Ok(()) => {
+                        resolved_shell = Some(requested_shell.to_string());
+                        argv = vec![requested_shell.to_string()];
+                    }
+                    Err(error) => {
+                        tracing::warn!(shell = requested_shell, %error, "configured shell is unavailable");
+                        argv.clear();
+                        shell_warning = Some(format!(
+                            "flowmux: cannot start shell {requested_shell:?}: {error}\r\n\
+                             Falling back to $SHELL.\r\n"
+                        ));
+                    }
+                }
+            }
             // Match the per-PID socket that `flowmux::main` binds, so
             // PTYs inside this GUI window route their notifications
             // back to the SAME GUI even when multiple flowmux windows
@@ -2503,7 +2528,6 @@ fn build_panel(
             );
             // Start the new terminal widget with the current font + zoom
             // options so a freshly spawned tab matches the live ones.
-            let opts = (callbacks.read_options)();
             let font = theme.font_with_overrides(opts.font_family.as_deref(), opts.font_size);
             let resume_command = take_restored_agent_shell_command(
                 surface.id,
@@ -2519,7 +2543,7 @@ fn build_panel(
                     argv = shell.clone().map(|s| vec![s]).unwrap_or_default();
                     resume_input = Some(format!("{command}\n"));
                 } else {
-                    let shell = shell
+                    let shell = resolved_shell
                         .clone()
                         .or_else(|| argv.first().cloned())
                         .or_else(|| std::env::var("SHELL").ok())
@@ -2549,6 +2573,9 @@ fn build_panel(
                 surface.scrollback.as_deref(),
             ) {
                 pane.restore_scrollback(&scrollback);
+            }
+            if let Some(message) = shell_warning {
+                pane.show_message(&message);
             }
             if let Some(command) = resume_input {
                 let terminal = pane.clone();
@@ -2638,6 +2665,13 @@ fn build_panel(
     }
 }
 
+fn preferred_shell<'a>(per_tab: Option<&'a str>, default: Option<&'a str>) -> Option<&'a str> {
+    per_tab
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| default.map(str::trim).filter(|value| !value.is_empty()))
+}
+
 fn take_restored_agent_shell_command(
     surface: SurfaceId,
     enabled: bool,
@@ -2696,6 +2730,20 @@ fn normalize_scrollback_snapshot(text: &str) -> String {
 #[cfg(test)]
 mod resume_tests {
     use super::*;
+
+    #[test]
+    fn per_tab_shell_overrides_default_and_empty_values_are_ignored() {
+        assert_eq!(
+            preferred_shell(Some(" /bin/dash "), Some("/bin/zsh")),
+            Some("/bin/dash")
+        );
+        assert_eq!(preferred_shell(None, Some(" /bin/zsh ")), Some("/bin/zsh"));
+        assert_eq!(
+            preferred_shell(Some("  "), Some("/bin/sh")),
+            Some("/bin/sh")
+        );
+        assert_eq!(preferred_shell(Some("  "), Some("  ")), None);
+    }
 
     #[test]
     fn restored_agent_command_respects_setting_and_surface_binding() {

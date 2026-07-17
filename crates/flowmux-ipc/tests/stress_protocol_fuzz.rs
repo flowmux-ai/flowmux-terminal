@@ -70,10 +70,12 @@ fn requests_for_round_trip(rng: &mut Xs) -> Vec<Request> {
         Request::SurfaceCreate {
             workspace: ws,
             cwd: Some(PathBuf::from("/var/log")),
+            shell: Some("/bin/sh".into()),
         },
         Request::SurfaceCreate {
             workspace: ws,
             cwd: None,
+            shell: None,
         },
         Request::PaneSplit {
             pane,

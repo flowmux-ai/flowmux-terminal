@@ -139,6 +139,7 @@ impl WindowController {
             GtkCommand::CreateSurface {
                 workspace,
                 cwd,
+                shell,
                 ack,
             } => {
                 let focused = self.focused_pane.get();
@@ -155,7 +156,11 @@ impl WindowController {
                         }),
                 };
                 let result = match pane {
-                    Some(pane) => match self.store.add_terminal_surface_to_pane(pane, cwd).await {
+                    Some(pane) => match self
+                        .store
+                        .add_terminal_surface_to_pane_with_shell(pane, cwd, shell)
+                        .await
+                    {
                         Some((ws_id, surface)) => {
                             self.attach_or_rerender_surface(ws_id, pane, surface).await;
                             Ok((pane, surface))

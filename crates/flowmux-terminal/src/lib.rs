@@ -4,6 +4,7 @@
 //! layer renders with VTE, so this crate no longer carries a VT core.
 
 use flowmux_core::{PaneId, SurfaceId, WorkspaceId};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 /// Env vars flowmux injects into every PTY spawn so terminal-side agents
@@ -72,6 +73,46 @@ pub fn env_to_kv_strings(env: &[(String, String)]) -> Vec<String> {
     env.iter().map(|(k, v)| format!("{k}={v}")).collect()
 }
 
+/// Confirm that an explicit shell can be executed. Paths are checked directly;
+/// bare command names are resolved through `PATH`, matching `execvp(3)`.
+pub fn validate_shell_command(shell: &str) -> std::io::Result<()> {
+    let shell = shell.trim();
+    if shell.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "shell command is empty",
+        ));
+    }
+
+    let path = Path::new(shell);
+    let found = if path.components().count() > 1 {
+        is_executable_file(path)
+    } else {
+        std::env::var_os("PATH")
+            .map(|path_var| {
+                std::env::split_paths(&path_var)
+                    .map(|dir| dir.join(shell))
+                    .any(|candidate| is_executable_file(&candidate))
+            })
+            .unwrap_or(false)
+    };
+
+    if found {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("shell is not executable: {shell}"),
+        ))
+    }
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
 /// Locate the `flowmuxctl` helper binary so the GUI can wrap a shell
 /// spawn with `flowmuxctl pty-tee -- <argv>` (the OSC-notification
 /// snooper). The lookup mirrors the priority in
@@ -128,6 +169,26 @@ pub use key_modes::TerminalInputModes;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shell_validation_accepts_paths_and_path_commands() {
+        validate_shell_command("/bin/sh").expect("/bin/sh should be executable");
+        validate_shell_command("sh").expect("sh should resolve through PATH");
+    }
+
+    #[test]
+    fn shell_validation_rejects_empty_and_missing_paths() {
+        assert_eq!(
+            validate_shell_command("  ").unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            validate_shell_command("/bin/flowmux-shell-does-not-exist")
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+    }
     use std::path::PathBuf;
 
     fn collect<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str> {

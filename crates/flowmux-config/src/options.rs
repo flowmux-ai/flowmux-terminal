@@ -146,6 +146,10 @@ pub struct Options {
     /// the built-in 10,000-line default for older option files.
     #[serde(default)]
     pub scrollback_lines: Option<u32>,
+    /// Shell command used by newly created terminal tabs. `None` resolves from
+    /// `$SHELL`; per-tab shell requests override this value.
+    #[serde(default)]
+    pub default_shell: Option<String>,
     /// When true, notifications are delivered as system desktop toasts
     /// (libnotify / D-Bus) in addition to the in-app bell list. When false,
     /// notifications still appear in the in-app bell list but no system toast
@@ -252,6 +256,7 @@ impl Default for Options {
             auto_resume_agent_sessions: default_auto_resume_agent_sessions(),
             restore_terminal_scrollback: default_restore_terminal_scrollback(),
             scrollback_lines: None,
+            default_shell: None,
             system_notifications_enabled: default_system_notifications_enabled(),
             agent_bar_enabled: default_agent_bar_enabled(),
             cursor_blink: default_cursor_blink(),
@@ -401,6 +406,19 @@ impl Options {
         self
     }
 
+    /// Trim a configured shell and map empty text to `$SHELL` behavior.
+    pub fn normalize_default_shell(shell: Option<String>) -> Option<String> {
+        shell
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
+
+    /// Builder-style setter for the default terminal shell.
+    pub fn with_default_shell(mut self, shell: Option<String>) -> Self {
+        self.default_shell = Self::normalize_default_shell(shell);
+        self
+    }
+
     /// Builder-style setter for the system-notification (desktop toast) flag.
     pub fn with_system_notifications_enabled(mut self, enabled: bool) -> Self {
         self.system_notifications_enabled = enabled;
@@ -472,6 +490,7 @@ pub fn load() -> Options {
         focus_border_color,
         focus_border_opacity: Options::clamp_focus_border_opacity(opts.focus_border_opacity),
         scrollback_lines: opts.scrollback_lines.map(Options::clamp_scrollback_lines),
+        default_shell: Options::normalize_default_shell(opts.default_shell),
         ..opts
     }
 }
@@ -903,6 +922,39 @@ mod tests {
             let back = load();
             assert_eq!(back.scrollback_lines, Some(42_000));
             assert_eq!(back.scrollback_lines_or_default(), 42_000);
+        });
+    }
+
+    #[test]
+    fn default_shell_normalizes_empty_and_round_trips() {
+        assert_eq!(Options::default().default_shell, None);
+        assert_eq!(
+            Options::default()
+                .with_default_shell(Some("  /bin/dash  ".into()))
+                .default_shell,
+            Some("/bin/dash".into())
+        );
+        assert_eq!(
+            Options::default()
+                .with_default_shell(Some("  ".into()))
+                .default_shell,
+            None
+        );
+
+        with_xdg(|_| {
+            let opts = Options::default().with_default_shell(Some("/bin/sh".into()));
+            save(&opts).unwrap();
+            assert_eq!(load().default_shell.as_deref(), Some("/bin/sh"));
+        });
+    }
+
+    #[test]
+    fn options_load_normalizes_empty_default_shell() {
+        with_xdg(|root| {
+            let path = root.join("flowmux").join("options.json");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, r#"{"default_shell":"   "}"#).unwrap();
+            assert_eq!(load().default_shell, None);
         });
     }
 

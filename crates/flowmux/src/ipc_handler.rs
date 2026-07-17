@@ -279,7 +279,11 @@ impl GuiHandler {
                     Response::Error(RpcError::NotFound(workspace.to_string()))
                 }
             }
-            Request::SurfaceCreate { workspace, cwd } => {
+            Request::SurfaceCreate {
+                workspace,
+                cwd,
+                shell,
+            } => {
                 if self.inner.store().get_workspace(workspace).await.is_none() {
                     return Response::Error(RpcError::NotFound(workspace.to_string()));
                 }
@@ -290,6 +294,7 @@ impl GuiHandler {
                     .send(GtkCommand::CreateSurface {
                         workspace,
                         cwd,
+                        shell,
                         ack: tx,
                     })
                     .await

@@ -349,6 +349,11 @@ impl GhosttyPane {
         self.widget.feed(&scrollback_replay_bytes(text));
     }
 
+    /// Display an app-generated message without writing it into the child PTY.
+    pub fn show_message(&self, text: &str) {
+        self.widget.feed(text.as_bytes());
+    }
+
     /// The widget used for focus tracking / identity comparisons in the window
     /// controller. With VTE this is the terminal widget itself.
     #[allow(dead_code)]
