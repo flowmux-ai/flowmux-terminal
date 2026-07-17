@@ -87,7 +87,7 @@ fn build_dialog(
     let dialog = adw::Window::builder()
         .transient_for(parent)
         .default_width(760)
-        .default_height(620)
+        .default_height(720)
         .title("Options")
         .build();
 
@@ -145,6 +145,17 @@ fn build_dialog(
     hint.set_xalign(0.0);
     general.append(&hint);
 
+    // Keep the footer actions reachable when the compositor gives the window
+    // less vertical space than requested. The General page is the only page
+    // whose contents can exceed the dialog height as options are added, so
+    // scroll that page instead of letting it push the About button below the
+    // window edge.
+    let general_scroll = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vscrollbar_policy(gtk::PolicyType::Automatic)
+        .child(&general)
+        .build();
+
     // Keybindings tab — edits write into kb_state below, picked up by
     // collect_options when the user clicks OK.
     let kb_state = std::rc::Rc::new(std::cell::RefCell::new(current.keybindings.clone()));
@@ -188,7 +199,7 @@ fn build_dialog(
     // Settings → Keyboard panel and reads as "shortcuts" at a glance.
     let stack = adw::ViewStack::new();
     stack.add_titled_with_icon(
-        &general,
+        &general_scroll,
         Some("general"),
         "General",
         "preferences-system-symbolic",
@@ -211,12 +222,14 @@ fn build_dialog(
         "Update",
         "software-update-available-symbolic",
     );
+    stack.set_vexpand(true);
     let switcher = adw::ViewSwitcher::new();
     switcher.set_stack(Some(&stack));
     switcher.set_policy(adw::ViewSwitcherPolicy::Wide);
     header.set_title_widget(Some(&switcher));
 
     let body = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    body.set_vexpand(true);
     body.append(&stack);
 
     // Bottom actions. Reset applies Options::default() through the same
