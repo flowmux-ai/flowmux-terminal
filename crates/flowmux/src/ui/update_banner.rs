@@ -3,6 +3,7 @@
 //! `adw::Banner` pinned above the side panel footer, spawns the
 //! periodic release check, and starts the install when the user asks.
 
+use crate::update::origin::{InstallOrigin, UpdateGate};
 use crate::update::{self, BannerState, Event};
 use gtk::prelude::*;
 use std::cell::RefCell;
@@ -12,7 +13,10 @@ use std::rc::Rc;
 /// `(title, button_label, revealed, progress_visible, ignore_visible)`.
 /// `None` for the button label hides the button. Pure so the mapping
 /// stays unit-testable without GTK.
-fn banner_props(state: &BannerState) -> (String, Option<&'static str>, bool, bool, bool) {
+fn banner_props(
+    state: &BannerState,
+    origin: InstallOrigin,
+) -> (String, Option<&'static str>, bool, bool, bool) {
     use crate::update::Stage;
     match state {
         BannerState::Hidden | BannerState::Current | BannerState::Ignored(_) => {
@@ -20,7 +24,10 @@ fn banner_props(state: &BannerState) -> (String, Option<&'static str>, bool, boo
         }
         BannerState::Available(v) => (
             format!("FlowMux {v} is available"),
-            Some("Update"),
+            Some(match update::origin::update_gate(origin) {
+                UpdateGate::SourceBuild => "Update",
+                UpdateGate::ReleasePage => "Open release page (.deb)",
+            }),
             true,
             false,
             true,
@@ -48,7 +55,10 @@ fn banner_props(state: &BannerState) -> (String, Option<&'static str>, bool, boo
         ),
         BannerState::Failed(message, v) => (
             format!("Update to {v} failed: {message} (see ~/.cache/flowmux/update.log)"),
-            Some("Retry"),
+            Some(match update::origin::update_gate(origin) {
+                UpdateGate::SourceBuild => "Retry",
+                UpdateGate::ReleasePage => "Open release page (.deb)",
+            }),
             true,
             false,
             false,
@@ -65,6 +75,7 @@ pub struct UpdateBanner {
     state: Rc<RefCell<BannerState>>,
     tx: async_channel::Sender<Event>,
     tokio_handle: Option<tokio::runtime::Handle>,
+    origin: InstallOrigin,
 }
 
 impl UpdateBanner {
@@ -102,6 +113,7 @@ impl UpdateBanner {
         root.append(&progress);
 
         let (tx, rx) = async_channel::unbounded::<Event>();
+        let origin = update::origin::install_origin();
         let this = Self {
             root,
             banner: banner.clone(),
@@ -114,6 +126,7 @@ impl UpdateBanner {
             )),
             tx,
             tokio_handle: tokio_handle.clone(),
+            origin,
         };
 
         if let Some(handle) = &tokio_handle {
@@ -132,7 +145,11 @@ impl UpdateBanner {
             let actionable = for_click.state.borrow().actionable_version();
             match actionable {
                 Some(version) => {
-                    for_click.start_install(version);
+                    if update::origin::update_gate(for_click.origin) == UpdateGate::SourceBuild {
+                        for_click.start_install(version);
+                    } else if let Err(error) = open_release_page(for_click.origin, version) {
+                        tracing::warn!(%error, %version, "could not open release page");
+                    }
                 }
                 // Done state: the button is "Dismiss". Keep the state —
                 // BannerState::Done ignores re-announcements of the
@@ -163,6 +180,10 @@ impl UpdateBanner {
 
     pub(crate) fn state(&self) -> BannerState {
         self.state.borrow().clone()
+    }
+
+    pub(crate) fn install_origin(&self) -> InstallOrigin {
+        self.origin
     }
 
     /// Run a release check immediately and report the resulting shared state
@@ -206,6 +227,9 @@ impl UpdateBanner {
     /// Returns `false` when no runtime is available or that release is already
     /// installing/installed, allowing other UI entry points to avoid duplicates.
     pub(crate) fn start_install(&self, version: update::check::Version) -> bool {
+        if update::origin::update_gate(self.origin) != UpdateGate::SourceBuild {
+            return false;
+        }
         let Some(handle) = &self.tokio_handle else {
             return false;
         };
@@ -230,7 +254,8 @@ impl UpdateBanner {
     }
 
     fn render_with_previous_running(&self, next: BannerState, was_running: bool) {
-        let (title, button, revealed, progress_visible, ignore_visible) = banner_props(&next);
+        let (title, button, revealed, progress_visible, ignore_visible) =
+            banner_props(&next, self.origin);
         self.banner.set_title(&title);
         self.banner.set_button_label(button);
         self.banner.set_revealed(revealed);
@@ -260,6 +285,17 @@ impl UpdateBanner {
     }
 }
 
+pub(crate) fn open_release_page(
+    origin: InstallOrigin,
+    version: update::check::Version,
+) -> Result<(), gtk::glib::Error> {
+    update::install::record_release_page_decision(origin, version);
+    gtk::gio::AppInfo::launch_default_for_uri(
+        &update::origin::release_page_url(version),
+        None::<&gtk::gio::AppLaunchContext>,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,7 +306,7 @@ mod tests {
     #[test]
     fn hidden_state_reveals_nothing() {
         assert_eq!(
-            banner_props(&BannerState::Hidden),
+            banner_props(&BannerState::Hidden, InstallOrigin::Source),
             (String::new(), None, false, false, false)
         );
     }
@@ -278,7 +314,7 @@ mod tests {
     #[test]
     fn current_state_reveals_nothing() {
         assert_eq!(
-            banner_props(&BannerState::Current),
+            banner_props(&BannerState::Current, InstallOrigin::Source),
             (String::new(), None, false, false, false)
         );
     }
@@ -286,14 +322,15 @@ mod tests {
     #[test]
     fn ignored_state_reveals_nothing() {
         assert_eq!(
-            banner_props(&BannerState::Ignored(V)),
+            banner_props(&BannerState::Ignored(V), InstallOrigin::Source),
             (String::new(), None, false, false, false)
         );
     }
 
     #[test]
     fn available_offers_the_update_button() {
-        let (title, button, revealed, progress, ignore) = banner_props(&BannerState::Available(V));
+        let (title, button, revealed, progress, ignore) =
+            banner_props(&BannerState::Available(V), InstallOrigin::Source);
         assert!(
             title.contains("0.8.0"),
             "title should name the release: {title}"
@@ -305,13 +342,22 @@ mod tests {
     }
 
     #[test]
+    fn packaged_install_offers_release_page_instead_of_source_update() {
+        let (_, button, revealed, progress, _) =
+            banner_props(&BannerState::Available(V), InstallOrigin::Deb);
+        assert_eq!(button, Some("Open release page (.deb)"));
+        assert!(revealed);
+        assert!(!progress);
+    }
+
+    #[test]
     fn running_shows_the_stage_and_no_button() {
         for (stage, needle) in [
             (Stage::Fetching, "downloading"),
             (Stage::Installing, "installing"),
         ] {
             let (title, button, revealed, progress, ignore) =
-                banner_props(&BannerState::Running(stage, V));
+                banner_props(&BannerState::Running(stage, V), InstallOrigin::Source);
             assert!(title.contains(needle), "{title} should mention {needle}");
             assert_eq!(button, None, "no button while running");
             assert!(revealed);
@@ -322,7 +368,8 @@ mod tests {
 
     #[test]
     fn done_announces_next_launch_and_dismisses() {
-        let (title, button, revealed, progress, ignore) = banner_props(&BannerState::Done(V));
+        let (title, button, revealed, progress, ignore) =
+            banner_props(&BannerState::Done(V), InstallOrigin::Source);
         assert!(title.contains("Restart FlowMux"), "{title}");
         assert_eq!(button, Some("Dismiss"));
         assert!(revealed);
@@ -332,8 +379,10 @@ mod tests {
 
     #[test]
     fn failed_offers_retry_and_points_at_the_log() {
-        let (title, button, revealed, progress, ignore) =
-            banner_props(&BannerState::Failed("git fetch exited with 128".into(), V));
+        let (title, button, revealed, progress, ignore) = banner_props(
+            &BannerState::Failed("git fetch exited with 128".into(), V),
+            InstallOrigin::Source,
+        );
         assert!(title.contains("git fetch exited with 128"), "{title}");
         assert!(
             title.contains("update.log"),

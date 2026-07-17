@@ -17,6 +17,7 @@ impl WindowController {
                 let default_font_size = theme.font_size();
                 let update_banner = self.workspace_presenter.sidebar.update_banner();
                 let update_check_banner = update_banner.clone();
+                let install_origin = update_banner.install_origin();
                 let update_state = update_banner.state();
                 crate::ui::options_dialog::present(
                     &self.window,
@@ -76,6 +77,7 @@ impl WindowController {
                     move |opts| {
                         preview_controller.apply_runtime_theme(opts);
                     },
+                    install_origin,
                     update_state,
                     move |on_complete| update_check_banner.check_now(on_complete),
                     move |version| update_banner.start_install(version),

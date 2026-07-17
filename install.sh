@@ -5,8 +5,8 @@
 # app icons to the host, so flowmux shows up in the app launcher / dock.
 #
 # flowmux uses the system GTK4/libadwaita/WebKitGTK/VTE libraries. The image
-# viewer links the system ThorVG (via the thorvg-sys crate in pkg-config mode),
-# so ThorVG must be installed first — see scripts/install-thorvg.sh.
+# viewer discovers ThorVG at runtime with libloading, so the core app builds
+# without it and enables image rendering when the shared library is present.
 #
 # Usage: ./install.sh
 set -euo pipefail

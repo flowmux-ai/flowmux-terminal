@@ -5,8 +5,10 @@
 //! argv, script name) comes from the unit-tested [`check`] module.
 
 use super::check::{self, Version};
+use super::origin::{self, InstallOrigin, UpdateGate};
 use super::{Event, Stage};
 use anyhow::Context;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::Stdio;
 
@@ -21,6 +23,27 @@ fn clone_dir() -> Option<PathBuf> {
 /// Combined log of the last update attempt (git + install script).
 pub fn log_path() -> Option<PathBuf> {
     flowmux_config::paths::host_visible_cache_dir().map(|d| d.join("update.log"))
+}
+
+pub fn record_release_page_decision(origin: InstallOrigin, version: Version) {
+    let Some(path) = log_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+    }
+    if let Ok(mut log) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(
+            log,
+            "install_origin={origin:?} update_action=release_page version={version}"
+        );
+    }
 }
 
 /// Check for a newer release now and then every 24 h, announcing hits
@@ -92,8 +115,39 @@ async fn run_install_inner(
     if let Some(parent) = dir.parent() {
         std::fs::create_dir_all(parent).context("create cache dir")?;
     }
-    let log =
+    let mut log =
         std::fs::File::create(log_path().context("HOME is unset")?).context("create update.log")?;
+    let origin = origin::install_origin();
+    let gate = origin::update_gate(origin);
+    writeln!(
+        log,
+        "install_origin={origin:?} update_action={gate:?} version={version}"
+    )
+    .context("write update decision")?;
+    if gate != UpdateGate::SourceBuild {
+        anyhow::bail!(
+            "source self-update is disabled for {origin:?} installs; use the release page"
+        );
+    }
+
+    // A launcher-started GUI has no ~/.cargo/bin on PATH, so use the same
+    // adjusted PATH for prerequisite checks and the eventual install script.
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let path = check::install_path_env(
+        home.as_deref(),
+        &std::env::var_os("PATH").unwrap_or_default(),
+    );
+    let prerequisite_path = path.clone();
+    let prerequisites =
+        tokio::task::spawn_blocking(move || check_prerequisites(prerequisite_path.as_deref()))
+            .await
+            .context("join prerequisite check")?;
+    if let Err(message) = prerequisites {
+        writeln!(log, "prerequisites=missing detail={message}")
+            .context("write prerequisite failure")?;
+        anyhow::bail!(message);
+    }
+    writeln!(log, "prerequisites=ok").context("write prerequisite result")?;
 
     let _ = tx.send(Event::Stage(Stage::Fetching)).await;
     let tag = version.tag();
@@ -111,13 +165,6 @@ async fn run_install_inner(
 
     let _ = tx.send(Event::Stage(Stage::Installing)).await;
     let script = check::install_script(std::env::consts::OS);
-    // A launcher-started GUI has no ~/.cargo/bin on PATH, so the
-    // script's bare `cargo` would hit an outdated distro toolchain.
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let path = check::install_path_env(
-        home.as_deref(),
-        &std::env::var_os("PATH").unwrap_or_default(),
-    );
     run_logged(
         vec!["bash".to_string(), script.to_string()],
         Some(dir),
@@ -125,6 +172,57 @@ async fn run_install_inner(
         &log,
     )
     .await
+}
+
+fn check_prerequisites(path: Option<&std::ffi::OsStr>) -> Result<(), String> {
+    let mut missing_tools = Vec::new();
+    for tool in ["cargo", "rustc"] {
+        if !command_succeeds(tool, &["--version"], path) {
+            missing_tools.push(tool);
+        }
+    }
+
+    let mut missing_packages = Vec::new();
+    if !command_succeeds("pkg-config", &["--version"], path) {
+        missing_tools.push("pkg-config");
+    } else {
+        for package in ["gtk4", "libadwaita-1", "vte-2.91-gtk4", "webkitgtk-6.0"] {
+            if !command_succeeds("pkg-config", &["--exists", package], path) {
+                missing_packages.push(package);
+            }
+        }
+    }
+    prerequisite_error(&missing_tools, &missing_packages).map_or(Ok(()), Err)
+}
+
+fn command_succeeds(program: &str, args: &[&str], path: Option<&std::ffi::OsStr>) -> bool {
+    let mut command = std::process::Command::new(program);
+    command.args(args).stdin(Stdio::null());
+    if let Some(path) = path {
+        command.env("PATH", path);
+    }
+    command
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn prerequisite_error(tools: &[&str], packages: &[&str]) -> Option<String> {
+    if tools.is_empty() && packages.is_empty() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if !tools.is_empty() {
+        parts.push(format!("tools: {}", tools.join(", ")));
+    }
+    if !packages.is_empty() {
+        parts.push(format!("pkg-config packages: {}", packages.join(", ")));
+    }
+    Some(format!(
+        "missing update prerequisites ({})",
+        parts.join("; ")
+    ))
 }
 
 async fn run_plan(plan: Vec<Vec<String>>, log: &std::fs::File) -> anyhow::Result<()> {
@@ -175,9 +273,27 @@ async fn run_logged(
 
 #[cfg(all(test, unix))]
 mod tests {
+    use super::{check_prerequisites, prerequisite_error};
+    use std::ffi::OsStr;
     use std::process::Command;
     use std::thread;
     use std::time::Duration;
+
+    #[test]
+    fn missing_prerequisite_message_names_tools_and_packages() {
+        let message = prerequisite_error(&["cargo"], &["webkitgtk-6.0"]).unwrap();
+        assert!(message.contains("cargo"), "{message}");
+        assert!(message.contains("webkitgtk-6.0"), "{message}");
+        assert_eq!(prerequisite_error(&[], &[]), None);
+    }
+
+    #[test]
+    fn empty_path_reports_missing_build_tools_before_any_clone() {
+        let message = check_prerequisites(Some(OsStr::new(""))).unwrap_err();
+        assert!(message.contains("cargo"), "{message}");
+        assert!(message.contains("rustc"), "{message}");
+        assert!(message.contains("pkg-config"), "{message}");
+    }
 
     #[test]
     fn deferred_macos_swap_waits_for_the_running_app() {

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Self-update: detect a newer release tag on the flowmux repository,
-//! and on request bring a managed clone to that tag and run the
-//! platform install script so the next launch runs the new version.
+//! Self-update: detect a newer release tag and choose an action that matches
+//! the running installation. Source installs may build a managed checkout;
+//! packaged and unknown installs open the release page instead.
 //!
 //! Split: [`check`] is the pure, unit-tested core (version parsing,
 //! command plan); [`install`] executes that plan on the tokio runtime;
@@ -9,6 +9,7 @@
 
 pub mod check;
 pub mod install;
+pub mod origin;
 
 use check::Version;
 use std::path::{Path, PathBuf};

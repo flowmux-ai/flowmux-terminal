@@ -22,6 +22,7 @@
 //! applying zoom to terminal/WebView are handled by [`crate::ui::window`]. The
 //! dialog returns the user's intended [`Options`] through the callback.
 
+use crate::update::origin::{InstallOrigin, UpdateGate};
 use crate::update::{check::Version, BannerState, Stage};
 use adw::prelude::*;
 use flowmux_config::keybindings::KeybindingOverrides;
@@ -47,6 +48,7 @@ pub fn present(
     default_font_size: f32,
     on_apply: impl Fn(Options) + 'static,
     on_preview: impl Fn(&Options) + 'static,
+    install_origin: InstallOrigin,
     update_state: BannerState,
     on_check_update: impl Fn(UpdateCheckCompletion) -> bool + 'static,
     on_update: impl Fn(Version) -> bool + 'static,
@@ -58,6 +60,7 @@ pub fn present(
         default_font_size,
         on_apply,
         on_preview,
+        install_origin,
         update_state,
         on_check_update,
         on_update,
@@ -74,6 +77,7 @@ fn build_dialog(
     default_font_size: f32,
     on_apply: impl Fn(Options) + 'static,
     on_preview: impl Fn(&Options) + 'static,
+    install_origin: InstallOrigin,
     update_state: BannerState,
     on_check_update: impl Fn(UpdateCheckCompletion) -> bool + 'static,
     on_update: impl Fn(Version) -> bool + 'static,
@@ -190,6 +194,7 @@ fn build_dialog(
     let update_tab = build_update_tab(
         &dialog,
         &about_version(),
+        install_origin,
         update_state,
         Rc::new(on_check_update),
         Rc::new(on_update),
@@ -363,7 +368,7 @@ struct UpdateTabProps {
     check_sensitive: bool,
 }
 
-fn update_tab_props(state: &BannerState) -> UpdateTabProps {
+fn update_tab_props(state: &BannerState, origin: InstallOrigin) -> UpdateTabProps {
     match state {
         BannerState::Hidden => UpdateTabProps {
             status: "Check for updates to see if a newer version is available.".into(),
@@ -380,7 +385,10 @@ fn update_tab_props(state: &BannerState) -> UpdateTabProps {
         BannerState::Available(version) | BannerState::Ignored(version) => UpdateTabProps {
             status: format!("FlowMux v{version} is available."),
             update_version: Some(*version),
-            update_label: Some(format!("Update to v{version}")),
+            update_label: Some(match crate::update::origin::update_gate(origin) {
+                UpdateGate::SourceBuild => format!("Update to v{version}"),
+                UpdateGate::ReleasePage => "Open release page (.deb)".into(),
+            }),
             check_sensitive: true,
         },
         BannerState::Running(Stage::Fetching, version) => UpdateTabProps {
@@ -404,7 +412,10 @@ fn update_tab_props(state: &BannerState) -> UpdateTabProps {
         BannerState::Failed(message, version) => UpdateTabProps {
             status: format!("Update to v{version} failed: {message}"),
             update_version: Some(*version),
-            update_label: Some("Retry update".into()),
+            update_label: Some(match crate::update::origin::update_gate(origin) {
+                UpdateGate::SourceBuild => "Retry update".into(),
+                UpdateGate::ReleasePage => "Open release page (.deb)".into(),
+            }),
             check_sensitive: true,
         },
     }
@@ -412,11 +423,12 @@ fn update_tab_props(state: &BannerState) -> UpdateTabProps {
 
 fn render_update_tab(
     state: &BannerState,
+    origin: InstallOrigin,
     status_row: &adw::ActionRow,
     check_button: &gtk::Button,
     update_button: &gtk::Button,
 ) {
-    let props = update_tab_props(state);
+    let props = update_tab_props(state, origin);
     status_row.set_subtitle(&props.status);
     check_button.set_sensitive(props.check_sensitive);
     if let Some(label) = props.update_label {
@@ -453,6 +465,7 @@ fn request_update(version: Version, on_update: &dyn Fn(Version) -> bool) -> Opti
 
 fn start_update_from_tab(
     version: Version,
+    install_origin: InstallOrigin,
     state: &Rc<RefCell<BannerState>>,
     status_row: &adw::ActionRow,
     check_button: &gtk::Button,
@@ -461,7 +474,13 @@ fn start_update_from_tab(
 ) {
     if let Some(next) = request_update(version, on_update) {
         *state.borrow_mut() = next;
-        render_update_tab(&state.borrow(), status_row, check_button, update_button);
+        render_update_tab(
+            &state.borrow(),
+            install_origin,
+            status_row,
+            check_button,
+            update_button,
+        );
     } else {
         update_button.set_sensitive(false);
         status_row.set_subtitle("This update is already running or installed.");
@@ -503,6 +522,7 @@ fn show_newer_update_prompt(
 fn build_update_tab(
     parent: &adw::Window,
     current_version: &str,
+    install_origin: InstallOrigin,
     initial_state: BannerState,
     on_check: Rc<dyn Fn(UpdateCheckCompletion) -> bool>,
     on_update: Rc<dyn Fn(Version) -> bool>,
@@ -515,7 +535,7 @@ fn build_update_tab(
 
     let group = adw::PreferencesGroup::builder()
         .title("Software Update")
-        .description("Check for a new FlowMux release and install it when you are ready.")
+        .description("Check for a new FlowMux release and use the update action for this install.")
         .build();
 
     let version_row = adw::ActionRow::builder()
@@ -550,7 +570,13 @@ fn build_update_tab(
     page.append(&group);
 
     let state = Rc::new(RefCell::new(initial_state));
-    render_update_tab(&state.borrow(), &status_row, &check_button, &update_button);
+    render_update_tab(
+        &state.borrow(),
+        install_origin,
+        &status_row,
+        &check_button,
+        &update_button,
+    );
 
     {
         let on_check = on_check.clone();
@@ -579,6 +605,7 @@ fn build_update_tab(
                         *state_for_result.borrow_mut() = next;
                         render_update_tab(
                             &state_for_result.borrow(),
+                            install_origin,
                             &status_for_result,
                             &check_for_result,
                             &update_for_result,
@@ -587,6 +614,7 @@ fn build_update_tab(
                     Err(error) => {
                         render_update_tab(
                             &state_for_result.borrow(),
+                            install_origin,
                             &status_for_result,
                             &check_for_result,
                             &update_for_result,
@@ -600,7 +628,13 @@ fn build_update_tab(
             if !started {
                 spinner.stop();
                 spinner.set_visible(false);
-                render_update_tab(&state.borrow(), &status_row, &check_button, &update_button);
+                render_update_tab(
+                    &state.borrow(),
+                    install_origin,
+                    &status_row,
+                    &check_button,
+                    &update_button,
+                );
                 status_row.set_subtitle("Update checks are unavailable in this session.");
             }
         });
@@ -616,13 +650,25 @@ fn build_update_tab(
         update_button.clone().connect_clicked(move |_| {
             let selected = {
                 let current = state.borrow();
-                update_tab_props(&current).update_version
+                update_tab_props(&current, install_origin).update_version
             };
             let Some(selected) = selected else {
                 update_button.set_sensitive(false);
                 status_row.set_subtitle("This update is already running or installed.");
                 return;
             };
+
+            if crate::update::origin::update_gate(install_origin) == UpdateGate::ReleasePage {
+                match crate::ui::update_banner::open_release_page(install_origin, selected) {
+                    Ok(()) => status_row
+                        .set_subtitle(&format!("Opened the release page for FlowMux v{selected}.")),
+                    Err(error) => {
+                        tracing::warn!(%error, %selected, "could not open release page");
+                        status_row.set_subtitle(&format!("Could not open the release page: {error}"));
+                    }
+                }
+                return;
+            }
 
             check_button.set_sensitive(false);
             update_button.set_sensitive(false);
@@ -646,6 +692,7 @@ fn build_update_tab(
                         *state_for_result.borrow_mut() = refreshed;
                         render_update_tab(
                             &state_for_result.borrow(),
+                            install_origin,
                             &status_for_result,
                             &check_for_result,
                             &update_for_result,
@@ -653,6 +700,7 @@ fn build_update_tab(
                         match decision {
                             PreinstallDecision::Start(version) => start_update_from_tab(
                                 version,
+                                install_origin,
                                 &state_for_result,
                                 &status_for_result,
                                 &check_for_result,
@@ -673,6 +721,7 @@ fn build_update_tab(
                                         if let Some(version) = choice {
                                             start_update_from_tab(
                                                 version,
+                                                install_origin,
                                                 &state_for_choice,
                                                 &status_for_choice,
                                                 &check_for_choice,
@@ -693,6 +742,7 @@ fn build_update_tab(
                     Err(error) => {
                         render_update_tab(
                             &state_for_result.borrow(),
+                            install_origin,
                             &status_for_result,
                             &check_for_result,
                             &update_for_result,
@@ -707,7 +757,13 @@ fn build_update_tab(
             if !started {
                 spinner.stop();
                 spinner.set_visible(false);
-                render_update_tab(&state.borrow(), &status_row, &check_button, &update_button);
+                render_update_tab(
+                    &state.borrow(),
+                    install_origin,
+                    &status_row,
+                    &check_button,
+                    &update_button,
+                );
                 status_row.set_subtitle("Update checks are unavailable in this session.");
             }
         });
@@ -1254,19 +1310,38 @@ mod tests {
 
     #[test]
     fn update_tab_offers_ignored_release_for_later_install() {
-        let props = update_tab_props(&BannerState::Ignored(Version(0, 8, 0)));
+        let props = update_tab_props(
+            &BannerState::Ignored(Version(0, 8, 0)),
+            InstallOrigin::Source,
+        );
         assert_eq!(props.update_version, Some(Version(0, 8, 0)));
         assert_eq!(props.update_label.as_deref(), Some("Update to v0.8.0"));
         assert!(props.check_sensitive);
     }
 
     #[test]
+    fn packaged_update_tab_links_to_release_instead_of_installing() {
+        let props = update_tab_props(
+            &BannerState::Available(Version(0, 8, 0)),
+            InstallOrigin::Deb,
+        );
+        assert_eq!(props.update_version, Some(Version(0, 8, 0)));
+        assert_eq!(
+            props.update_label.as_deref(),
+            Some("Open release page (.deb)")
+        );
+    }
+
+    #[test]
     fn update_tab_hides_install_action_when_current_or_running() {
-        let current = update_tab_props(&BannerState::Current);
+        let current = update_tab_props(&BannerState::Current, InstallOrigin::Source);
         assert!(current.update_version.is_none());
         assert!(current.check_sensitive);
 
-        let running = update_tab_props(&BannerState::Running(Stage::Installing, Version(0, 8, 0)));
+        let running = update_tab_props(
+            &BannerState::Running(Stage::Installing, Version(0, 8, 0)),
+            InstallOrigin::Source,
+        );
         assert!(running.update_version.is_none());
         assert!(!running.check_sensitive);
     }

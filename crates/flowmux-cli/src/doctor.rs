@@ -25,6 +25,7 @@ use crate::{agent, desktop_install, hook_install};
 use anyhow::Result;
 use flowmux_ipc::{client::Client, protocol::Request, protocol::Response};
 use serde_json::json;
+use std::collections::HashSet;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -166,7 +167,61 @@ pub async fn collect(home: &Path, codex_home: Option<&Path>, socket: Option<Path
 fn section_diagnostics() -> Section {
     Section {
         title: "Diagnostics".into(),
-        entries: vec![log_directory_entry()],
+        entries: vec![log_directory_entry(), install_locations_entry()],
+    }
+}
+
+fn install_locations_entry() -> Entry {
+    let paths = std::env::var_os("PATH")
+        .as_deref()
+        .map(flowmux_binaries_on_path)
+        .unwrap_or_default();
+    install_locations_entry_for(&paths)
+}
+
+fn flowmux_binaries_on_path(path: &std::ffi::OsStr) -> Vec<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut seen = HashSet::new();
+    let mut binaries = Vec::new();
+    for directory in std::env::split_paths(path) {
+        let candidate = directory.join("flowmux");
+        let Ok(metadata) = std::fs::metadata(&candidate) else {
+            continue;
+        };
+        if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+            continue;
+        }
+        let identity = std::fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
+        if seen.insert(identity) {
+            binaries.push(candidate);
+        }
+    }
+    binaries
+}
+
+fn install_locations_entry_for(paths: &[PathBuf]) -> Entry {
+    let detail = paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    match paths {
+        [] => Entry {
+            name: "flowmux on PATH".into(),
+            status: Status::Info,
+            detail: "not found on PATH".into(),
+        },
+        [_] => Entry {
+            name: "flowmux on PATH".into(),
+            status: Status::Ok,
+            detail,
+        },
+        _ => Entry {
+            name: "flowmux on PATH".into(),
+            status: Status::Warn,
+            detail: format!("multiple installations: {detail}"),
+        },
     }
 }
 
@@ -1070,6 +1125,18 @@ mod tests {
         assert_eq!(entry.name, "log directory");
         assert_eq!(entry.status, Status::Ok);
         assert_eq!(entry.detail, logs.display().to_string());
+    }
+
+    #[test]
+    fn doctor_warns_when_multiple_flowmux_binaries_are_on_path() {
+        let entry = install_locations_entry_for(&[
+            PathBuf::from("/usr/bin/flowmux"),
+            PathBuf::from("/home/alice/.local/bin/flowmux"),
+        ]);
+        assert_eq!(entry.name, "flowmux on PATH");
+        assert_eq!(entry.status, Status::Warn);
+        assert!(entry.detail.contains("/usr/bin/flowmux"));
+        assert!(entry.detail.contains("/home/alice/.local/bin/flowmux"));
     }
 
     /// Doctor on a totally empty fake HOME: every skill row is Warn
