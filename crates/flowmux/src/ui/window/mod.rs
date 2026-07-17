@@ -332,15 +332,50 @@ fn wsl_resize_handles_enabled() -> bool {
             || crate::platform::env_flag_enabled("FLOWMUX_WSL_RESIZE_HANDLES"))
 }
 
-fn set_window_content(window: &adw::ApplicationWindow, toolbar: &adw::ToolbarView) {
+fn set_window_content(window: &adw::ApplicationWindow, content: &impl IsA<gtk::Widget>) {
     if wsl_resize_handles_enabled() {
         let overlay = gtk::Overlay::new();
-        overlay.set_child(Some(toolbar));
+        overlay.set_child(Some(content));
         window.set_content(Some(&overlay));
         install_window_resize_handles(window, &overlay);
     } else {
-        window.set_content(Some(toolbar));
+        window.set_content(Some(content));
     }
+}
+
+/// Build the desktop workbench shell as two aligned libadwaita header bars.
+/// Window controls stay native while the sidebar actions occupy the space that
+/// used to be a second custom toolbar below an otherwise empty title bar.
+fn build_split_window_shell(
+    sidebar: &Sidebar,
+    content: &impl IsA<gtk::Widget>,
+    sidebar_position: i32,
+) -> gtk::Paned {
+    let sidebar_view = adw::ToolbarView::new();
+    sidebar_view.add_css_class("flowmux-sidebar-shell");
+    sidebar_view.add_top_bar(&sidebar.header);
+    sidebar_view.set_content(Some(&sidebar.root));
+    sidebar_view.set_size_request(160, -1);
+
+    let content_header = adw::HeaderBar::new();
+    content_header.set_show_start_title_buttons(false);
+    content_header.set_show_end_title_buttons(true);
+    let content_view = adw::ToolbarView::new();
+    content_view.add_top_bar(&content_header);
+    content_view.set_content(Some(content));
+
+    let split = gtk::Paned::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .start_child(&sidebar_view)
+        .end_child(&content_view)
+        .resize_start_child(false)
+        .resize_end_child(true)
+        .shrink_start_child(false)
+        .shrink_end_child(false)
+        .position(sidebar_position)
+        .build();
+    split.add_css_class("flowmux-window-split");
+    split
 }
 
 fn install_window_resize_handles(window: &adw::ApplicationWindow, overlay: &gtk::Overlay) {
@@ -634,24 +669,6 @@ impl WindowController {
         content_box.append(&stack);
         content_box.append(&agent_bar.root);
 
-        // gtk::Paned lets the user drag the divider between the
-        // sidebar and the content stack — replaces the fixed-width
-        // adw::OverlaySplitView so people can hide / widen the tab
-        // list to taste.
-        sidebar.root.set_size_request(160, -1);
-        // Restore a saved sidebar position, otherwise use default 260.
-        let stored_sidebar_pos = store.sidebar_position_blocking().unwrap_or(260);
-        let split = gtk::Paned::builder()
-            .orientation(gtk::Orientation::Horizontal)
-            .start_child(&sidebar.root)
-            .end_child(&content_box)
-            .resize_start_child(false)
-            .resize_end_child(true)
-            .shrink_start_child(false)
-            .shrink_end_child(false)
-            .position(stored_sidebar_pos)
-            .build();
-
         let file_browser = FileBrowserPanel::new();
         let file_browser_for_close = file_browser.clone();
         let file_browser_active_for_close = file_browser_active.clone();
@@ -753,13 +770,13 @@ impl WindowController {
 
         let worktree_split = gtk::Paned::builder()
             .orientation(gtk::Orientation::Horizontal)
-            .start_child(&split)
+            .start_child(&content_box)
             .end_child(worktree_panel.widget())
             .resize_start_child(true)
             .resize_end_child(false)
             .shrink_start_child(false)
             .shrink_end_child(false)
-            .position(940)
+            .position(680)
             .build();
 
         let file_browser_split = gtk::Paned::builder()
@@ -770,17 +787,18 @@ impl WindowController {
             .resize_end_child(false)
             .shrink_start_child(false)
             .shrink_end_child(false)
-            .position(980)
+            .position(720)
             .build();
 
+        // Keep the resizable sidebar, but make both sides native toolbar
+        // surfaces so their headers form one aligned Ubuntu/GNOME title row.
+        let stored_sidebar_pos = store.sidebar_position_blocking().unwrap_or(260);
+        let split = build_split_window_shell(&sidebar, &file_browser_split, stored_sidebar_pos);
+
         let content_overlay = gtk::Overlay::new();
-        content_overlay.set_child(Some(&file_browser_split));
+        content_overlay.set_child(Some(&split));
         let clipboard_toast = ClipboardToast::new();
         content_overlay.add_overlay(clipboard_toast.widget());
-
-        let toolbar = adw::ToolbarView::new();
-        toolbar.add_top_bar(&adw::HeaderBar::new());
-        toolbar.set_content(Some(&content_overlay));
 
         // Restore saved window size/maximized state, otherwise default to 1280x800.
         let stored_window = store.window_layout_blocking();
@@ -799,7 +817,7 @@ impl WindowController {
             .icon_name(crate::APP_ID)
             .title("flowmux")
             .build();
-        set_window_content(&window, &toolbar);
+        set_window_content(&window, &content_overlay);
         if was_maximized {
             window.maximize();
         }
@@ -864,6 +882,23 @@ impl WindowController {
 
     #[cfg(test)]
     fn right_tool_order_for_test(&self) -> [&'static str; 3] {
+        let sidebar_view = self
+            .sidebar_split
+            .start_child()
+            .expect("sidebar shell missing")
+            .downcast::<adw::ToolbarView>()
+            .expect("sidebar must use a native toolbar shell");
+        let content_view = self
+            .sidebar_split
+            .end_child()
+            .expect("content shell missing")
+            .downcast::<adw::ToolbarView>()
+            .expect("content must use a native toolbar shell");
+        assert!(sidebar_view.content().is_some());
+        assert_eq!(
+            content_view.content(),
+            Some(self.file_browser.split.clone().upcast())
+        );
         assert_eq!(
             self.file_browser.split.start_child(),
             Some(self.worktrees.split.clone().upcast())
@@ -872,10 +907,7 @@ impl WindowController {
             self.file_browser.split.end_child(),
             Some(self.file_browser.panel.widget().clone().upcast())
         );
-        assert_eq!(
-            self.worktrees.split.start_child(),
-            Some(self.sidebar_split.clone().upcast())
-        );
+        assert!(self.worktrees.split.start_child().is_some());
         assert_eq!(
             self.worktrees.split.end_child(),
             Some(self.worktrees.panel.widget().clone().upcast())

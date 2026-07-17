@@ -511,7 +511,6 @@ impl WindowController {
             NotificationStore::new(),
             self.notifications.tokio_handle(),
         );
-        sidebar.root.set_size_request(160, -1);
         sidebar.upsert(&workspace);
         sidebar.select_workspace(workspace_id);
 
@@ -531,23 +530,10 @@ impl WindowController {
             pos if pos > 0 => pos,
             _ => 260,
         };
-        let split = gtk::Paned::builder()
-            .orientation(gtk::Orientation::Horizontal)
-            .start_child(&sidebar.root)
-            .end_child(&stack)
-            .resize_start_child(false)
-            .resize_end_child(true)
-            .shrink_start_child(false)
-            .shrink_end_child(false)
-            .position(sidebar_pos)
-            .build();
+        let split = build_split_window_shell(&sidebar, &stack, sidebar_pos);
 
         let content_overlay = gtk::Overlay::new();
         content_overlay.set_child(Some(&split));
-
-        let toolbar = adw::ToolbarView::new();
-        toolbar.add_top_bar(&adw::HeaderBar::new());
-        toolbar.set_content(Some(&content_overlay));
 
         let window = adw::ApplicationWindow::builder()
             .application(app)
@@ -556,7 +542,7 @@ impl WindowController {
             .icon_name(crate::APP_ID)
             .title(&window_title)
             .build();
-        set_window_content(&window, &toolbar);
+        set_window_content(&window, &content_overlay);
         *window_ref.borrow_mut() = Some(window.downgrade());
         window.present();
 

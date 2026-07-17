@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! +----------------+
-//! | [+] [bell]     |  toolbar
+//! | [+] Workspaces |  native split header
 //! +----------------+
 //! | • workspace 1  |
 //! | • workspace 2  |  scrollable workspace list
@@ -13,7 +13,7 @@
 //! +----------------+
 //! ```
 //!
-//! The toolbar's `+` adds a workspace (Ctrl+N equivalent) and
+//! The header's `+` adds a workspace (Ctrl+N equivalent) and
 //! the bell shows an in-process notification transcript. The list
 //! rows expose hover-X close, color bar, right-click menu (rename /
 //! recolor / close).
@@ -25,8 +25,8 @@ use crate::ui::usage_popover::UsagePopover;
 use crate::ui::workspace_view::{
     read_tab_dnd_payload_from_drop, tab_dnd_content_formats, tab_dnd_formats_accept_payload,
 };
+use adw::prelude::*;
 use flowmux_core::{AgentStatus, NotificationLevel, PrState, Workspace, WorkspaceId};
-use gtk::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -63,6 +63,7 @@ pub(crate) struct WorkspaceRowAgentBlock {
 
 #[derive(Clone)]
 pub struct Sidebar {
+    pub header: adw::HeaderBar,
     pub root: gtk::Box,
     pub list: gtk::ListBox,
     rows: Rc<RefCell<Vec<(WorkspaceId, gtk::ListBoxRow)>>>,
@@ -138,15 +139,8 @@ impl Sidebar {
 
         let on_close: Rc<dyn Fn(WorkspaceId)> = Rc::new(on_close);
 
-        // ---- Top toolbar ----
-        let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        toolbar.set_margin_top(6);
-        toolbar.set_margin_bottom(6);
-        toolbar.set_margin_start(8);
-        toolbar.set_margin_end(8);
-
+        // ---- Native sidebar header ----
         let new_btn = gtk::Button::from_icon_name("list-add-symbolic");
-        new_btn.add_css_class("flat");
         new_btn.set_tooltip_text(Some("New workspace (Ctrl+N)"));
         let bridge_for_new = bridge.clone();
         new_btn.connect_clicked(move |_| {
@@ -157,14 +151,9 @@ impl Sidebar {
                 let _ = bridge.tx.send(GtkCommand::NewWorkspace { root }).await;
             });
         });
-        toolbar.append(&new_btn);
-
         let bell_button = gtk::MenuButton::new();
         bell_button.set_icon_name("notifications-symbolic");
-        bell_button.add_css_class("flat");
         bell_button.set_tooltip_text(Some("Notifications"));
-        bell_button.set_hexpand(true);
-        bell_button.set_halign(gtk::Align::End);
         let bell_popover = gtk::Popover::new();
         bell_popover.set_size_request(320, -1);
         bell_button.set_popover(Some(&bell_popover));
@@ -206,7 +195,14 @@ impl Sidebar {
                 let _ = bridge.tx.send(GtkCommand::RefreshLauncherBadge).await;
             });
         });
-        toolbar.append(&bell_button);
+        let header_title = gtk::Label::new(Some("Workspaces"));
+        header_title.add_css_class("heading");
+        let header = adw::HeaderBar::new();
+        header.set_show_start_title_buttons(true);
+        header.set_show_end_title_buttons(false);
+        header.set_title_widget(Some(&header_title));
+        header.pack_start(&new_btn);
+        header.pack_end(&bell_button);
 
         // ---- Bottom footer: small left options button ----
         // Click dispatches ShowOptionsDialog through the bridge so the window
@@ -285,14 +281,14 @@ impl Sidebar {
         // finds a newer tag; the banner owns its own check/install wiring.
         let update_banner = UpdateBanner::new(tokio_handle);
 
-        // ---- Outer vbox: toolbar + list + update banner + footer ----
+        // ---- Sidebar body; the header is mounted by the window shell ----
         let root_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        root_box.append(&toolbar);
         root_box.append(&scroll);
         root_box.append(update_banner.widget());
         root_box.append(&footer);
 
         Self {
+            header,
             root: root_box,
             list,
             rows,

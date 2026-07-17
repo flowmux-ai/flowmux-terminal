@@ -80,6 +80,7 @@ impl WindowController {
     }
     pub(super) fn position_right_tool_splits(&self) {
         let window_width = self.window.width().max(640);
+        let content_width = (window_width - self.sidebar_split.position()).max(320);
         let files_width = if self.file_browser.panel.widget().is_visible() {
             320
         } else {
@@ -88,10 +89,10 @@ impl WindowController {
         if files_width > 0 {
             self.file_browser
                 .split
-                .set_position((window_width - files_width).max(240));
+                .set_position((content_width - files_width).max(240));
         }
         if self.worktrees.panel.widget().is_visible() {
-            let worktree_container_width = window_width - files_width;
+            let worktree_container_width = content_width - files_width;
             self.worktrees
                 .split
                 .set_position((worktree_container_width - 340).max(240));
