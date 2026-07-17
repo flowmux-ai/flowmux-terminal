@@ -165,6 +165,7 @@ fn build_terminal_search_overlay(term: &vte::Terminal) -> (gtk::Revealer, gtk::S
         .placeholder_text("Find in terminal…")
         .hexpand(true)
         .build();
+    entry.add_css_class("flowmux-terminal-search-entry");
     let case_toggle = gtk::ToggleButton::with_label("Aa");
     case_toggle.add_css_class("flat");
     case_toggle.set_tooltip_text(Some("Match case"));

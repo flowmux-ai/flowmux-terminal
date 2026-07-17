@@ -262,6 +262,11 @@ impl ResolvedTheme {
     padding: 7px;
     border-radius: 0;
 }}
+.flowmux-terminal-search-entry {{
+    /* Keep the search field readable over terminal output while retaining a
+       small amount of the underlying theme for visual continuity. */
+    background-color: alpha(@theme_base_color, 0.95);
+}}
 .flowmux-pane-tabbar {{
     min-height: 26px;
     background-color: {tabbar};
