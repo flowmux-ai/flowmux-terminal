@@ -638,6 +638,25 @@ fn local_only_commands_parse_to_local_variants() {
 }
 
 #[test]
+fn cline_is_accepted_by_skill_and_hook_install_commands() {
+    let agent = Cli::try_parse_from(["flowmuxctl", "agent", "doctor", "--agent", "cline"]).unwrap();
+    assert!(matches!(
+        agent.cmd,
+        Cmd::Agent {
+            op: AgentOp::Doctor { agent }
+        } if agent == vec!["cline"]
+    ));
+
+    let hooks = Cli::try_parse_from(["flowmuxctl", "hooks", "setup", "--agent", "cline"]).unwrap();
+    assert!(matches!(
+        hooks.cmd,
+        Cmd::Hooks {
+            op: HooksOp::Setup { agent, .. }
+        } if agent == vec!["cline"]
+    ));
+}
+
+#[test]
 fn identity_from_env_resolves_flowmux_context() {
     let _g = flowmux_pane_env_lock();
     let pane = PaneId::new();

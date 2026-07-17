@@ -8,7 +8,7 @@
 //! were added incrementally and `flowmux agent doctor` / `flowmux
 //! hooks doctor` only show one half each. After every flowmux upgrade
 //! — and, just as often, after the user installs Claude / Codex /
-//! OpenCode for the first time on a host that already had flowmux —
+//! OpenCode / Cline for the first time on a host that already had flowmux —
 //! the user wants a single "is everything wired?" check plus a single
 //! "wire it" command. That's what this module gives them.
 //!
@@ -324,6 +324,7 @@ fn hook_target_for(t: agent::Target) -> hook_install::HookTarget {
         agent::Target::ClaudeCode => hook_install::HookTarget::Claude,
         agent::Target::OpenCode => hook_install::HookTarget::OpenCode,
         agent::Target::Codex => hook_install::HookTarget::Codex,
+        agent::Target::Cline => hook_install::HookTarget::Cline,
     }
 }
 
@@ -339,6 +340,9 @@ fn agent_is_installed(t: agent::Target, home: &Path, codex_home: Option<&Path>) 
             .map(Path::to_path_buf)
             .unwrap_or_else(|| home.join(".codex"))
             .exists(),
+        agent::Target::Cline => {
+            home.join(".cline").exists() || home.join("Documents").join("Cline").exists()
+        }
     }
 }
 
@@ -1125,6 +1129,46 @@ mod tests {
             .find(|e| e.name == "tmux compat shim")
             .unwrap();
         assert_eq!(tmux_shim.status, Status::Ok, "{}", tmux_shim.detail);
+    }
+
+    #[test]
+    fn cline_fix_installs_skill_and_hooks_then_becomes_idempotent() {
+        let _lock = home_env_lock();
+        let home = fake_home();
+        fs::create_dir_all(home.path().join(".cline")).unwrap();
+        let _h = HomeOverride::set(home.path());
+
+        let first = run_fix(home.path(), None, "flowmux");
+        let hook = first
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.area == "cline hooks")
+            .unwrap();
+        assert_eq!(hook.status, Status::Ok, "{}", hook.detail);
+
+        let report = collect_offline(home.path(), None);
+        let agents = report
+            .sections
+            .iter()
+            .find(|section| section.title == "AI agents")
+            .unwrap();
+        for name in ["cline skill", "cline hooks"] {
+            let entry = agents
+                .entries
+                .iter()
+                .find(|entry| entry.name == name)
+                .unwrap();
+            assert_eq!(entry.status, Status::Ok, "{}", entry.detail);
+        }
+
+        let second = run_fix(home.path(), None, "flowmux");
+        let hook = second
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.area == "cline hooks")
+            .unwrap();
+        assert_eq!(hook.status, Status::Ok);
+        assert_eq!(hook.detail, "no changes");
     }
 
     #[test]

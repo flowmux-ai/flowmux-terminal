@@ -47,7 +47,7 @@ pub(crate) fn generic_resume_return_forget_request(
 
 /// Dispatch every `flowmux hooks <op>` invocation. Setup/Doctor/Uninstall
 /// only touch user config files and never need the daemon. The runtime
-/// hook events (Claude/Codex/Opencode) talk to the daemon themselves.
+/// hook events (Claude/Codex/OpenCode/Cline) talk to the daemon themselves.
 pub(crate) async fn run_hooks_op(op: &HooksOp, socket: Option<PathBuf>) -> anyhow::Result<()> {
     use hook_install::HookInstallStatus;
     match op {
@@ -171,6 +171,7 @@ pub(crate) async fn run_hooks_doctor(socket: Option<PathBuf>) {
             HookTarget::Claude => "claude",
             HookTarget::Codex => "codex",
             HookTarget::OpenCode => "opencode",
+            HookTarget::Cline => "cline",
         };
         let entry = hook_install::check(*t);
         println!("{label:8}  status={:?}", entry.status);

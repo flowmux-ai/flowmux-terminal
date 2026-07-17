@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! `flowmux agent install / doctor / uninstall` — make the
-//! flowmux-browser SKILL discoverable to Claude Code, OpenCode, and
-//! Codex CLI installed locally for the current user.
+//! flowmux-browser SKILL discoverable to Claude Code, OpenCode,
+//! Codex CLI, and Cline installed locally for the current user.
 //!
 //! Strategy: every supported agent has a documented user-level skills
 //! directory under `$HOME` (`~/.claude/skills/`, `~/.config/opencode/skills/`,
-//! `$CODEX_HOME/skills/`). We mirror our embedded `SKILL.md` into each
+//! `$CODEX_HOME/skills/`, `~/.cline/skills/`). We mirror our embedded `SKILL.md` into each
 //! one idempotently so the same SKILL.md auto-loads as a real skill in
 //! every agent. `doctor` walks the same paths and reports presence /
 //! content drift so the user can verify a fresh install or update
@@ -42,16 +42,25 @@ pub enum Target {
     /// — so the user does not have to import anything by hand. See
     /// <https://developers.openai.com/codex/skills>.
     Codex,
+    /// `~/.cline/skills/flowmux-browser/SKILL.md`. Cline discovers
+    /// user-level skills from `~/.cline/skills/`.
+    Cline,
 }
 
 impl Target {
-    pub const ALL: &'static [Target] = &[Target::ClaudeCode, Target::OpenCode, Target::Codex];
+    pub const ALL: &'static [Target] = &[
+        Target::ClaudeCode,
+        Target::OpenCode,
+        Target::Codex,
+        Target::Cline,
+    ];
 
     pub fn slug(self) -> &'static str {
         match self {
             Target::ClaudeCode => "claude-code",
             Target::OpenCode => "opencode",
             Target::Codex => "codex",
+            Target::Cline => "cline",
         }
     }
 
@@ -59,7 +68,7 @@ impl Target {
         Self::ALL.iter().copied().find(|t| t.slug() == s)
     }
 
-    /// Body that gets written to disk. All three agents accept the
+    /// Body that gets written to disk. All supported agents accept the
     /// same `SKILL.md` frontmatter+body shape, so the payload is
     /// uniform.
     pub fn payload(self) -> &'static str {
@@ -86,6 +95,11 @@ impl Target {
             Target::Codex => codex_home
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| home.join(".codex"))
+                .join("skills")
+                .join("flowmux-browser")
+                .join("SKILL.md"),
+            Target::Cline => home
+                .join(".cline")
                 .join("skills")
                 .join("flowmux-browser")
                 .join("SKILL.md"),
@@ -324,10 +338,12 @@ mod tests {
         let claude = Target::ClaudeCode.resolved_install_path(home.path(), None);
         let opencode = Target::OpenCode.resolved_install_path(home.path(), None);
         let codex = Target::Codex.resolved_install_path(home.path(), None);
+        let cline = Target::Cline.resolved_install_path(home.path(), None);
 
         assert!(claude.ends_with(".claude/skills/flowmux-browser/SKILL.md"));
         assert!(opencode.ends_with(".config/opencode/skills/flowmux-browser/SKILL.md"));
         assert!(codex.ends_with(".codex/skills/flowmux-browser/SKILL.md"));
+        assert!(cline.ends_with(".cline/skills/flowmux-browser/SKILL.md"));
     }
 
     #[test]
@@ -403,6 +419,7 @@ mod tests {
         assert_eq!(by_target[&Target::ClaudeCode], &DoctorStatus::Ok);
         assert_eq!(by_target[&Target::OpenCode], &DoctorStatus::Missing);
         assert_eq!(by_target[&Target::Codex], &DoctorStatus::Missing);
+        assert_eq!(by_target[&Target::Cline], &DoctorStatus::Missing);
     }
 
     #[test]
@@ -444,7 +461,7 @@ mod tests {
         // Why: previously Codex got a sibling `~/.codex/flowmux-browser.md`
         // that the user had to `@import`. Recent Codex CLI loads
         // `$CODEX_HOME/skills/<name>/SKILL.md` natively — assert all
-        // three targets resolve to the agent's skills dir so the
+        // targets resolve to the agent's skills dir so the
         // SKILL is auto-discovered everywhere.
         let home = fake_home();
         for t in Target::ALL {

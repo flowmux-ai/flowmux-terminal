@@ -123,7 +123,7 @@ enum Cmd {
     },
 
     /// Friendly helper for AI-agent hooks (Claude Code, OpenCode,
-    /// Codex). Fires a `TurnCompleted` toast titled with the agent
+    /// Codex, Cline). Fires a `TurnCompleted` toast titled with the agent
     /// name so flowmux's bell popover and the OS notification both say
     /// "Claude is ready" without the caller having to spell every flag.
     /// Like `Notify`, falls back to `FLOWMUX_PANE_ID` when `--pane` is
@@ -393,7 +393,7 @@ enum Cmd {
 
     /// Audit every flowmux ↔ host integration in one place: AI-agent
     /// SKILL files, AI-agent lifecycle hooks (Claude / Codex /
-    /// OpenCode), the in-app browser data dir, host browsers visible
+    /// OpenCode / Cline), the in-app browser data dir, host browsers visible
     /// to the cookie importer, and the daemon socket. Read-only — use
     /// `flowmux fix` to repair the rows tagged `fix`.
     Doctor,
@@ -401,7 +401,7 @@ enum Cmd {
     /// Re-install / refresh every flowmux-managed integration the
     /// `doctor` would flag. Idempotent: a row that's already correct
     /// is a no-op. Skips agents whose home directory is missing, so
-    /// it's safe to re-run after installing Claude / Codex / OpenCode
+    /// it's safe to re-run after installing Claude / Codex / OpenCode / Cline
     /// for the first time.
     Fix,
 }
@@ -563,7 +563,7 @@ enum AgentOp {
     Install {
         /// Limit installation to one agent. Repeat the flag to pick
         /// multiple. Omit to install for all known agents.
-        #[arg(long, value_parser = ["claude-code", "opencode", "codex"])]
+        #[arg(long, value_parser = ["claude-code", "opencode", "codex", "cline"])]
         agent: Vec<String>,
         /// Overwrite drifted on-disk files instead of erroring.
         #[arg(long)]
@@ -573,14 +573,14 @@ enum AgentOp {
     /// matches the bundled SKILL. Exit code is 0 only when every
     /// checked target is `ok`.
     Doctor {
-        #[arg(long, value_parser = ["claude-code", "opencode", "codex"])]
+        #[arg(long, value_parser = ["claude-code", "opencode", "codex", "cline"])]
         agent: Vec<String>,
     },
     /// Remove the flowmux-browser SKILL files from each agent's
     /// user-level location. The agent's top-level dir is left
     /// untouched.
     Uninstall {
-        #[arg(long, value_parser = ["claude-code", "opencode", "codex"])]
+        #[arg(long, value_parser = ["claude-code", "opencode", "codex", "cline"])]
         agent: Vec<String>,
     },
 }
@@ -605,7 +605,7 @@ enum HooksOp {
     /// upgrades. Skips agents whose home directory is missing.
     Setup {
         /// Limit installation to specific agents. Omit to do all.
-        #[arg(long, value_parser = ["claude", "codex", "opencode"])]
+        #[arg(long, value_parser = ["claude", "codex", "opencode", "cline"])]
         agent: Vec<String>,
         /// Path of the `flowmux` binary that the installed hook
         /// commands should invoke. Defaults to the current `flowmux`
@@ -615,7 +615,7 @@ enum HooksOp {
     },
     /// Remove flowmux's hook entries from every supported agent.
     Uninstall {
-        #[arg(long, value_parser = ["claude", "codex", "opencode"])]
+        #[arg(long, value_parser = ["claude", "codex", "opencode", "cline"])]
         agent: Vec<String>,
     },
     /// Print which agent config files flowmux currently owns hook

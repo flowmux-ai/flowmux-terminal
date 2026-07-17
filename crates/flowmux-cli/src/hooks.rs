@@ -40,7 +40,8 @@ pub struct ClaudeHookInput {
         alias = "thread-id",
         alias = "thread_id",
         alias = "sessionID",
-        alias = "sessionId"
+        alias = "sessionId",
+        alias = "taskId"
     )]
     pub session_id: Option<String>,
     #[serde(default)]
@@ -704,6 +705,7 @@ mod tests {
             r#"{"thread-id":"codex-thread"}"#,
             r#"{"sessionID":"opencode-session"}"#,
             r#"{"sessionId":"camel-session"}"#,
+            r#"{"taskId":"cline-task"}"#,
         ] {
             let parsed: ClaudeHookInput = serde_json::from_str(raw).unwrap();
             assert!(parsed.session_id.is_some(), "payload was {raw}");
