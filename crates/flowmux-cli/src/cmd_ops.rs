@@ -33,6 +33,10 @@ pub(crate) fn run_capabilities(json: bool) -> anyhow::Result<()> {
         for v in &caps.browser_verbs {
             println!("  {v}");
         }
+        println!("cookie import browsers:");
+        for browser in &caps.cookie_import_browsers {
+            println!("  {browser}");
+        }
         println!("unsupported (CDP-only, return not_supported):");
         for u in &caps.unsupported {
             println!("  {u}");

@@ -409,6 +409,35 @@ async fn import_cookies_dispatches_inject_for_firefox_fixture() {
     ));
 }
 
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "current_thread")]
+async fn import_cookies_maps_chromium_encryption_gate_to_unimplemented() {
+    let _guard = home_env_lock();
+    let _restore = HomeEnvRestore(std::env::var_os("HOME"));
+    let home = tempfile::tempdir().expect("temp home");
+    let cookies = home.path().join(".config/google-chrome/Default/Cookies");
+    std::fs::create_dir_all(cookies.parent().unwrap()).expect("chrome profile dir");
+    std::fs::write(&cookies, []).expect("chrome cookie fixture");
+    unsafe {
+        std::env::set_var("HOME", home.path());
+    }
+
+    let (handler, rx, _pane, _tab) = single_pane_handler().await;
+    assert!(matches!(
+        handler
+            .handle(Request::ImportCookies {
+                source: "chrome".into(),
+                domain: None,
+            })
+            .await,
+        Response::Error(RpcError::Unimplemented(_))
+    ));
+    assert!(
+        rx.try_recv().is_err(),
+        "unsupported Chromium import must not dispatch InjectCookies"
+    );
+}
+
 #[tokio::test]
 async fn agent_activity_update_refreshes_store_and_sidebar() {
     let (handler, rx, pane, surface) = single_pane_handler().await;

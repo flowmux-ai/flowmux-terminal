@@ -47,6 +47,9 @@ pub const BROWSER_VERBS: &[&str] = &[
 /// Protocol, which WebKitGTK 6.0 does not expose (see `AGENTS.md`).
 pub const UNSUPPORTED_FEATURES: &[&str] = &["viewport", "network-mock", "screencast"];
 
+/// Host browsers whose cookies flowmux can currently import.
+pub const COOKIE_IMPORT_BROWSERS: &[&str] = &["firefox"];
+
 /// Static description of what this flowmux build can and cannot do,
 /// returned by `flowmux capabilities`. Lets an agent probe the browser
 /// verb set and the explicitly-unsupported features before attempting
@@ -55,6 +58,8 @@ pub const UNSUPPORTED_FEATURES: &[&str] = &["viewport", "network-mock", "screenc
 pub struct Capabilities {
     pub browser_verbs: Vec<String>,
     pub unsupported: Vec<String>,
+    #[serde(default)]
+    pub cookie_import_browsers: Vec<String>,
 }
 
 /// Build the capability descriptor from the canonical static lists.
@@ -62,6 +67,10 @@ pub fn capabilities() -> Capabilities {
     Capabilities {
         browser_verbs: BROWSER_VERBS.iter().map(|s| s.to_string()).collect(),
         unsupported: UNSUPPORTED_FEATURES.iter().map(|s| s.to_string()).collect(),
+        cookie_import_browsers: COOKIE_IMPORT_BROWSERS
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     }
 }
 
@@ -810,6 +819,7 @@ mod tests {
         for v in &caps.browser_verbs {
             assert!(!caps.unsupported.contains(v), "{v} is both supported+not");
         }
+        assert_eq!(caps.cookie_import_browsers, ["firefox"]);
         let json = serde_json::to_string(&caps).unwrap();
         assert_eq!(serde_json::from_str::<Capabilities>(&json).unwrap(), caps);
     }

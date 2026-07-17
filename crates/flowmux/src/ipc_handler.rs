@@ -520,6 +520,9 @@ impl GuiHandler {
                     };
                     match s.list_cookies(domain.as_deref()) {
                         Ok(c) => c,
+                        Err(e @ flowmux_cookies::source::Error::EncryptedValuesUnsupported) => {
+                            return Response::Error(RpcError::Unimplemented(e.to_string()))
+                        }
                         Err(e) => return Response::Error(RpcError::Internal(e.to_string())),
                     }
                 };

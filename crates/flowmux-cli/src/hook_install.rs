@@ -11,8 +11,8 @@
 //!
 //! Supported targets (mirroring cmux):
 //! - **Claude Code** — `~/.claude/settings.json` `hooks.{Stop,Notification}`.
-//! - **Codex CLI**   — `~/.codex/hooks.json` `Stop`, plus
-//!   `~/.codex/config.toml` `[features] codex_hooks = true`.
+//! - **Codex CLI**   — top-level `notify` in `~/.codex/config.toml`;
+//!   flowmux-owned entries in the legacy `hooks.json` are removed.
 //! - **OpenCode**    — `~/.config/opencode/plugins/flowmux-session.mjs`
 //!   plus `opencode.json` `plugin` entry.
 //! - **Cline**       — executable lifecycle scripts under `~/.cline/hooks/`
