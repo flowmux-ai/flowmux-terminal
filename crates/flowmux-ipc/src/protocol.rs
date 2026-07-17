@@ -233,7 +233,8 @@ pub enum Request {
         workspace: WorkspaceId,
     },
 
-    /// `flowmux surface new <workspace>` — opens a new surface (tab).
+    /// `flowmux new-tab [--workspace <workspace>] [--cwd <dir>]` —
+    /// opens a new terminal tab.
     SurfaceCreate {
         workspace: WorkspaceId,
         cwd: Option<PathBuf>,
@@ -600,6 +601,7 @@ pub enum Response {
     },
     SurfaceCreated {
         id: SurfaceId,
+        pane: PaneId,
     },
     PaneSplitDone {
         new_pane: PaneId,
@@ -822,6 +824,31 @@ mod tests {
         assert_eq!(caps.cookie_import_browsers, ["firefox"]);
         let json = serde_json::to_string(&caps).unwrap();
         assert_eq!(serde_json::from_str::<Capabilities>(&json).unwrap(), caps);
+    }
+
+    #[test]
+    fn surface_create_and_created_round_trip() {
+        let workspace = WorkspaceId::new();
+        let request = Request::SurfaceCreate {
+            workspace,
+            cwd: Some(PathBuf::from("/tmp/new-tab")),
+        };
+        let request_json = serde_json::to_string(&request).unwrap();
+        assert!(matches!(
+            serde_json::from_str::<Request>(&request_json).unwrap(),
+            Request::SurfaceCreate { workspace: got, cwd: Some(cwd) }
+                if got == workspace && cwd == std::path::Path::new("/tmp/new-tab")
+        ));
+
+        let id = SurfaceId::new();
+        let pane = PaneId::new();
+        let response = Response::SurfaceCreated { id, pane };
+        let response_json = serde_json::to_string(&response).unwrap();
+        assert!(matches!(
+            serde_json::from_str::<Response>(&response_json).unwrap(),
+            Response::SurfaceCreated { id: got_id, pane: got_pane }
+                if got_id == id && got_pane == pane
+        ));
     }
 
     #[test]

@@ -140,6 +140,7 @@ flowmux read-screen pane:$OTHER                 # dump that pane's buffer text*
 # Workspace / pane / tab control
 flowmux workspace current               # focused workspace id
 flowmux workspace focus <workspace>     # switch to a workspace
+flowmux new-tab --workspace <workspace> --cwd /tmp # open a terminal tab
 flowmux focus-pane pane:$P              # grab keyboard focus
 flowmux close-pane  pane:$P             # close a pane (refuses the last pane)
 flowmux focus-tab  <surface> --pane $P  # activate a tab

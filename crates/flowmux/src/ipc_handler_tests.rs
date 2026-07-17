@@ -128,6 +128,58 @@ async fn workspace_focus_dispatches_activate_workspace_for_known_workspace() {
 }
 
 #[tokio::test]
+async fn surface_create_dispatches_to_gtk_and_returns_surface_with_pane() {
+    let (handler, rx, pane, _tab) = single_pane_handler().await;
+    let workspace = handler.inner.store().active_or_first().await.unwrap();
+    let cwd = std::path::PathBuf::from("/tmp/flowmux-new-tab");
+    let response = handler.handle(Request::SurfaceCreate {
+        workspace,
+        cwd: Some(cwd.clone()),
+    });
+    tokio::pin!(response);
+
+    let command = tokio::select! {
+        response = &mut response => panic!("surface create completed before bridge ack: {response:?}"),
+        command = rx.recv() => command.expect("surface create should dispatch to GTK"),
+    };
+    let GtkCommand::CreateSurface {
+        workspace: command_workspace,
+        cwd: command_cwd,
+        ack,
+    } = command
+    else {
+        panic!("expected CreateSurface command");
+    };
+    assert_eq!(command_workspace, workspace);
+    assert_eq!(command_cwd, Some(cwd));
+    let id = SurfaceId::new();
+    ack.send(Ok((pane, id))).unwrap();
+
+    assert!(matches!(
+        response.await,
+        Response::SurfaceCreated { id: response_id, pane: response_pane }
+            if response_id == id && response_pane == pane
+    ));
+}
+
+#[tokio::test]
+async fn surface_create_rejects_unknown_workspace_without_dispatch() {
+    let (handler, rx, _pane, _tab) = single_pane_handler().await;
+    let workspace = WorkspaceId::new();
+
+    assert!(matches!(
+        handler
+            .handle(Request::SurfaceCreate {
+                workspace,
+                cwd: None,
+            })
+            .await,
+        Response::Error(RpcError::NotFound(_))
+    ));
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn pane_focus_dispatches_focus_pane_and_waits_for_ack() {
     let (handler, rx, pane, _tab) = single_pane_handler().await;
     let response = handler.handle(Request::PaneFocus { pane });

@@ -275,6 +275,12 @@ pub enum GtkCommand {
     /// (Reserved for the planned horizontal surface-tab bar; currently
     /// unused since the sidebar shows workspaces, not surfaces.)
     NewSurface { pane: PaneId },
+    /// Open a terminal tab in the target workspace for `flowmux new-tab`.
+    CreateSurface {
+        workspace: WorkspaceId,
+        cwd: Option<PathBuf>,
+        ack: oneshot::Sender<Result<(PaneId, SurfaceId), String>>,
+    },
     /// Add an empty about:blank browser tab to the same pane.
     NewBrowserSurface { pane: PaneId },
     /// Toggle the right-side FileBrowser rooted at `pane`'s current directory:

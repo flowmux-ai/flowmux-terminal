@@ -217,6 +217,10 @@ pub(crate) fn build_request(cmd: Cmd) -> anyhow::Result<Request> {
             pane: resolve_pane(pane)?,
             surface,
         },
+        Cmd::NewTab { workspace, cwd } => Request::SurfaceCreate {
+            workspace: resolve_workspace(workspace)?,
+            cwd,
+        },
         Cmd::Browser { op } => browser_op_to_request(op)?,
         Cmd::NotifyStream { .. } => unreachable!("handled before request build"),
         Cmd::TmuxCompat { .. } => unreachable!("handled before request build"),

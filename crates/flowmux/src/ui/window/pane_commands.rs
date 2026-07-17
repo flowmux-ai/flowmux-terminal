@@ -117,6 +117,36 @@ impl WindowController {
                         .await;
                 }
             }
+            GtkCommand::CreateSurface {
+                workspace,
+                cwd,
+                ack,
+            } => {
+                let focused = self.focused_pane.get();
+                let pane = match focused {
+                    Some(pane) if self.store.workspace_for_pane(pane).await == Some(workspace) => {
+                        Some(pane)
+                    }
+                    _ => self
+                        .store
+                        .get_workspace(workspace)
+                        .await
+                        .and_then(|workspace| {
+                            workspace.surfaces.first()?.root_pane.first_leaf_id()
+                        }),
+                };
+                let result = match pane {
+                    Some(pane) => match self.store.add_terminal_surface_to_pane(pane, cwd).await {
+                        Some((ws_id, surface)) => {
+                            self.attach_or_rerender_surface(ws_id, pane, surface).await;
+                            Ok((pane, surface))
+                        }
+                        None => Err(format!("workspace has no tab-capable pane: {workspace}")),
+                    },
+                    None => Err(format!("workspace not found: {workspace}")),
+                };
+                let _ = ack.send(result);
+            }
             GtkCommand::NewBrowserSurface { pane } => {
                 if let Some((ws_id, surface_id)) = self
                     .store

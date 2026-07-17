@@ -496,6 +496,46 @@ fn workspace_focus_parses_and_maps_to_request() {
 }
 
 #[test]
+fn new_tab_parses_explicit_workspace_cwd_and_json() {
+    let workspace = WorkspaceId::new();
+    let workspace_ref = format!("workspace:{workspace}");
+    let cli = Cli::try_parse_from([
+        "flowmuxctl",
+        "new-tab",
+        "--workspace",
+        &workspace_ref,
+        "--cwd",
+        "/tmp/new-tab",
+        "--json",
+    ])
+    .unwrap();
+    assert!(cli.json);
+    assert!(matches!(
+        build_request(cli.cmd).unwrap(),
+        Request::SurfaceCreate { workspace: got, cwd: Some(cwd) }
+            if got == workspace && cwd == std::path::Path::new("/tmp/new-tab")
+    ));
+}
+
+#[test]
+fn new_tab_falls_back_to_workspace_env() {
+    let _guard = flowmux_pane_env_lock();
+    let workspace = WorkspaceId::new();
+    unsafe {
+        std::env::set_var("FLOWMUX_WORKSPACE_ID", workspace.to_string());
+    }
+    let cli = Cli::try_parse_from(["flowmuxctl", "new-tab"]).unwrap();
+    let request = build_request(cli.cmd);
+    unsafe {
+        std::env::remove_var("FLOWMUX_WORKSPACE_ID");
+    }
+    assert!(matches!(
+        request.unwrap(),
+        Request::SurfaceCreate { workspace: got, cwd: None } if got == workspace
+    ));
+}
+
+#[test]
 fn tree_parses_and_maps_to_workspace_tree_request() {
     let cli = Cli::try_parse_from(["flowmuxctl", "tree"]).unwrap();
     assert!(matches!(

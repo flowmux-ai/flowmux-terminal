@@ -51,11 +51,27 @@ fn pane_from_env() -> Option<PaneId> {
         .and_then(|s| PaneId::from_str(s).ok())
 }
 
+/// Read `FLOWMUX_WORKSPACE_ID` from the calling flowmux PTY.
+fn workspace_from_env() -> Option<WorkspaceId> {
+    std::env::var("FLOWMUX_WORKSPACE_ID")
+        .ok()
+        .as_deref()
+        .and_then(|s| WorkspaceId::from_str(s).ok())
+}
+
 /// Resolve a pane argument: the explicit value if given, else the
 /// `FLOWMUX_PANE_ID` of the calling pane. Errors when neither is set.
 fn resolve_pane(pane: Option<PaneId>) -> anyhow::Result<PaneId> {
     pane.or_else(pane_from_env)
         .ok_or_else(|| anyhow::anyhow!("no pane: pass pane:<uuid> or set FLOWMUX_PANE_ID"))
+}
+
+fn resolve_workspace(workspace: Option<WorkspaceId>) -> anyhow::Result<WorkspaceId> {
+    workspace.or_else(workspace_from_env).ok_or_else(|| {
+        anyhow::anyhow!(
+            "no workspace: pass --workspace workspace:<uuid> or set FLOWMUX_WORKSPACE_ID"
+        )
+    })
 }
 
 #[derive(Parser)]
@@ -215,6 +231,15 @@ enum Cmd {
         surface: SurfaceId,
         #[arg(long)]
         pane: Option<PaneId>,
+    },
+
+    /// Open a terminal tab in a workspace. `--workspace` falls back to
+    /// `$FLOWMUX_WORKSPACE_ID`.
+    NewTab {
+        #[arg(long)]
+        workspace: Option<WorkspaceId>,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
     },
 
     /// In-app browser automation: `flowmux browser <op> …`. This is the

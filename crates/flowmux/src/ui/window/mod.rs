@@ -1524,6 +1524,7 @@ impl WindowController {
             | GtkCommand::CloseFocused { .. }
             | GtkCommand::FocusDirection { .. }
             | GtkCommand::NewSurface { .. }
+            | GtkCommand::CreateSurface { .. }
             | GtkCommand::NewBrowserSurface { .. }
             | GtkCommand::ActivateSurface { .. }
             | GtkCommand::CloseSurface { .. }

@@ -140,9 +140,9 @@ impl Handler for GuiHandler {
     fn handle<'a>(&'a self, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + 'a>> {
         Box::pin(async move {
             match req {
-                Request::WorkspaceCreate { .. } | Request::WorkspaceFocus { .. } => {
-                    self.handle_workspace_verb(req).await
-                }
+                Request::WorkspaceCreate { .. }
+                | Request::WorkspaceFocus { .. }
+                | Request::SurfaceCreate { .. } => self.handle_workspace_verb(req).await,
                 Request::PaneSplit { .. }
                 | Request::PaneSendKeys { .. }
                 | Request::PaneReadScreen { .. }
@@ -277,6 +277,29 @@ impl GuiHandler {
                     Response::Ok
                 } else {
                     Response::Error(RpcError::NotFound(workspace.to_string()))
+                }
+            }
+            Request::SurfaceCreate { workspace, cwd } => {
+                if self.inner.store().get_workspace(workspace).await.is_none() {
+                    return Response::Error(RpcError::NotFound(workspace.to_string()));
+                }
+                let (tx, rx) = oneshot::channel();
+                if let Err(error) = self
+                    .bridge
+                    .tx
+                    .send(GtkCommand::CreateSurface {
+                        workspace,
+                        cwd,
+                        ack: tx,
+                    })
+                    .await
+                {
+                    return Response::Error(RpcError::Internal(error.to_string()));
+                }
+                match rx.await {
+                    Ok(Ok((pane, id))) => Response::SurfaceCreated { id, pane },
+                    Ok(Err(error)) => Response::Error(RpcError::Internal(error)),
+                    Err(_) => Response::Error(RpcError::Internal("bridge closed".into())),
                 }
             }
             other => unreachable!("workspace router got a non-workspace verb: {other:?}"),

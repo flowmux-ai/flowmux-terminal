@@ -243,6 +243,7 @@ fn responses_for_round_trip() -> Vec<Response> {
         },
         Response::SurfaceCreated {
             id: SurfaceId::new(),
+            pane: PaneId::new(),
         },
         Response::PaneSplitDone {
             new_pane: PaneId::new(),
