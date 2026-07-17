@@ -1184,6 +1184,9 @@ fn build_leaf_pane(
     }
     tools.append(&add_browser);
 
+    let pane_menu = pane_menu_button(pane_id, callbacks);
+    tools.append(&pane_menu);
+
     // The File browser toggle lives in the side-panel footer (next to the
     // Options button), not in the per-pane tool row.
 
@@ -2354,6 +2357,78 @@ fn pane_tool_button(icon_name: &str, tooltip: &str) -> gtk::Button {
     button.set_tooltip_text(Some(tooltip));
     button.set_focus_on_click(false);
     button
+}
+
+fn pane_menu_button(pane_id: PaneId, callbacks: &PaneCallbacks) -> gtk::MenuButton {
+    let button = gtk::MenuButton::new();
+    button.set_icon_name("view-more-symbolic");
+    button.add_css_class("flat");
+    button.add_css_class("flowmux-pane-tool");
+    button.set_tooltip_text(Some("Pane actions"));
+    button.set_focus_on_click(false);
+
+    let popover = gtk::Popover::new();
+    popover.set_has_arrow(false);
+    let items = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    items.set_margin_top(4);
+    items.set_margin_bottom(4);
+
+    let close = gtk::Button::with_label("Close Pane");
+    close.add_css_class("flat");
+    close.set_halign(gtk::Align::Fill);
+    close.set_hexpand(true);
+    if let Some(label) = close.child().and_downcast::<gtk::Label>() {
+        label.set_xalign(0.0);
+    }
+    {
+        let popover = popover.clone();
+        let callback = callbacks.on_close_pane.clone();
+        close.connect_clicked(move |_| {
+            popover.popdown();
+            (callback.borrow_mut())(pane_id);
+        });
+    }
+    items.append(&close);
+    popover.set_child(Some(&items));
+    button.set_popover(Some(&popover));
+    button
+}
+
+#[cfg(all(test, not(target_os = "macos")))]
+mod pane_menu_tests {
+    use super::*;
+
+    #[gtk::test]
+    fn pane_menu_close_item_dispatches_the_owning_pane() {
+        let pane = PaneId::new();
+        let closed = Rc::new(RefCell::new(Vec::new()));
+        let mut callbacks = PaneCallbacks::noop_for_test();
+        callbacks.on_close_pane = {
+            let closed = closed.clone();
+            Rc::new(RefCell::new(move |pane| closed.borrow_mut().push(pane)))
+        };
+
+        let menu = pane_menu_button(pane, &callbacks);
+        assert_eq!(menu.icon_name().as_deref(), Some("view-more-symbolic"));
+        assert_eq!(menu.tooltip_text().as_deref(), Some("Pane actions"));
+
+        let popover = menu
+            .popover()
+            .and_downcast::<gtk::Popover>()
+            .expect("pane menu owns a popover");
+        let items = popover
+            .child()
+            .and_downcast::<gtk::Box>()
+            .expect("pane menu popover owns an item list");
+        let close = items
+            .first_child()
+            .and_downcast::<gtk::Button>()
+            .expect("pane menu starts with the close action");
+        assert_eq!(close.label().as_deref(), Some("Close Pane"));
+
+        close.emit_clicked();
+        assert_eq!(&*closed.borrow(), &[pane]);
+    }
 }
 
 fn build_panel(
