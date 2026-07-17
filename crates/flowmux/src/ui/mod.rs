@@ -13,6 +13,7 @@ pub mod pane_terminal;
 pub mod popover_pos;
 pub mod show_in_folder;
 pub mod sidebar;
+pub mod theme_tab;
 pub mod thorvg;
 pub mod update_banner;
 pub mod usage_popover;

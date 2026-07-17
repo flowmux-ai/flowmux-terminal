@@ -15,6 +15,7 @@ pub mod ghostty;
 pub mod keybindings;
 pub mod options;
 pub mod paths;
+pub mod presets;
 pub mod theme;
 
 /// Shared test helpers. `env_lock` serializes any test that mutates

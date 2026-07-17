@@ -43,27 +43,57 @@ pub struct ResolvedTheme {
 /// scheme. The two black slots are raised slightly for flowmux's
 /// `#282c34` default background so ANSI black text remains legible on a
 /// fresh install.
-const DEFAULT_PALETTE: [&str; 16] = [
+pub(crate) const DEFAULT_BG: &str = "#282c34";
+pub(crate) const DEFAULT_FG: &str = "#ffffff";
+
+pub(crate) const DEFAULT_PALETTE: [&str; 16] = [
     "#5c6370", "#cc6666", "#b5bd68", "#f0c674", "#81a2be", "#b294bb", "#8abeb7", "#c5c8c6",
     "#7f848e", "#d54e53", "#b9ca4a", "#e7c547", "#7aa6da", "#c397d8", "#70c0b1", "#eaeaea",
 ];
 
 impl ResolvedTheme {
     pub fn load() -> Self {
-        let cfg = flowmux_config::theme::load().unwrap_or_default();
+        Self::resolve(&flowmux_config::options::load())
+    }
+
+    /// Resolve the effective theme for the given options:
+    ///
+    /// 1. The preset named by `options.theme`, if any — the user's theme
+    ///    file still contributes its font when the preset has none.
+    /// 2. Otherwise the user's `~/.config/flowmux/theme` file, if present.
+    /// 3. `options.theme_overrides` layered on top.
+    /// 4. Built-in defaults for anything still unset (in `from_ghostty`).
+    pub fn resolve(options: &flowmux_config::options::Options) -> Self {
+        Self::resolve_with_file(options, flowmux_config::theme::load())
+    }
+
+    fn resolve_with_file(
+        options: &flowmux_config::options::Options,
+        file_cfg: Option<flowmux_config::ghostty::GhosttyConfig>,
+    ) -> Self {
+        let mut cfg = match options.theme.as_deref() {
+            Some(id) => {
+                let mut preset = flowmux_config::presets::config(id).unwrap_or_else(|| {
+                    tracing::warn!(theme = id, "unknown theme preset — using the default look");
+                    Default::default()
+                });
+                if let Some(file) = file_cfg {
+                    preset.font_family = preset.font_family.or(file.font_family);
+                    preset.font_size = preset.font_size.or(file.font_size);
+                }
+                preset
+            }
+            None => file_cfg.unwrap_or_default(),
+        };
+        cfg.merge(options.theme_overrides.to_ghostty());
         let theme = Self::from_ghostty(&cfg);
-        let path = flowmux_config::theme::user_theme_path()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
-        let user_palette_count = cfg.palette.iter().filter(|p| p.is_some()).count();
         tracing::info!(
-            source = if cfg.background.is_some() { "user theme file" } else { "builtin defaults" },
-            path = %path,
+            preset = ?options.theme.as_deref(),
+            overrides = !options.theme_overrides.is_empty(),
             bg = ?cfg.background.as_deref(),
             fg = ?cfg.foreground.as_deref(),
             font_family = ?cfg.font_family.as_deref(),
             font_size = ?cfg.font_size,
-            user_palette_count,
             "resolved theme"
         );
         theme
@@ -78,12 +108,12 @@ impl ResolvedTheme {
             .background
             .as_deref()
             .and_then(parse)
-            .unwrap_or_else(|| parse_or_black("#282c34"));
+            .unwrap_or_else(|| parse_or_black(DEFAULT_BG));
         let fg = cfg
             .foreground
             .as_deref()
             .and_then(parse)
-            .unwrap_or_else(|| parse_or_black("#ffffff"));
+            .unwrap_or_else(|| parse_or_black(DEFAULT_FG));
         let cursor = cfg.cursor_color.as_deref().and_then(parse).unwrap_or(fg);
         let selection_bg = cfg.selection_background.as_deref().and_then(parse);
         let selection_fg = cfg.selection_foreground.as_deref().and_then(parse);
@@ -216,20 +246,20 @@ impl ResolvedTheme {
             r#"
 .flowmux-pane {{
     background-color: {bg};
-    border: 1px solid {border};
-    border-radius: 4px;
-    margin: 1px;
+    border: 0;
+    border-radius: 0;
+    margin: 0;
     padding: 0;
 }}
-.flowmux-pane.focused {{
-    border-color: {focus};
+.flowmux-pane.focused .flowmux-pane-tabbar {{
+    box-shadow: inset 0 2px {focus};
 }}
-.flowmux-pane.focused.flowmux-solo {{
-    border-color: {border};
+.flowmux-pane.focused.flowmux-solo .flowmux-pane-tabbar {{
+    box-shadow: none;
 }}
 .flowmux-pane .flowmux-terminal {{
     padding: 7px;
-    border-radius: 0 0 3px 3px;
+    border-radius: 0;
 }}
 .flowmux-pane-tabbar {{
     min-height: 26px;
@@ -242,13 +272,11 @@ impl ResolvedTheme {
 }}
 .flowmux-pane-tab {{
     margin: 2px 1px 0 0;
-    border: 1px solid transparent;
-    border-bottom: 0;
+    border: 0;
     border-radius: 4px 4px 0 0;
 }}
 .flowmux-pane-tab.active {{
     background-color: {tab_active};
-    border-color: {border};
 }}
 .flowmux-pane-tabs.has-multi-tabs > .flowmux-pane-tab.active {{
     border-top: 2px solid {focus};
@@ -290,25 +318,33 @@ paned > separator {{
     min-width: 1px;
     min-height: 1px;
 }}
+.flowmux-sidebar-shell {{
+    background-color: @sidebar_bg_color;
+    color: @sidebar_fg_color;
+}}
+.flowmux-sidebar-shell headerbar {{
+    background-color: @sidebar_bg_color;
+    color: @sidebar_fg_color;
+}}
+.flowmux-window-split > separator {{
+    background-color: @sidebar_border_color;
+}}
 .navigation-sidebar {{
-    background-color: {sidebar};
+    background-color: @sidebar_bg_color;
 }}
 .navigation-sidebar row {{
-    color: {fg};
+    color: @sidebar_fg_color;
     border-radius: 6px;
     margin: 2px 6px;
     padding: 8px 10px;
 }}
-/* libadwaita wraps the workspace title in .heading and the path
-   subtitles in .caption/.dim-label, both of which assign their own
-   color in the dark theme. Re-pin the color on the labels so the
-   sidebar folder names follow Ghostty's foreground. The .dim-label
-   variants keep their natural dimming because that class adjusts
-   opacity, not color. */
+/* Keep the window chrome on libadwaita's semantic sidebar palette;
+   terminal themes remain scoped to panes. The .dim-label variants keep
+   their natural dimming because that class adjusts opacity, not color. */
 .navigation-sidebar row label,
 .navigation-sidebar row label.heading,
 .navigation-sidebar row label.caption {{
-    color: {fg};
+    color: @sidebar_fg_color;
 }}
 /* Suppress libadwaita selected-row tint on workspace rows. The ListBox
    keeps SelectionMode::Single so navigation helpers can read
@@ -362,12 +398,12 @@ paned > separator {{
 .navigation-sidebar > row.activatable:active,
 .navigation-sidebar > row.activatable:selected:hover,
 .navigation-sidebar > row.activatable:selected:active {{
-    background-color: {sidebar_hover};
+    background-color: alpha(@sidebar_fg_color, 0.055);
 }}
 .navigation-sidebar row.activatable:selected label,
 .navigation-sidebar row.activatable:selected label.heading,
 .navigation-sidebar row.activatable:selected label.caption {{
-    color: {fg};
+    color: @sidebar_fg_color;
 }}
 .navigation-sidebar row.flowmux-attention {{
     background-color: rgba(245, 158, 11, 0.18);
@@ -394,7 +430,7 @@ paned > separator {{
 .navigation-sidebar row image.flowmux-sidebar-agent-idle,
 .navigation-sidebar row label.flowmux-sidebar-agent-unknown,
 .navigation-sidebar row image.flowmux-sidebar-agent-unknown {{
-    color: {fg};
+    color: @sidebar_fg_color;
     opacity: 0.72;
 }}
 .flowmux-agent-bar {{
@@ -602,6 +638,50 @@ mod tests {
     }
 
     #[test]
+    fn resolve_prefers_preset_over_theme_file_but_keeps_its_font() {
+        let file_cfg = flowmux_config::ghostty::parse(
+            "background = #101010\nfont-family = Fira Code\nfont-size = 14\n",
+        );
+        let options = flowmux_config::options::Options::default();
+
+        // No preset selected → the theme file wins (legacy behavior).
+        let theme = ResolvedTheme::resolve_with_file(&options, Some(file_cfg.clone()));
+        assert_eq!(rgba_css(&theme.bg), "rgba(16,16,16,1)");
+
+        // Preset selected → preset colors win, theme-file font survives.
+        let mut options = options;
+        options.theme = Some("dracula".into());
+        let theme = ResolvedTheme::resolve_with_file(&options, Some(file_cfg));
+        assert_eq!(rgba_css(&theme.bg), "rgba(40,42,54,1)");
+        assert_eq!(theme.font_family(), "Fira Code");
+        assert!((theme.font_size() - 14.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn resolve_layers_color_overrides_on_top_of_the_preset() {
+        let mut options = flowmux_config::options::Options::default();
+        options.theme = Some("nord".into());
+        options.theme_overrides.background = Some("#123456".into());
+        options.theme_overrides.cursor = Some("not-a-color".into());
+
+        let theme = ResolvedTheme::resolve_with_file(&options, None);
+
+        assert_eq!(rgba_css(&theme.bg), "rgba(18,52,86,1)");
+        // Invalid override is discarded → Nord's own cursor color remains.
+        assert_eq!(rgba_css(&theme.cursor), "rgba(216,222,233,1)");
+    }
+
+    #[test]
+    fn resolve_with_unknown_preset_falls_back_to_default_look() {
+        let mut options = flowmux_config::options::Options::default();
+        options.theme = Some("deleted-preset".into());
+
+        let theme = ResolvedTheme::resolve_with_file(&options, None);
+
+        assert_eq!(rgba_css(&theme.bg), "rgba(40,44,52,1)");
+    }
+
+    #[test]
     fn builtin_ansi_black_stays_legible_on_default_background() {
         let cfg = flowmux_config::ghostty::GhosttyConfig::default();
         let theme = ResolvedTheme::from_ghostty(&cfg);
@@ -672,24 +752,40 @@ mod tests {
         }
     }
 
-    /// Trivial 1-pane / 1-tab workspaces hide the focus border via the
-    /// `.flowmux-solo` class. Lock in both halves of that contract so a
-    /// future CSS edit cannot silently re-enable the border in solo
-    /// workspaces or break the multi-pane / multi-tab case.
+    /// Pane focus is shown inside its tab header instead of drawing a rounded
+    /// card around the whole pane. Trivial 1-pane / 1-tab workspaces still hide
+    /// the focus cue via `.flowmux-solo`.
     #[test]
-    fn focus_border_solo_override_present() {
+    fn focused_pane_uses_header_accent_without_card_border() {
         let css = sample_css();
+        let pane_rule_idx = css.find(".flowmux-pane {").expect("pane rule missing");
+        let pane_rule =
+            &css[pane_rule_idx..css[pane_rule_idx..].find('}').unwrap() + pane_rule_idx];
         assert!(
-            css.contains(".flowmux-pane.focused {"),
-            "base focused-pane rule missing"
+            pane_rule.contains("border: 0;") && pane_rule.contains("border-radius: 0;"),
+            "pane shell must remain flat"
         );
         let solo_rule_idx = css
-            .find(".flowmux-pane.focused.flowmux-solo {")
+            .find(".flowmux-pane.focused.flowmux-solo .flowmux-pane-tabbar {")
             .expect("solo override missing");
         let tail = &css[solo_rule_idx..];
         assert!(
-            tail.contains("border-color:"),
-            "solo override must clear the border color"
+            css.contains(".flowmux-pane.focused .flowmux-pane-tabbar {")
+                && css.contains("box-shadow: inset 0 2px")
+                && tail.contains("box-shadow: none"),
+            "focus accent must stay in the pane header and disappear for solo panes"
+        );
+    }
+
+    #[test]
+    fn sidebar_chrome_uses_libadwaita_semantic_colors() {
+        let css = sample_css();
+        assert!(
+            css.contains(".flowmux-sidebar-shell {")
+                && css.contains("background-color: @sidebar_bg_color")
+                && css.contains("color: @sidebar_fg_color")
+                && css.contains(".flowmux-window-split > separator"),
+            "sidebar shell must follow the Ubuntu/libadwaita palette"
         );
     }
 

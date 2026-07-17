@@ -862,12 +862,12 @@ impl WindowController {
         let opts = flowmux_config::options::load();
         *self.options.borrow_mut() = opts.clone();
 
-        let font = self
-            .theme
-            .font_with_overrides(opts.font_family.as_deref(), opts.font_size);
+        // Re-resolves the theme (preset + overrides), repaints terminals,
+        // reapplies the font, and reloads the CSS provider.
+        self.apply_runtime_theme(&opts);
+
         let registry = self.pane_registry.borrow();
         for terminal in registry.terminals.values() {
-            terminal.set_font(&font);
             terminal.set_font_scale(opts.zoom_factor());
             terminal.set_cursor_blink(opts.cursor_blink, opts.cursor_blink_interval_ms);
         }
@@ -875,11 +875,6 @@ impl WindowController {
             browser.set_zoom_level(opts.zoom_factor());
         }
         drop(registry);
-
-        self.css_provider.load_from_string(&self.theme.css(
-            opts.focus_border_color_or_default(),
-            opts.focus_border_alpha(),
-        ));
 
         if let Some(app) = self
             .window

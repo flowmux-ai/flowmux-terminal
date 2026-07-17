@@ -171,6 +171,15 @@ pub struct Options {
     /// bottom agent bar so workspace rows stay quiet unless requested.
     #[serde(default)]
     pub agent_notification_target: AgentNotificationTarget,
+    /// Built-in theme preset id selected in the Theme tab (see
+    /// [`crate::presets::PRESETS`]). `None` keeps the legacy behavior:
+    /// the user's `~/.config/flowmux/theme` file if present, otherwise
+    /// the built-in default look.
+    #[serde(default)]
+    pub theme: Option<String>,
+    /// Per-color overrides layered on top of the selected theme.
+    #[serde(default)]
+    pub theme_overrides: ThemeOverrides,
     /// User overrides for keyboard shortcuts. Partial overlay over the
     /// built-in defaults exposed by
     /// [`crate::keybindings::defaults`] — actions absent from this map
@@ -239,7 +248,48 @@ impl Default for Options {
             font_family: None,
             font_size: None,
             agent_notification_target: AgentNotificationTarget::default(),
+            theme: None,
+            theme_overrides: ThemeOverrides::default(),
             keybindings: KeybindingOverrides::default(),
+        }
+    }
+}
+
+/// Individual color overrides from the Theme tab. Every field is a hex
+/// color (`#rrggbb`); `None` inherits the selected theme's value. Invalid
+/// entries are ignored at resolve time by [`ThemeOverrides::to_ghostty`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ThemeOverrides {
+    #[serde(default)]
+    pub background: Option<String>,
+    #[serde(default)]
+    pub foreground: Option<String>,
+    #[serde(default)]
+    pub cursor: Option<String>,
+    #[serde(default)]
+    pub selection_background: Option<String>,
+    #[serde(default)]
+    pub selection_foreground: Option<String>,
+}
+
+impl ThemeOverrides {
+    pub fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+
+    /// Overlay config for [`crate::ghostty::GhosttyConfig::merge`]. Only
+    /// valid hex colors survive so a hand-edited `options.json` cannot
+    /// inject arbitrary strings into the theme pipeline.
+    pub fn to_ghostty(&self) -> crate::ghostty::GhosttyConfig {
+        let valid =
+            |color: &Option<String>| color.clone().filter(|value| is_valid_hex_color(value));
+        crate::ghostty::GhosttyConfig {
+            background: valid(&self.background),
+            foreground: valid(&self.foreground),
+            cursor_color: valid(&self.cursor),
+            selection_background: valid(&self.selection_background),
+            selection_foreground: valid(&self.selection_foreground),
+            ..Default::default()
         }
     }
 }

@@ -273,7 +273,7 @@ impl WindowController {
             &stack_name,
             &self.callbacks,
             self.pane_registry.clone(),
-            self.theme.clone(),
+            self.current_theme(),
             false,
         );
 
@@ -326,7 +326,7 @@ impl WindowController {
                 &surface,
                 &self.callbacks,
                 self.pane_registry.clone(),
-                self.theme.clone(),
+                self.current_theme(),
             );
             if attached {
                 self.refresh_workspace_solo(&ws);
@@ -890,7 +890,7 @@ impl WindowController {
             &stack_name,
             &self.callbacks,
             self.pane_registry.clone(),
-            self.theme.clone(),
+            self.current_theme(),
             false,
         ) {
             IncrementalSplitOutcome::SucceededRoot { new_root } => {
@@ -984,7 +984,7 @@ impl WindowController {
             &stack_name,
             &self.callbacks,
             self.pane_registry.clone(),
-            self.theme.clone(),
+            self.current_theme(),
             true,
         );
         match split_outcome {

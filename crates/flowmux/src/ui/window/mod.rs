@@ -300,7 +300,10 @@ pub struct WindowController {
     agent_bar: AgentBarState,
     callbacks: PaneCallbacks,
     bridge: Bridge,
-    theme: Arc<ResolvedTheme>,
+    /// Currently applied visual theme. Swapped in place by
+    /// [`WindowController::apply_runtime_theme`] when the Theme tab picks
+    /// a preset; new panes read the current value at creation time.
+    theme: Rc<RefCell<Arc<ResolvedTheme>>>,
     notifications: notification_coordinator::NotificationCoordinator,
     options: Rc<RefCell<flowmux_config::options::Options>>,
     /// Global CssProvider. When the options dialog changes focus border color
@@ -501,6 +504,41 @@ impl std::ops::Deref for WindowController {
 }
 
 impl WindowController {
+    /// Snapshot of the currently applied theme.
+    pub(super) fn current_theme(&self) -> Arc<ResolvedTheme> {
+        self.theme.borrow().clone()
+    }
+
+    /// Re-resolve the theme from `opts` and repaint everything that
+    /// depends on it: every open terminal (colors + font), the global CSS
+    /// provider, and libadwaita's dark/light color scheme. New panes pick
+    /// up the swapped theme automatically. Used both for the Theme tab's
+    /// live preview and for the final apply on OK.
+    pub(super) fn apply_runtime_theme(&self, opts: &flowmux_config::options::Options) {
+        let resolved = Arc::new(ResolvedTheme::resolve(opts));
+        *self.theme.borrow_mut() = resolved.clone();
+
+        let style = adw::StyleManager::default();
+        style.set_color_scheme(if resolved.is_dark() {
+            adw::ColorScheme::ForceDark
+        } else {
+            adw::ColorScheme::ForceLight
+        });
+
+        let font = resolved.font_with_overrides(opts.font_family.as_deref(), opts.font_size);
+        let registry = self.pane_registry.borrow();
+        for terminal in registry.terminals.values() {
+            resolved.apply_to_ghostty(terminal);
+            terminal.set_font(&font);
+        }
+        drop(registry);
+
+        self.css_provider.load_from_string(&resolved.css(
+            opts.focus_border_color_or_default(),
+            opts.focus_border_alpha(),
+        ));
+    }
+
     pub fn new(
         app: &adw::Application,
         store: StateStore,
@@ -804,7 +842,7 @@ impl WindowController {
             },
             callbacks,
             bridge,
-            theme,
+            theme: Rc::new(RefCell::new(theme)),
             notifications: notification_coordinator::NotificationCoordinator::new(
                 notifications,
                 tokio_handle,
@@ -1400,7 +1438,7 @@ impl WindowController {
                 s,
                 &self.callbacks,
                 self.pane_registry.clone(),
-                self.theme.clone(),
+                self.current_theme(),
             ),
             None => gtk::Label::new(Some("(empty workspace)")).upcast(),
         }

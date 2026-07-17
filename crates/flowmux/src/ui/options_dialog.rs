@@ -39,6 +39,7 @@ pub fn present(
     default_font_family: String,
     default_font_size: f32,
     on_apply: impl Fn(Options) + 'static,
+    on_preview: impl Fn(&Options) + 'static,
 ) {
     let dialog = build_dialog(
         parent,
@@ -46,6 +47,7 @@ pub fn present(
         default_font_family,
         default_font_size,
         on_apply,
+        on_preview,
     );
     dialog.present();
 }
@@ -58,6 +60,7 @@ fn build_dialog(
     default_font_family: String,
     default_font_size: f32,
     on_apply: impl Fn(Options) + 'static,
+    on_preview: impl Fn(&Options) + 'static,
 ) -> adw::Window {
     // Intentionally NOT modal. A modal transient dialog gets attached to its
     // parent's titlebar by window managers that honour the "attach modal
@@ -132,6 +135,30 @@ fn build_dialog(
     let kb_state = std::rc::Rc::new(std::cell::RefCell::new(current.keybindings.clone()));
     let keybindings_tab = crate::ui::keybindings_panel::build(kb_state.clone());
 
+    // Theme tab — selections write into theme_state and preview live via
+    // on_preview; OK persists them through collect_options, and Cancel /
+    // close restores the original look (see connect_close_request below).
+    let on_preview = std::rc::Rc::new(on_preview);
+    let theme_state = std::rc::Rc::new(std::cell::RefCell::new(
+        crate::ui::theme_tab::ThemeSelection {
+            theme: current.theme.clone(),
+            overrides: current.theme_overrides.clone(),
+        },
+    ));
+    let preview_theme: std::rc::Rc<dyn Fn()> = {
+        let theme_state = theme_state.clone();
+        let on_preview = on_preview.clone();
+        let base = current.clone();
+        std::rc::Rc::new(move || {
+            let selection = theme_state.borrow();
+            let mut opts = base.clone();
+            opts.theme = selection.theme.clone();
+            opts.theme_overrides = selection.overrides.clone();
+            on_preview(&opts);
+        })
+    };
+    let theme_tab = crate::ui::theme_tab::build(theme_state.clone(), preview_theme);
+
     // Use freedesktop symbolic icon names so the switcher picks up the
     // current Adwaita theme automatically. `preferences-system-symbolic`
     // is the standard "settings cog" used across GNOME apps; the
@@ -143,6 +170,12 @@ fn build_dialog(
         Some("general"),
         "General",
         "preferences-system-symbolic",
+    );
+    stack.add_titled_with_icon(
+        &theme_tab,
+        Some("theme"),
+        "Theme",
+        "applications-graphics-symbolic",
     );
     stack.add_titled_with_icon(
         &keybindings_tab,
@@ -188,6 +221,20 @@ fn build_dialog(
         let dialog = dialog.clone();
         cancel_btn.connect_clicked(move |_| dialog.close());
     }
+    // Theme previews already repainted the app; when the dialog closes any
+    // way other than OK / Reset, restore the look the user started with.
+    let applied = std::rc::Rc::new(std::cell::Cell::new(false));
+    {
+        let applied = applied.clone();
+        let on_preview = on_preview.clone();
+        let original = current.clone();
+        dialog.connect_close_request(move |_| {
+            if !applied.get() {
+                on_preview(&original);
+            }
+            gtk::glib::Propagation::Proceed
+        });
+    }
     let on_apply = std::rc::Rc::new(on_apply);
     {
         let dialog = dialog.clone();
@@ -207,6 +254,8 @@ fn build_dialog(
         let families = font_widgets.families.clone();
         let on_apply = on_apply.clone();
         let kb_state = kb_state.clone();
+        let theme_state = theme_state.clone();
+        let applied = applied.clone();
         let agent_notification_target = current.agent_notification_target;
         ok_btn.connect_clicked(move |_| {
             let kb = kb_state.borrow().clone();
@@ -235,7 +284,9 @@ fn build_dialog(
                 default_font_size,
                 agent_notification_target,
                 &kb,
+                &theme_state.borrow(),
             );
+            applied.set(true);
             (on_apply)(opts);
             dialog.close();
         });
@@ -243,7 +294,9 @@ fn build_dialog(
     {
         let dialog = dialog.clone();
         let on_apply = on_apply.clone();
+        let applied = applied.clone();
         reset_btn.connect_clicked(move |_| {
+            applied.set(true);
             (on_apply)(Options::default());
             dialog.close();
         });
@@ -327,7 +380,7 @@ fn is_safe_version_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+' | '~' | ':')
 }
 
-fn row(label_text: &str, value_widget: &impl IsA<gtk::Widget>) -> gtk::Box {
+pub(crate) fn row(label_text: &str, value_widget: &impl IsA<gtk::Widget>) -> gtk::Box {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     let label = gtk::Label::new(Some(label_text));
     label.set_xalign(0.0);
@@ -393,6 +446,7 @@ fn collect_options(
     default_font_size: f32,
     agent_notification_target: AgentNotificationTarget,
     keybindings: &KeybindingOverrides,
+    theme_selection: &crate::ui::theme_tab::ThemeSelection,
 ) -> Options {
     let zoom = Options::clamp_zoom(spin.value_as_int().max(0) as u16);
     let engine = engine_options()
@@ -433,6 +487,8 @@ fn collect_options(
         font_family,
         font_size,
         agent_notification_target,
+        theme: theme_selection.theme.clone(),
+        theme_overrides: theme_selection.overrides.clone(),
         keybindings: keybindings.clone(),
     }
 }
@@ -867,6 +923,7 @@ mod tests {
             12.0,
             AgentNotificationTarget::Both,
             &kb,
+            &crate::ui::theme_tab::ThemeSelection::default(),
         );
         assert!(opts.agent_bar_enabled);
         assert!(opts.cursor_blink);
@@ -913,6 +970,7 @@ mod tests {
             12.0,
             AgentNotificationTarget::Workspace,
             &kb,
+            &crate::ui::theme_tab::ThemeSelection::default(),
         );
         assert!(!opts.cursor_blink);
         assert_eq!(opts.cursor_blink_interval_ms, 800);

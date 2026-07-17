@@ -9,11 +9,10 @@ impl WindowController {
             GtkCommand::ShowOptionsDialog => {
                 let current = self.options.borrow().clone();
                 let options_cell = self.options.clone();
-                let registry = self.pane_registry.clone();
-                let css_provider = self.css_provider.clone();
-                let theme = self.theme.clone();
                 let window = self.window.clone();
                 let controller = self.clone();
+                let preview_controller = self.clone();
+                let theme = self.current_theme();
                 let default_font_family = theme.font_family();
                 let default_font_size = theme.font_size();
                 crate::ui::options_dialog::present(
@@ -27,14 +26,12 @@ impl WindowController {
                             return;
                         }
                         *options_cell.borrow_mut() = opts.clone();
-                        // Build the effective terminal font once (theme font with
-                        // the user's family / size overrides layered on) and apply
-                        // it live alongside the global zoom scale.
-                        let font =
-                            theme.font_with_overrides(opts.font_family.as_deref(), opts.font_size);
-                        let registry = registry.borrow();
+                        // Re-resolves the theme (preset + overrides), repaints
+                        // every terminal, reapplies the effective font, and
+                        // reloads the CSS provider.
+                        controller.apply_runtime_theme(&opts);
+                        let registry = controller.pane_registry.borrow();
                         for terminal in registry.terminals.values() {
-                            terminal.set_font(&font);
                             terminal.set_font_scale(opts.zoom_factor());
                             terminal
                                 .set_cursor_blink(opts.cursor_blink, opts.cursor_blink_interval_ms);
@@ -42,12 +39,7 @@ impl WindowController {
                         for browser in registry.browsers.values() {
                             browser.set_zoom_level(opts.zoom_factor());
                         }
-                        // Focus border color/opacity apply by reloading one CSS string
-                        // into the same CssProvider instance, so all widgets update automatically.
-                        css_provider.load_from_string(&theme.css(
-                            opts.focus_border_color_or_default(),
-                            opts.focus_border_alpha(),
-                        ));
+                        drop(registry);
                         // Re-install keybindings so the user does not have to
                         // restart for shortcut edits to take effect.
                         // set_accels_for_action overwrites the same keys so a
@@ -75,6 +67,11 @@ impl WindowController {
                         glib::MainContext::default().spawn_local(async move {
                             controller.refresh_agent_bar().await;
                         });
+                    },
+                    // Live preview from the Theme tab; also called on Cancel /
+                    // close with the original options to restore the look.
+                    move |opts| {
+                        preview_controller.apply_runtime_theme(opts);
                     },
                 );
             }
