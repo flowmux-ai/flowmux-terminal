@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -19,6 +19,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const FLOWMUX_AGENT_WRAPPER_MARKER: &[u8] = b"flowmux agent wrapper shim";
 
 pub(crate) async fn collect(home: PathBuf) -> ProviderRefresh {
     let collected_at = Utc::now();
@@ -209,7 +210,7 @@ fn resolve_codex_executable(home: &Path, path: Option<&OsStr>) -> Option<CodexEx
         .into_iter()
         .flat_map(std::env::split_paths)
         .map(|directory| directory.join(&executable_name))
-        .find(|candidate| is_executable(candidate))
+        .find(|candidate| is_executable(candidate) && !is_flowmux_agent_wrapper(candidate))
     {
         return Some(CodexExecutable {
             program: candidate,
@@ -265,6 +266,19 @@ fn is_executable(path: &Path) -> bool {
     {
         true
     }
+}
+
+fn is_flowmux_agent_wrapper(path: &Path) -> bool {
+    let Ok(file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut prefix = Vec::new();
+    if file.take(4_096).read_to_end(&mut prefix).is_err() {
+        return false;
+    }
+    prefix
+        .windows(FLOWMUX_AGENT_WRAPPER_MARKER.len())
+        .any(|window| window == FLOWMUX_AGENT_WRAPPER_MARKER)
 }
 
 fn parse_rate_limits_response(value: &Value) -> Result<Vec<UsageWindow>, UsageError> {
@@ -503,6 +517,33 @@ mod tests {
 
         assert_eq!(resolved.program, newer_node);
         assert_eq!(resolved.script, Some(newer));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_resolution_skips_flowmux_wrapper_for_nvm_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let path_dir = temp.path().join("path-bin");
+        let path_codex = path_dir.join("codex");
+        make_executable(&path_codex);
+        fs::write(
+            &path_codex,
+            "#!/usr/bin/env bash\n# flowmux agent wrapper shim\nexit 127\n",
+        )
+        .unwrap();
+
+        let nvm_codex = temp.path().join(".nvm/versions/node/v24.13.0/bin/codex");
+        let nvm_node = temp.path().join(".nvm/versions/node/v24.13.0/bin/node");
+        make_executable(&nvm_codex);
+        make_executable(&nvm_node);
+
+        assert_eq!(
+            resolve_codex_executable(temp.path(), Some(path_dir.as_os_str())),
+            Some(CodexExecutable {
+                program: nvm_node,
+                script: Some(nvm_codex),
+            })
+        );
     }
 
     #[cfg(unix)]
