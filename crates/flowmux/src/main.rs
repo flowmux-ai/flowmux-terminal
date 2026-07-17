@@ -362,6 +362,7 @@ fn main() -> anyhow::Result<()> {
             controller.focused_pane.clone(),
             controller.pane_registry(),
             controller.clipboard_toast(),
+            controller.usage_button(),
         );
         spawn_dispatch_loop(rx_for_activate.clone(), controller.clone());
         let controller_for_init = controller.clone();

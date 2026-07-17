@@ -135,6 +135,7 @@ pub struct Sidebar {
     on_close: Rc<dyn Fn(WorkspaceId)>,
     bell_button: gtk::MenuButton,
     bell_popover: gtk::Popover,
+    usage_button: gtk::MenuButton,
     notifications: NotificationStore,
     attentions: Rc<RefCell<HashSet<WorkspaceId>>>,
     notification_workspaces: Rc<RefCell<HashSet<WorkspaceId>>>,
@@ -302,7 +303,11 @@ impl Sidebar {
         footer.append(&footer_spacer);
 
         let usage = UsagePopover::new(tokio_handle.clone());
+        usage
+            .button()
+            .set_tooltip_text(Some("AI usage (Ctrl+Alt+U)"));
         footer.append(usage.button());
+        let usage_button = usage.button().clone();
 
         let worktree_btn = gtk::Button::from_icon_name("vcs-branch-symbolic");
         worktree_btn.add_css_class("flat");
@@ -363,6 +368,7 @@ impl Sidebar {
             on_close,
             bell_button,
             bell_popover,
+            usage_button,
             notifications,
             attentions,
             notification_workspaces: Rc::new(RefCell::new(HashSet::new())),
@@ -379,6 +385,10 @@ impl Sidebar {
 
     pub(crate) fn update_banner(&self) -> UpdateBanner {
         self.update_banner.clone()
+    }
+
+    pub(crate) fn usage_button(&self) -> gtk::MenuButton {
+        self.usage_button.clone()
     }
 
     /// Add or redraw a workspace row using cached subtitles. Used by paths
@@ -2085,6 +2095,10 @@ mod tests {
             .iter()
             .position(|name| name == "flowmux-usage-button")
             .expect("usage button must exist");
+        assert_eq!(
+            sidebar.usage_button().tooltip_text().as_deref(),
+            Some("AI usage (Ctrl+Alt+U)")
+        );
         let worktrees = names
             .iter()
             .position(|name| name == "flowmux-worktree-button")

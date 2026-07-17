@@ -1134,6 +1134,12 @@ impl WindowController {
         self.clipboard_toast.clone()
     }
 
+    /// AI usage menu button used by the keyboard action so the shortcut and
+    /// side-panel footer button always toggle the same popover instance.
+    pub fn usage_button(&self) -> gtk::MenuButton {
+        self.sidebar.usage_button()
+    }
+
     fn install_state_flush_on_close(&self) {
         let controller = self.clone();
         self.window.connect_close_request(move |_| {

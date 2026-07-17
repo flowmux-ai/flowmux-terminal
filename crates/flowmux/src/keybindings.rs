@@ -45,6 +45,7 @@ const ACTION_GROUP: &str = "win.";
 const INSERT_NEWLINE_ACTION: &str = "insert-newline";
 const INSERT_NEWLINE_FULL_ACTION: &str = "win.insert-newline";
 const INSERT_NEWLINE_ACCELS: &[&str] = &["<Shift>Return", "<Shift>KP_Enter", "<Shift>ISO_Enter"];
+const TOGGLE_USAGE_POPOVER_FULL_ACTION: &str = "win.toggle-usage-popover";
 
 /// Build the namespaced action name (`win.<bare>`) GTK uses for accel
 /// registration.
@@ -135,6 +136,7 @@ pub fn install_actions(
     focused: FocusedPane,
     registry: TerminalRegistry,
     clipboard_toast: ClipboardToast,
+    usage_button: gtk::MenuButton,
 ) {
     let split_right = make_pane_action(
         "split-right",
@@ -375,6 +377,8 @@ pub fn install_actions(
             })
             .build()
     };
+    install_usage_popover_accel_capture(window, &usage_button);
+    let toggle_usage_popover = make_toggle_usage_popover_action(usage_button);
 
     let [w1, w2, w3, w4, w5, w6, w7, w8] = ws_jumps;
     window.add_action_entries([
@@ -411,7 +415,89 @@ pub fn install_actions(
         copy_pane_path,
         toggle_worktree_panel,
         toggle_file_browser,
+        toggle_usage_popover,
     ]);
+}
+
+/// Toggle the existing side-panel AI usage popover. `MenuButton::active` is
+/// kept in sync by GTK when the popover is dismissed by clicking elsewhere,
+/// so the next shortcut press always opens it again.
+fn make_toggle_usage_popover_action(
+    usage_button: gtk::MenuButton,
+) -> gtk::gio::ActionEntry<adw::ApplicationWindow> {
+    gtk::gio::ActionEntry::builder("toggle-usage-popover")
+        .activate(move |_, _, _| {
+            tracing::debug!(action = "toggle-usage-popover", "key action fired");
+            usage_button.set_active(!usage_button.is_active());
+        })
+        .build()
+}
+
+/// A modal popover owns the keyboard grab while it is open, so its closing
+/// key press never reaches the application accelerator machinery. Capture the
+/// event on the popover itself and compare it with the application's current
+/// accelerator list. Looking the list up for every press intentionally keeps
+/// this path in sync with Options -> Keybindings changes applied at runtime.
+fn install_usage_popover_accel_capture(
+    window: &adw::ApplicationWindow,
+    usage_button: &gtk::MenuButton,
+) {
+    let Some(popover) = usage_button.popover() else {
+        tracing::warn!("AI usage button has no popover for shortcut capture");
+        return;
+    };
+
+    let key = gtk::EventControllerKey::new();
+    key.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let window = window.clone();
+    let usage_button = usage_button.clone();
+    key.connect_key_pressed(move |_, keyval, _keycode, state| {
+        let Some(app) = window.application() else {
+            return glib::Propagation::Proceed;
+        };
+        close_usage_popover_for_key_event(&app, &usage_button, keyval, state)
+    });
+    popover.add_controller(key);
+}
+
+fn close_usage_popover_for_key_event(
+    app: &gtk::Application,
+    usage_button: &gtk::MenuButton,
+    keyval: gtk::gdk::Key,
+    state: gtk::gdk::ModifierType,
+) -> glib::Propagation {
+    if !action_accel_matches_key_event(app, TOGGLE_USAGE_POPOVER_FULL_ACTION, keyval, state) {
+        return glib::Propagation::Proceed;
+    }
+
+    tracing::debug!(
+        action = "toggle-usage-popover",
+        "popover capture closed AI usage"
+    );
+    usage_button.set_active(false);
+    glib::Propagation::Stop
+}
+
+fn action_accel_matches_key_event(
+    app: &gtk::Application,
+    detailed_action_name: &str,
+    keyval: gtk::gdk::Key,
+    state: gtk::gdk::ModifierType,
+) -> bool {
+    let modifiers = state & accelerator_mod_mask();
+    app.accels_for_action(detailed_action_name)
+        .iter()
+        .filter_map(gtk::accelerator_parse)
+        .any(|(accel_key, accel_modifiers)| accel_key == keyval && accel_modifiers == modifiers)
+}
+
+fn accelerator_mod_mask() -> gtk::gdk::ModifierType {
+    use gtk::gdk::ModifierType;
+    ModifierType::SHIFT_MASK
+        | ModifierType::CONTROL_MASK
+        | ModifierType::ALT_MASK
+        | ModifierType::SUPER_MASK
+        | ModifierType::META_MASK
 }
 
 #[derive(Clone, Copy)]
@@ -1127,6 +1213,115 @@ mod tests {
         assert_eq!(
             ActionId::from_wire("toggle-worktree-panel"),
             Some(ActionId::ToggleWorktreePanel)
+        );
+    }
+
+    #[test]
+    fn toggle_usage_popover_default_is_ctrl_alt_u() {
+        let want = if cfg!(target_os = "macos") {
+            "<Meta><Alt>u"
+        } else {
+            "<Ctrl><Alt>u"
+        };
+        assert_eq!(default_for(ActionId::ToggleUsagePopover), vec![want]);
+    }
+
+    #[test]
+    fn toggle_usage_popover_is_user_editable_and_round_trips() {
+        assert!(ActionId::ToggleUsagePopover.is_user_editable());
+        assert_eq!(
+            ActionId::from_wire("toggle-usage-popover"),
+            Some(ActionId::ToggleUsagePopover)
+        );
+    }
+
+    /// Register the same action entry used by the real window, then activate
+    /// it twice through the `win.*` action namespace. This covers both halves
+    /// of the shortcut contract: the first press opens AI Usage and the second
+    /// press closes it.
+    #[cfg(not(target_os = "macos"))]
+    #[gtk::test]
+    fn toggle_usage_popover_action_opens_and_closes_the_menu_button() {
+        adw::init().expect("libadwaita should initialize in GTK test");
+        let window = adw::ApplicationWindow::builder()
+            .default_width(320)
+            .default_height(240)
+            .build();
+        let usage_button = gtk::MenuButton::new();
+        usage_button.set_popover(Some(&gtk::Popover::new()));
+        window.set_content(Some(&usage_button));
+        window.add_action_entries([make_toggle_usage_popover_action(usage_button.clone())]);
+
+        assert!(!usage_button.is_active());
+        gtk::prelude::WidgetExt::activate_action(&window, "win.toggle-usage-popover", None)
+            .expect("toggle-usage-popover action should be registered");
+        assert!(
+            usage_button.is_active(),
+            "first activation must open AI Usage"
+        );
+
+        gtk::prelude::WidgetExt::activate_action(&window, "win.toggle-usage-popover", None)
+            .expect("toggle-usage-popover action should stay registered");
+        assert!(
+            !usage_button.is_active(),
+            "second activation must close AI Usage"
+        );
+    }
+
+    /// The open popover's modal grab bypasses the normal application action,
+    /// so its capture controller has a separate close path. Verify that path
+    /// follows the accelerator currently installed on the application instead
+    /// of hard-coding the built-in Ctrl+Alt+U default.
+    #[cfg(not(target_os = "macos"))]
+    #[gtk::test]
+    fn open_usage_popover_closes_with_the_current_accelerator() {
+        adw::init().expect("libadwaita should initialize in GTK test");
+        let app = adw::Application::builder()
+            .application_id("com.flowmux.App.UiTest.UsagePopoverCurrentAccelerator")
+            .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        app.register(None::<&gtk::gio::Cancellable>).unwrap();
+        let window = adw::ApplicationWindow::builder()
+            .application(&app)
+            .default_width(320)
+            .default_height(240)
+            .build();
+        let usage_button = gtk::MenuButton::new();
+        usage_button.set_popover(Some(&gtk::Popover::new()));
+        window.set_content(Some(&usage_button));
+        window.add_action_entries([make_toggle_usage_popover_action(usage_button.clone())]);
+        install_usage_popover_accel_capture(&window, &usage_button);
+
+        app.set_accels_for_action(TOGGLE_USAGE_POPOVER_FULL_ACTION, &["<Ctrl><Alt>x"]);
+        let ctrl_alt = gtk::gdk::ModifierType::CONTROL_MASK | gtk::gdk::ModifierType::ALT_MASK;
+
+        usage_button.set_active(true);
+        assert_eq!(
+            close_usage_popover_for_key_event(
+                app.upcast_ref(),
+                &usage_button,
+                gtk::gdk::Key::u,
+                ctrl_alt,
+            ),
+            glib::Propagation::Proceed
+        );
+        assert!(
+            usage_button.is_active(),
+            "the built-in default must not close after the user rebinds the action"
+        );
+
+        assert_eq!(
+            close_usage_popover_for_key_event(
+                app.upcast_ref(),
+                &usage_button,
+                gtk::gdk::Key::x,
+                ctrl_alt | gtk::gdk::ModifierType::LOCK_MASK,
+            ),
+            glib::Propagation::Stop
+        );
+        assert!(
+            !usage_button.is_active(),
+            "the current accelerator must close the open popover even with CapsLock enabled"
         );
     }
 

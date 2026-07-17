@@ -93,7 +93,9 @@ scrollable preview.
 - **Customizable keybindings** — Options → **Keybindings** rebinds any shortcut
   (applies on OK, no restart), saved to
   `$XDG_CONFIG_HOME/flowmux/options.json`. IME/scroll terminal shortcuts
-  (Shift+Enter Hangul flush, smart PgUp/PgDn) are fixed and not editable.
+  (Shift+Enter Hangul flush, smart PgUp/PgDn) are fixed and not editable. The
+  AI Usage popover opens and closes with **Ctrl+Alt+U** by default
+  (**Cmd+Alt+U** on macOS; `toggle-usage-popover` in the Keybindings options).
 
 See the [keyboard shortcut reference](docs/keybindings.md) and
 [configuration reference](docs/configuration.md).

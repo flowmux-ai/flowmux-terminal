@@ -75,6 +75,8 @@ pub enum ActionId {
     ToggleWorktreePanel,
     /// Toggle the right-side file browser for the focused pane.
     ToggleFileBrowser,
+    /// Toggle the AI usage popover in the side-panel footer.
+    ToggleUsagePopover,
 }
 
 impl ActionId {
@@ -112,6 +114,7 @@ impl ActionId {
             Self::CopyPanePath => "copy-pane-path",
             Self::ToggleWorktreePanel => "toggle-worktree-panel",
             Self::ToggleFileBrowser => "toggle-file-browser",
+            Self::ToggleUsagePopover => "toggle-usage-popover",
         }
     }
 
@@ -150,6 +153,7 @@ impl ActionId {
             Self::CopyPanePath => "Copy focused pane path",
             Self::ToggleWorktreePanel => "Toggle worktree panel",
             Self::ToggleFileBrowser => "Toggle file browser",
+            Self::ToggleUsagePopover => "Toggle AI usage",
         }
     }
 
@@ -191,6 +195,7 @@ impl ActionId {
             Self::CopyPanePath,
             Self::ToggleWorktreePanel,
             Self::ToggleFileBrowser,
+            Self::ToggleUsagePopover,
         ]
     }
 
@@ -255,6 +260,7 @@ const DEFAULTS: &[(ActionId, &[&str])] = &[
     (ActionId::CopyPanePath, &["<Ctrl><Shift>k"]),
     (ActionId::ToggleWorktreePanel, &["<Ctrl><Alt>w"]),
     (ActionId::ToggleFileBrowser, &["<Ctrl><Alt>f"]),
+    (ActionId::ToggleUsagePopover, &["<Ctrl><Alt>u"]),
 ];
 
 /// macOS keeps the Linux layout and only substitutes the modifier keys:
@@ -305,6 +311,7 @@ const DEFAULTS: &[(ActionId, &[&str])] = &[
     (ActionId::CopyPanePath, &["<Meta><Shift>k"]),
     (ActionId::ToggleWorktreePanel, &["<Meta><Alt>w"]),
     (ActionId::ToggleFileBrowser, &["<Meta><Alt>f"]),
+    (ActionId::ToggleUsagePopover, &["<Meta><Alt>u"]),
 ];
 
 /// Built-in default accelerators. The first install path reads this and
