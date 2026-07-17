@@ -327,7 +327,10 @@ paned > separator {{
     color: @sidebar_fg_color;
 }}
 .flowmux-window-split > separator {{
-    background-color: @sidebar_border_color;
+    background-color: transparent;
+    background-image: none;
+    border: 0;
+    box-shadow: none;
 }}
 .navigation-sidebar {{
     background-color: @sidebar_bg_color;
@@ -783,9 +786,23 @@ mod tests {
         assert!(
             css.contains(".flowmux-sidebar-shell {")
                 && css.contains("background-color: @sidebar_bg_color")
-                && css.contains("color: @sidebar_fg_color")
-                && css.contains(".flowmux-window-split > separator"),
+                && css.contains("color: @sidebar_fg_color"),
             "sidebar shell must follow the Ubuntu/libadwaita palette"
+        );
+
+        let divider_start = css
+            .find(".flowmux-window-split > separator {")
+            .expect("window split divider rule missing");
+        let divider_tail = &css[divider_start..];
+        let divider_rule = &divider_tail[..divider_tail
+            .find('}')
+            .expect("window split divider rule unterminated")];
+        assert!(
+            divider_rule.contains("background-color: transparent")
+                && divider_rule.contains("background-image: none")
+                && divider_rule.contains("border: 0")
+                && divider_rule.contains("box-shadow: none"),
+            "window split divider must not paint a line between the native headers"
         );
     }
 
