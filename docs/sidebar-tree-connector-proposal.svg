@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="900" viewBox="0 0 1500 900">
+  <defs>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="12" stdDeviation="20" flood-color="#000000" flood-opacity="0.34"/>
+    </filter>
+    <style>
+      .ui { font-family: "Noto Sans", "Cantarell", sans-serif; }
+      .panel-title { font-size: 17px; font-weight: 700; letter-spacing: 1.4px; fill: #aeb3ba; }
+      .header { font-size: 18px; font-weight: 700; fill: #f2f3f5; }
+      .workspace { font-size: 20px; font-weight: 700; fill: #f5f6f7; }
+      .agent { font-size: 17px; font-weight: 600; fill: #eceef1; }
+      .meta { font-size: 15px; font-weight: 400; fill: #aeb2b8; }
+      .annotation { font-size: 14px; font-weight: 500; fill: #8f949b; }
+      .tree { fill: none; stroke: #aeb2b8; stroke-opacity: 0.32; stroke-width: 1; shape-rendering: crispEdges; }
+    </style>
+  </defs>
+
+  <rect width="1500" height="900" fill="#141619"/>
+  <text class="ui" x="750" y="42" text-anchor="middle" font-size="25" font-weight="700" fill="#f1f2f4">Workspace metadata hierarchy</text>
+  <text class="ui annotation" x="750" y="68" text-anchor="middle">Same content and spacing; only the hierarchy treatment changes</text>
+
+  <text class="ui panel-title" x="70" y="105">CURRENT · INDENT ONLY</text>
+  <text class="ui panel-title" x="790" y="105">PROPOSED · TREE CONNECTORS</text>
+  <text class="ui annotation" x="1415" y="105" text-anchor="end">14 px gutter · 1 px neutral line</text>
+
+  <!-- Current panel -->
+  <g filter="url(#shadow)">
+    <rect x="70" y="128" width="640" height="700" rx="14" fill="#242629" stroke="#3a3d42"/>
+  </g>
+  <rect x="70" y="128" width="640" height="62" rx="14" fill="#2b2d31"/>
+  <rect x="70" y="176" width="640" height="14" fill="#2b2d31"/>
+  <line x1="70" y1="190" x2="710" y2="190" stroke="#3a3d42"/>
+  <circle cx="102" cy="159" r="15" fill="#35383d"/>
+  <path d="M102 152v14M95 159h14" stroke="#d7d9dc" stroke-width="1.5"/>
+  <text class="ui header" x="130" y="166">Workspaces</text>
+  <path d="M674 155c0-7-4-11-9-11s-9 4-9 11v6l-4 5h26l-4-5z" fill="none" stroke="#c8cbd0" stroke-width="1.5"/>
+  <circle cx="665" cy="170" r="2" fill="#c8cbd0"/>
+
+  <rect x="84" y="204" width="612" height="334" rx="9" fill="#ffffff" fill-opacity="0.035"/>
+  <rect x="84" y="204" width="5" height="334" rx="2.5" fill="#fff4b3"/>
+  <text class="ui workspace" x="112" y="241">flowmux</text>
+  <circle cx="132" cy="275" r="5" fill="#f59e0b"/>
+  <text class="ui agent" x="148" y="281">codex</text>
+  <text class="ui meta" x="176" y="312">running tests</text>
+  <text class="ui meta" x="176" y="341">…/flowmux/crates/ui</text>
+  <circle cx="132" cy="380" r="5" fill="#ef4444"/>
+  <text class="ui agent" x="148" y="386">claude</text>
+  <text class="ui meta" x="176" y="417">waiting for input</text>
+  <text class="ui meta" x="148" y="461">…/flowmux</text>
+  <path d="M660 222l9 9-9 9" fill="none" stroke="#777c83" stroke-width="1.5"/>
+
+  <rect x="84" y="550" width="612" height="210" rx="9" fill="#ffffff" fill-opacity="0.012"/>
+  <text class="ui workspace" x="112" y="588">thorvg</text>
+  <circle cx="132" cy="622" r="5" fill="#3b82f6"/>
+  <text class="ui agent" x="148" y="628">codex</text>
+  <text class="ui meta" x="176" y="659">done</text>
+  <text class="ui meta" x="176" y="688">…/thorvg/src</text>
+
+  <line x1="84" y1="775" x2="696" y2="775" stroke="#34373b"/>
+  <circle cx="106" cy="802" r="7" fill="none" stroke="#999ea5" stroke-width="1.4"/>
+  <path d="M106 791v4M106 809v4M95 802h4M113 802h4" stroke="#999ea5" stroke-width="1.4"/>
+  <path d="M654 796h15v12h-15zM657 792h6l3 4" fill="none" stroke="#999ea5" stroke-width="1.4"/>
+
+  <!-- Proposed panel -->
+  <g filter="url(#shadow)">
+    <rect x="790" y="128" width="640" height="700" rx="14" fill="#242629" stroke="#3a3d42"/>
+  </g>
+  <rect x="790" y="128" width="640" height="62" rx="14" fill="#2b2d31"/>
+  <rect x="790" y="176" width="640" height="14" fill="#2b2d31"/>
+  <line x1="790" y1="190" x2="1430" y2="190" stroke="#3a3d42"/>
+  <circle cx="822" cy="159" r="15" fill="#35383d"/>
+  <path d="M822 152v14M815 159h14" stroke="#d7d9dc" stroke-width="1.5"/>
+  <text class="ui header" x="850" y="166">Workspaces</text>
+  <path d="M1394 155c0-7-4-11-9-11s-9 4-9 11v6l-4 5h26l-4-5z" fill="none" stroke="#c8cbd0" stroke-width="1.5"/>
+  <circle cx="1385" cy="170" r="2" fill="#c8cbd0"/>
+
+  <rect x="804" y="204" width="612" height="334" rx="9" fill="#ffffff" fill-opacity="0.035"/>
+  <rect x="804" y="204" width="5" height="334" rx="2.5" fill="#fff4b3"/>
+  <text class="ui workspace" x="832" y="241">flowmux</text>
+
+  <!-- Level-one trunk and branches -->
+  <path class="tree" d="M852.5 252V461M852.5 275.5H872.5M852.5 380.5H872.5M852.5 461.5H872.5"/>
+  <!-- codex nested branches -->
+  <path class="tree" d="M880.5 291V341M880.5 311.5H900.5M880.5 340.5H900.5"/>
+  <!-- claude nested final branch -->
+  <path class="tree" d="M880.5 396V416.5H900.5"/>
+
+  <circle cx="886" cy="275" r="5" fill="#f59e0b"/>
+  <text class="ui agent" x="902" y="281">codex</text>
+  <text class="ui meta" x="912" y="312">running tests</text>
+  <text class="ui meta" x="912" y="341">…/flowmux/crates/ui</text>
+  <circle cx="886" cy="380" r="5" fill="#ef4444"/>
+  <text class="ui agent" x="902" y="386">claude</text>
+  <text class="ui meta" x="912" y="417">waiting for input</text>
+  <text class="ui meta" x="884" y="467">…/flowmux</text>
+  <path d="M1380 222l9 9-9 9" fill="none" stroke="#777c83" stroke-width="1.5"/>
+
+  <rect x="804" y="550" width="612" height="210" rx="9" fill="#ffffff" fill-opacity="0.012"/>
+  <text class="ui workspace" x="832" y="588">thorvg</text>
+  <path class="tree" d="M852.5 599V622.5H872.5"/>
+  <path class="tree" d="M880.5 638V688M880.5 658.5H900.5M880.5 687.5H900.5"/>
+  <circle cx="886" cy="622" r="5" fill="#3b82f6"/>
+  <text class="ui agent" x="902" y="628">codex</text>
+  <text class="ui meta" x="912" y="659">done</text>
+  <text class="ui meta" x="912" y="688">…/thorvg/src</text>
+
+  <line x1="804" y1="775" x2="1416" y2="775" stroke="#34373b"/>
+  <circle cx="826" cy="802" r="7" fill="none" stroke="#999ea5" stroke-width="1.4"/>
+  <path d="M826 791v4M826 809v4M815 802h4M833 802h4" stroke="#999ea5" stroke-width="1.4"/>
+  <path d="M1374 796h15v12h-15zM1377 792h6l3 4" fill="none" stroke="#999ea5" stroke-width="1.4"/>
+
+  <circle cx="570" cy="858" r="4" fill="#fff4b3"/>
+  <text class="ui annotation" x="584" y="863">active workspace accent</text>
+  <line x1="780" y1="857.5" x2="810" y2="857.5" class="tree"/>
+  <text class="ui annotation" x="822" y="863">neutral hierarchy</text>
+  <circle cx="1012" cy="858" r="4" fill="#f59e0b"/>
+  <text class="ui annotation" x="1026" y="863">agent status remains semantic</text>
+</svg>
