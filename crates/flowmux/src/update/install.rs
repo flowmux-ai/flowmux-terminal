@@ -5,7 +5,7 @@
 //! argv, script name) comes from the unit-tested [`check`] module.
 
 use super::check::{self, Version};
-use super::{Event, Stage, AVAILABLE};
+use super::{Event, Stage};
 use anyhow::Context;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -32,18 +32,21 @@ pub async fn check_loop(tx: async_channel::Sender<Event>) {
         tick.tick().await; // first tick fires immediately = startup check
         match check_once().await {
             Ok(Some(latest)) => {
-                *AVAILABLE.lock().unwrap() = Some(latest);
                 if tx.send(Event::Available(latest)).await.is_err() {
                     return; // banner gone, window closing
                 }
             }
-            Ok(None) => {}
+            Ok(None) => {
+                if tx.send(Event::Current).await.is_err() {
+                    return; // banner gone, window closing
+                }
+            }
             Err(e) => tracing::warn!(error = %e, "release check failed"),
         }
     }
 }
 
-async fn check_once() -> anyhow::Result<Option<Version>> {
+pub(crate) async fn check_once() -> anyhow::Result<Option<Version>> {
     // std::process on the blocking pool, not tokio::process — GLib's
     // child watch owns SIGCHLD in the GUI process, so tokio's child
     // wait never wakes on macOS (see flowmux-vcs `git_output`).

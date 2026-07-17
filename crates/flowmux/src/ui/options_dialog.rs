@@ -13,6 +13,7 @@
 //!   keeps cookies / localStorage / IndexedDB across flowmux restarts so
 //!   site logins survive a quit/relaunch.
 //! * Agent Bar visibility toggle (Switch, default on).
+//! * Software update status, manual release check, and update action.
 //!
 //! OK / Cancel close the dialog. `on_apply` is called only on OK, and the
 //! dialog closes itself so the caller only handles the callback.
@@ -21,6 +22,7 @@
 //! applying zoom to terminal/WebView are handled by [`crate::ui::window`]. The
 //! dialog returns the user's intended [`Options`] through the callback.
 
+use crate::update::{check::Version, BannerState, Stage};
 use adw::prelude::*;
 use flowmux_config::keybindings::KeybindingOverrides;
 use flowmux_config::options::{
@@ -28,7 +30,10 @@ use flowmux_config::options::{
     FOCUS_BORDER_OPACITY_MAX, FOCUS_BORDER_OPACITY_MIN, ZOOM_MAX, ZOOM_MIN,
 };
 use flowmux_core::AgentNotificationTarget;
+use std::cell::RefCell;
 use std::rc::Rc;
+
+type UpdateCheckCompletion = Box<dyn FnOnce(Result<BannerState, String>)>;
 
 /// Present the modal options dialog. If the user clicks OK, `on_apply` is
 /// called with the new [`Options`]. Cancel or window close does not call back.
@@ -41,7 +46,9 @@ pub fn present(
     default_font_size: f32,
     on_apply: impl Fn(Options) + 'static,
     on_preview: impl Fn(&Options) + 'static,
-    on_update: impl Fn(crate::update::check::Version) -> bool + 'static,
+    update_state: BannerState,
+    on_check_update: impl Fn(UpdateCheckCompletion) -> bool + 'static,
+    on_update: impl Fn(Version) -> bool + 'static,
 ) {
     let dialog = build_dialog(
         parent,
@@ -50,6 +57,8 @@ pub fn present(
         default_font_size,
         on_apply,
         on_preview,
+        update_state,
+        on_check_update,
         on_update,
     );
     dialog.present();
@@ -64,7 +73,9 @@ fn build_dialog(
     default_font_size: f32,
     on_apply: impl Fn(Options) + 'static,
     on_preview: impl Fn(&Options) + 'static,
-    on_update: impl Fn(crate::update::check::Version) -> bool + 'static,
+    update_state: BannerState,
+    on_check_update: impl Fn(UpdateCheckCompletion) -> bool + 'static,
+    on_update: impl Fn(Version) -> bool + 'static,
 ) -> adw::Window {
     // Intentionally NOT modal. A modal transient dialog gets attached to its
     // parent's titlebar by window managers that honour the "attach modal
@@ -162,6 +173,12 @@ fn build_dialog(
         })
     };
     let theme_tab = crate::ui::theme_tab::build(theme_state.clone(), preview_theme);
+    let update_tab = build_update_tab(
+        &about_version(),
+        update_state,
+        Rc::new(on_check_update),
+        Rc::new(on_update),
+    );
 
     // Use freedesktop symbolic icon names so the switcher picks up the
     // current Adwaita theme automatically. `preferences-system-symbolic`
@@ -186,6 +203,12 @@ fn build_dialog(
         Some("keybindings"),
         "Keybindings",
         "input-keyboard-symbolic",
+    );
+    stack.add_titled_with_icon(
+        &update_tab,
+        Some("update"),
+        "Update",
+        "software-update-available-symbolic",
     );
     let switcher = adw::ViewSwitcher::new();
     switcher.set_stack(Some(&stack));
@@ -307,19 +330,213 @@ fn build_dialog(
     }
     {
         let dialog = dialog.clone();
-        let on_update: Rc<dyn Fn(crate::update::check::Version) -> bool> = Rc::new(on_update);
-        about_btn.connect_clicked(move |_| show_about_popup(&dialog, on_update.clone()));
+        about_btn.connect_clicked(move |_| show_about_popup(&dialog));
     }
 
     dialog
 }
 
-fn show_about_popup(
-    parent: &impl IsA<gtk::Widget>,
-    on_update: Rc<dyn Fn(crate::update::check::Version) -> bool>,
+#[derive(Debug, PartialEq, Eq)]
+struct UpdateTabProps {
+    status: String,
+    update_version: Option<Version>,
+    update_label: Option<String>,
+    check_sensitive: bool,
+}
+
+fn update_tab_props(state: &BannerState) -> UpdateTabProps {
+    match state {
+        BannerState::Hidden => UpdateTabProps {
+            status: "Check for updates to see if a newer version is available.".into(),
+            update_version: None,
+            update_label: None,
+            check_sensitive: true,
+        },
+        BannerState::Current => UpdateTabProps {
+            status: "You are using the latest version of FlowMux.".into(),
+            update_version: None,
+            update_label: None,
+            check_sensitive: true,
+        },
+        BannerState::Available(version) | BannerState::Ignored(version) => UpdateTabProps {
+            status: format!("FlowMux v{version} is available."),
+            update_version: Some(*version),
+            update_label: Some(format!("Update to v{version}")),
+            check_sensitive: true,
+        },
+        BannerState::Running(Stage::Fetching, version) => UpdateTabProps {
+            status: format!("Downloading FlowMux v{version}…"),
+            update_version: None,
+            update_label: None,
+            check_sensitive: false,
+        },
+        BannerState::Running(Stage::Installing, version) => UpdateTabProps {
+            status: format!("Building and installing FlowMux v{version}…"),
+            update_version: None,
+            update_label: None,
+            check_sensitive: false,
+        },
+        BannerState::Done(version) => UpdateTabProps {
+            status: format!("FlowMux v{version} is installed. Restart FlowMux to use it."),
+            update_version: None,
+            update_label: None,
+            check_sensitive: true,
+        },
+        BannerState::Failed(message, version) => UpdateTabProps {
+            status: format!("Update to v{version} failed: {message}"),
+            update_version: Some(*version),
+            update_label: Some("Retry update".into()),
+            check_sensitive: true,
+        },
+    }
+}
+
+fn render_update_tab(
+    state: &BannerState,
+    status_row: &adw::ActionRow,
+    check_button: &gtk::Button,
+    update_button: &gtk::Button,
 ) {
-    let available = *crate::update::AVAILABLE.lock().unwrap();
-    let body = about_body_with_version(&about_version(), available);
+    let props = update_tab_props(state);
+    status_row.set_subtitle(&props.status);
+    check_button.set_sensitive(props.check_sensitive);
+    if let Some(label) = props.update_label {
+        update_button.set_label(&label);
+        update_button.set_sensitive(true);
+        update_button.set_visible(true);
+    } else {
+        update_button.set_visible(false);
+    }
+}
+
+fn request_update(state: &BannerState, on_update: &dyn Fn(Version) -> bool) -> Option<BannerState> {
+    let version = update_tab_props(state).update_version?;
+    on_update(version).then_some(BannerState::Running(Stage::Fetching, version))
+}
+
+fn build_update_tab(
+    current_version: &str,
+    initial_state: BannerState,
+    on_check: Rc<dyn Fn(UpdateCheckCompletion) -> bool>,
+    on_update: Rc<dyn Fn(Version) -> bool>,
+) -> gtk::Box {
+    let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    page.set_margin_top(20);
+    page.set_margin_bottom(20);
+    page.set_margin_start(20);
+    page.set_margin_end(20);
+
+    let group = adw::PreferencesGroup::builder()
+        .title("Software Update")
+        .description("Check for a new FlowMux release and install it when you are ready.")
+        .build();
+
+    let version_row = adw::ActionRow::builder()
+        .title("Installed version")
+        .subtitle(format!("v{current_version}"))
+        .build();
+    group.add(&version_row);
+
+    let status_row = adw::ActionRow::builder().title("Update status").build();
+    let spinner = gtk::Spinner::new();
+    spinner.set_visible(false);
+    spinner.set_valign(gtk::Align::Center);
+    status_row.add_prefix(&spinner);
+
+    let check_button = gtk::Button::with_label("Check for Updates");
+    check_button.set_valign(gtk::Align::Center);
+    check_button.set_widget_name("flowmux-check-update-button");
+    status_row.add_suffix(&check_button);
+
+    let update_button = gtk::Button::new();
+    update_button.add_css_class("suggested-action");
+    update_button.set_valign(gtk::Align::Center);
+    update_button.set_widget_name("flowmux-install-update-button");
+    status_row.add_suffix(&update_button);
+    group.add(&status_row);
+    page.append(&group);
+
+    let state = Rc::new(RefCell::new(initial_state));
+    render_update_tab(&state.borrow(), &status_row, &check_button, &update_button);
+
+    {
+        let state = state.clone();
+        let status_row = status_row.clone();
+        let check_button = check_button.clone();
+        let update_button = update_button.clone();
+        let spinner = spinner.clone();
+        check_button.clone().connect_clicked(move |_| {
+            check_button.set_sensitive(false);
+            update_button.set_sensitive(false);
+            status_row.set_subtitle("Checking for updates…");
+            spinner.set_visible(true);
+            spinner.start();
+
+            let state_for_result = state.clone();
+            let status_for_result = status_row.clone();
+            let check_for_result = check_button.clone();
+            let update_for_result = update_button.clone();
+            let spinner_for_result = spinner.clone();
+            let started = on_check(Box::new(move |result| {
+                spinner_for_result.stop();
+                spinner_for_result.set_visible(false);
+                match result {
+                    Ok(next) => {
+                        *state_for_result.borrow_mut() = next;
+                        render_update_tab(
+                            &state_for_result.borrow(),
+                            &status_for_result,
+                            &check_for_result,
+                            &update_for_result,
+                        );
+                    }
+                    Err(error) => {
+                        render_update_tab(
+                            &state_for_result.borrow(),
+                            &status_for_result,
+                            &check_for_result,
+                            &update_for_result,
+                        );
+                        status_for_result
+                            .set_subtitle(&format!("Could not check for updates: {error}"));
+                    }
+                }
+            }));
+
+            if !started {
+                spinner.stop();
+                spinner.set_visible(false);
+                render_update_tab(&state.borrow(), &status_row, &check_button, &update_button);
+                status_row.set_subtitle("Update checks are unavailable in this session.");
+            }
+        });
+    }
+
+    {
+        let state = state.clone();
+        let status_row = status_row.clone();
+        let check_button = check_button.clone();
+        let update_button = update_button.clone();
+        update_button.clone().connect_clicked(move |_| {
+            let next = {
+                let state = state.borrow();
+                request_update(&state, on_update.as_ref())
+            };
+            if let Some(next) = next {
+                *state.borrow_mut() = next;
+                render_update_tab(&state.borrow(), &status_row, &check_button, &update_button);
+            } else {
+                update_button.set_sensitive(false);
+                status_row.set_subtitle("This update is already running or installed.");
+            }
+        });
+    }
+
+    page
+}
+
+fn show_about_popup(parent: &impl IsA<gtk::Widget>) {
+    let body = about_body_with_version(&about_version());
     let dialog = adw::AlertDialog::builder()
         .heading("About")
         .body(body.as_str())
@@ -327,10 +544,6 @@ fn show_about_popup(
         .default_response("ok")
         .close_response("ok")
         .build();
-    if let Some(version) = available {
-        let controls = build_about_update_control(version, on_update);
-        dialog.set_extra_child(Some(&controls));
-    }
     dialog.add_response("ok", "OK");
     dialog.connect_response(None, move |dialog, _| {
         dialog.close();
@@ -338,60 +551,15 @@ fn show_about_popup(
     dialog.present(Some(parent));
 }
 
-fn build_about_update_control(
-    version: crate::update::check::Version,
-    on_update: Rc<dyn Fn(crate::update::check::Version) -> bool>,
-) -> gtk::Box {
-    let button = gtk::Button::with_label(&format!("Update to v{version}"));
-    button.add_css_class("suggested-action");
-    button.set_halign(gtk::Align::Center);
-    button.set_widget_name("flowmux-about-update-button");
-
-    let status = gtk::Label::new(None);
-    status.add_css_class("caption");
-    status.add_css_class("dim-label");
-    status.set_wrap(true);
-    status.set_justify(gtk::Justification::Center);
-    status.set_widget_name("flowmux-about-update-status");
-    status.set_visible(false);
-
-    let button_for_click = button.clone();
-    let status_for_click = status.clone();
-    button.connect_clicked(move |_| {
-        let started = on_update(version);
-        button_for_click.set_sensitive(false);
-        if started {
-            button_for_click.set_label("Update started");
-            status_for_click.set_label("Progress is shown in the sidebar.");
-        } else {
-            button_for_click.set_label("Update unavailable");
-            status_for_click.set_label("This update is already running or installed.");
-        }
-        status_for_click.set_visible(true);
-    });
-
-    let controls = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    controls.append(&button);
-    controls.append(&status);
-    controls
-}
-
-fn about_body_with_version(
-    version: &str,
-    available: Option<crate::update::check::Version>,
-) -> String {
-    let mut body = format!(
+fn about_body_with_version(version: &str) -> String {
+    format!(
         "FlowMux - Agent Workflow Multiplexer Terminal\n\n\
          FlowMux was inspired by the cmux (macOS) project.\n\n\
          Maintained by JSUYA (Junsu Choi).\n\
          <a href=\"https://github.com/flowmux-ai/flowmux-terminal\">https://github.com/flowmux-ai/flowmux-terminal</a>\n\n\
          Version: v{}",
         version
-    );
-    if let Some(update) = available {
-        body.push_str(&format!("\nUpdate available: v{update}"));
-    }
-    body
+    )
 }
 
 fn about_version() -> String {
@@ -870,7 +1038,7 @@ mod tests {
 
     #[test]
     fn about_body_contains_requested_copy() {
-        let body = about_body_with_version("9.8.7-6", None);
+        let body = about_body_with_version("9.8.7-6");
         assert!(body.contains("FlowMux - Agent Workflow Multiplexer Terminal"));
         assert!(body.contains("FlowMux was inspired by the cmux (macOS) project."));
         assert!(body.contains("Maintained by JSUYA (Junsu Choi)."));
@@ -881,48 +1049,39 @@ mod tests {
     }
 
     #[test]
-    fn about_body_mentions_an_available_update() {
-        use crate::update::check::Version;
-        let body = about_body_with_version("0.7.0", Some(Version(0, 8, 0)));
-        assert!(
-            body.ends_with("Update available: v0.8.0"),
-            "body should announce the newer release: {body}"
-        );
+    fn update_tab_offers_ignored_release_for_later_install() {
+        let props = update_tab_props(&BannerState::Ignored(Version(0, 8, 0)));
+        assert_eq!(props.update_version, Some(Version(0, 8, 0)));
+        assert_eq!(props.update_label.as_deref(), Some("Update to v0.8.0"));
+        assert!(props.check_sensitive);
     }
 
-    #[cfg(not(target_os = "macos"))]
-    #[gtk::test]
-    fn about_update_control_starts_the_available_version() {
-        if gtk::init().is_err() {
-            return;
-        }
-        use crate::update::check::Version;
+    #[test]
+    fn update_tab_hides_install_action_when_current_or_running() {
+        let current = update_tab_props(&BannerState::Current);
+        assert!(current.update_version.is_none());
+        assert!(current.check_sensitive);
+
+        let running = update_tab_props(&BannerState::Running(Stage::Installing, Version(0, 8, 0)));
+        assert!(running.update_version.is_none());
+        assert!(!running.check_sensitive);
+    }
+
+    #[test]
+    fn ignored_release_can_start_from_the_update_tab() {
         use std::cell::Cell;
 
-        let selected = Rc::new(Cell::new(None));
-        let selected_for_click = selected.clone();
-        let controls = build_about_update_control(
-            Version(0, 8, 0),
-            Rc::new(move |version| {
-                selected_for_click.set(Some(version));
-                true
-            }),
-        );
-        let button = controls
-            .first_child()
-            .and_then(|widget| widget.downcast::<gtk::Button>().ok())
-            .expect("first control should be the update button");
-        button.emit_clicked();
+        let selected = Cell::new(None);
+        let next = request_update(&BannerState::Ignored(Version(0, 8, 0)), &|version| {
+            selected.set(Some(version));
+            true
+        });
 
         assert_eq!(selected.get(), Some(Version(0, 8, 0)));
-        assert!(!button.is_sensitive());
-        assert_eq!(button.label().as_deref(), Some("Update started"));
-        let status = button
-            .next_sibling()
-            .and_then(|widget| widget.downcast::<gtk::Label>().ok())
-            .expect("second control should be the progress status");
-        assert!(status.is_visible());
-        assert_eq!(status.label(), "Progress is shown in the sidebar.");
+        assert_eq!(
+            next,
+            Some(BannerState::Running(Stage::Fetching, Version(0, 8, 0)))
+        );
     }
 
     #[test]

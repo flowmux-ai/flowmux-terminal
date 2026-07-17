@@ -15,7 +15,9 @@ use std::rc::Rc;
 fn banner_props(state: &BannerState) -> (String, Option<&'static str>, bool, bool, bool) {
     use crate::update::Stage;
     match state {
-        BannerState::Hidden | BannerState::Ignored(_) => (String::new(), None, false, false, false),
+        BannerState::Hidden | BannerState::Current | BannerState::Ignored(_) => {
+            (String::new(), None, false, false, false)
+        }
         BannerState::Available(v) => (
             format!("FlowMux {v} is available"),
             Some("Update"),
@@ -74,9 +76,11 @@ impl UpdateBanner {
         banner.set_revealed(false);
         banner.set_hexpand(true);
         banner.set_widget_name("flowmux-update-banner");
-        let ignore_button = gtk::Button::with_label("Ignore");
+        let ignore_button = gtk::Button::with_label("Not now");
         ignore_button.add_css_class("flat");
-        ignore_button.set_tooltip_text(Some("Do not show this update again"));
+        ignore_button.set_tooltip_text(Some(
+            "Hide this release prompt. You can update later in Options.",
+        ));
         ignore_button.set_widget_name("flowmux-update-ignore-button");
         ignore_button.set_visible(false);
         ignore_button.set_valign(gtk::Align::Center);
@@ -157,6 +161,47 @@ impl UpdateBanner {
         &self.root
     }
 
+    pub(crate) fn state(&self) -> BannerState {
+        self.state.borrow().clone()
+    }
+
+    /// Run a release check immediately and report the resulting shared state
+    /// back on the GTK main context. This is used by Options > Update while the
+    /// periodic startup check continues to use the banner's event channel.
+    pub(crate) fn check_now(
+        &self,
+        on_complete: Box<dyn FnOnce(Result<BannerState, String>)>,
+    ) -> bool {
+        let Some(handle) = &self.tokio_handle else {
+            return false;
+        };
+        let (result_tx, result_rx) = async_channel::bounded(1);
+        handle.spawn(async move {
+            let result = update::install::check_once()
+                .await
+                .map_err(|error| format!("{error:#}"));
+            let _ = result_tx.send(result).await;
+        });
+
+        let this = self.clone();
+        gtk::glib::MainContext::default().spawn_local(async move {
+            let result = match result_rx.recv().await {
+                Ok(Ok(Some(version))) => {
+                    this.dispatch(Event::Available(version));
+                    Ok(this.state())
+                }
+                Ok(Ok(None)) => {
+                    this.dispatch(Event::Current);
+                    Ok(this.state())
+                }
+                Ok(Err(error)) => Err(error),
+                Err(error) => Err(format!("release check stopped: {error}")),
+            };
+            on_complete(result);
+        });
+        true
+    }
+
     /// Start `version` through the same progress channel used by the banner.
     /// Returns `false` when no runtime is available or that release is already
     /// installing/installed, allowing other UI entry points to avoid duplicates.
@@ -226,6 +271,14 @@ mod tests {
     fn hidden_state_reveals_nothing() {
         assert_eq!(
             banner_props(&BannerState::Hidden),
+            (String::new(), None, false, false, false)
+        );
+    }
+
+    #[test]
+    fn current_state_reveals_nothing() {
+        assert_eq!(
+            banner_props(&BannerState::Current),
             (String::new(), None, false, false, false)
         );
     }

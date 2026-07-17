@@ -12,12 +12,6 @@ pub mod install;
 
 use check::Version;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-
-/// Newest release seen by the background check, mirrored here so the
-/// About popup can render an "update available" line without plumbing
-/// a channel into the options dialog.
-pub static AVAILABLE: Mutex<Option<Version>> = Mutex::new(None);
 
 const IGNORED_VERSION_FILE: &str = "ignored-update-version";
 
@@ -29,7 +23,8 @@ fn ignored_version_path() -> Option<PathBuf> {
 /// the state directory so the choice survives restarts without becoming a
 /// permanent update preference: a strictly newer release is offered again.
 pub fn ignored_version() -> Option<Version> {
-    read_ignored_version(ignored_version_path()?.as_path())
+    let ignored = read_ignored_version(ignored_version_path()?.as_path())?;
+    check::update_available(env!("CARGO_PKG_VERSION"), ignored).then_some(ignored)
 }
 
 fn read_ignored_version(path: &Path) -> Option<Version> {
@@ -63,6 +58,8 @@ pub enum Stage {
 /// Events flowing from the tokio side to the side-panel banner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
+    /// The running build is the newest release.
+    Current,
     /// A newer release exists.
     Available(Version),
     /// Install progress.
@@ -82,6 +79,8 @@ pub enum Event {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BannerState {
     Hidden,
+    /// A release check completed and the running build is current.
+    Current,
     /// Suppress this version and older ones; a newer release reopens the offer.
     Ignored(Version),
     /// Update to `Version` can be started.
@@ -98,7 +97,10 @@ impl BannerState {
     pub fn apply(self, event: Event) -> BannerState {
         match (self, event) {
             // A running install owns the banner; periodic re-checks wait.
-            (state @ BannerState::Running(..), Event::Available(_)) => state,
+            (state @ BannerState::Running(..), Event::Available(_) | Event::Current) => state,
+            // Keep the restart message after installation even if another
+            // check reports no newer release.
+            (state @ BannerState::Done(_), Event::Current) => state,
             // A skipped release stays quiet across periodic checks. Only a
             // strictly newer release is news again.
             (state @ BannerState::Ignored(ignored), Event::Available(v)) if v <= ignored => state,
@@ -106,6 +108,7 @@ impl BannerState {
             (BannerState::Done(installed), Event::Available(v)) if v <= installed => {
                 BannerState::Done(installed)
             }
+            (_, Event::Current) => BannerState::Current,
             (_, Event::Available(v)) => BannerState::Available(v),
             (_, Event::Ignored(v)) => BannerState::Ignored(v),
             // Move to Running synchronously so a second click cannot start a
@@ -120,7 +123,7 @@ impl BannerState {
                 | BannerState::Running(_, v)
                 | BannerState::Failed(_, v)
                 | BannerState::Done(v) => BannerState::Running(stage, v),
-                BannerState::Hidden | BannerState::Ignored(_) => state,
+                BannerState::Hidden | BannerState::Current | BannerState::Ignored(_) => state,
             },
             (_, Event::Done(v)) => BannerState::Done(v),
             (state, Event::Failed(message)) => match state {
@@ -128,7 +131,7 @@ impl BannerState {
                 | BannerState::Running(_, v)
                 | BannerState::Failed(_, v)
                 | BannerState::Done(v) => BannerState::Failed(message, v),
-                BannerState::Hidden | BannerState::Ignored(_) => state,
+                BannerState::Hidden | BannerState::Current | BannerState::Ignored(_) => state,
             },
         }
     }
@@ -139,6 +142,7 @@ impl BannerState {
         match self {
             BannerState::Available(v) | BannerState::Failed(_, v) => Some(*v),
             BannerState::Hidden
+            | BannerState::Current
             | BannerState::Ignored(_)
             | BannerState::Running(..)
             | BannerState::Done(_) => None,
@@ -158,6 +162,18 @@ mod tests {
         assert_eq!(
             BannerState::Hidden.apply(Event::Available(V1)),
             BannerState::Available(V1)
+        );
+    }
+
+    #[test]
+    fn current_check_records_a_hidden_up_to_date_state() {
+        assert_eq!(
+            BannerState::Hidden.apply(Event::Current),
+            BannerState::Current
+        );
+        assert_eq!(
+            BannerState::Ignored(V1).apply(Event::Current),
+            BannerState::Current
         );
     }
 
@@ -241,6 +257,7 @@ mod tests {
             Some(V1)
         );
         assert_eq!(BannerState::Hidden.actionable_version(), None);
+        assert_eq!(BannerState::Current.actionable_version(), None);
         assert_eq!(BannerState::Ignored(V1).actionable_version(), None);
         assert_eq!(
             BannerState::Running(Stage::Fetching, V1).actionable_version(),
