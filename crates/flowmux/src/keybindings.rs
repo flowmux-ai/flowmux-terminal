@@ -201,6 +201,24 @@ pub fn install_actions(
             })
             .build()
     };
+    let terminal_search = {
+        let focused = focused.clone();
+        let registry = registry.clone();
+        gtk::gio::ActionEntry::builder("terminal-search")
+            .activate(move |_, _, _| {
+                let Some(pane) = focused.get() else {
+                    tracing::info!(action = "terminal-search", "no pane focused — ignoring");
+                    return;
+                };
+                let registry = registry.borrow();
+                if let Some(term) = registry.active_terminal(pane) {
+                    term.show_search();
+                } else if let Some(browser) = registry.active_browser(pane) {
+                    browser.show_search();
+                }
+            })
+            .build()
+    };
     let new_surface = make_pane_action(
         "new-surface",
         focused.clone(),
@@ -362,6 +380,7 @@ pub fn install_actions(
         new_workspace,
         new_window,
         command_palette,
+        terminal_search,
         next_workspace,
         prev_workspace,
         w1,
@@ -741,6 +760,15 @@ mod tests {
         assert!(default_for(ActionId::PrevWorkspace)
             .iter()
             .any(|accel| accel.contains("<Ctrl><Shift>Tab")));
+    }
+
+    #[test]
+    fn ctrl_shift_f_opens_focused_surface_search() {
+        assert_eq!(
+            default_for(ActionId::TerminalSearch),
+            vec!["<Ctrl><Shift>f"]
+        );
+        assert!(ActionId::TerminalSearch.is_user_editable());
     }
 
     #[test]

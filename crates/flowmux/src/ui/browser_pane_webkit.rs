@@ -34,6 +34,7 @@ pub struct BrowserPane {
     pub web_view: webkit6::WebView,
     zoom: Rc<Cell<f64>>,
     zoom_label: gtk::Button,
+    find_entry: gtk::SearchEntry,
     /// cmux-style server-side ref store. Each snapshot clears + repopulates
     /// the entry for this pane; subsequent click/fill/etc. resolve their
     /// `eN` ref through this map to a CSS selector before injecting JS.
@@ -574,6 +575,7 @@ impl BrowserPane {
             web_view,
             zoom,
             zoom_label,
+            find_entry,
             refs: Rc::new(RefCell::new(RefStore::new())),
             ref_scope: ref_scope_for_surface(surface_id),
         }
@@ -628,6 +630,12 @@ impl BrowserPane {
 
     pub fn grab_focus(&self) {
         self.web_view.grab_focus();
+    }
+
+    pub fn show_search(&self) {
+        self.find_entry.set_visible(true);
+        self.find_entry.grab_focus();
+        self.find_entry.select_region(0, -1);
     }
 
     pub fn pane_id_handle(&self) -> Rc<Cell<PaneId>> {

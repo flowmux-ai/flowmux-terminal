@@ -50,6 +50,7 @@ pub struct BrowserPane {
     native: Rc<NativeBrowserView>,
     address: gtk::Entry,
     zoom_label: gtk::Button,
+    find_entry: gtk::SearchEntry,
     pub refs: Rc<RefCell<RefStore>>,
     pub ref_scope: RefScope,
 }
@@ -666,6 +667,7 @@ impl BrowserPane {
             native,
             address,
             zoom_label,
+            find_entry,
             refs: Rc::new(RefCell::new(RefStore::new())),
             ref_scope: ref_scope_for_surface(surface_id),
         }
@@ -723,6 +725,12 @@ impl BrowserPane {
 
     pub fn grab_focus(&self) {
         focus_native_view(&self.native.web_view);
+    }
+
+    pub fn show_search(&self) {
+        self.find_entry.set_visible(true);
+        self.find_entry.grab_focus();
+        self.find_entry.select_region(0, -1);
     }
 
     pub fn pane_id_handle(&self) -> Rc<Cell<PaneId>> {

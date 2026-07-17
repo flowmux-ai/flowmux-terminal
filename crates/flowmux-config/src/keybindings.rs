@@ -66,6 +66,7 @@ pub enum ActionId {
     NewWorkspace,
     NewWindow,
     CommandPalette,
+    TerminalSearch,
     /// Copy the focused pane's current working directory to the system
     /// clipboard and surface a toast confirming what was copied.
     CopyPanePath,
@@ -105,6 +106,7 @@ impl ActionId {
             Self::NewWorkspace => "new-workspace",
             Self::NewWindow => "new-window",
             Self::CommandPalette => "command-palette",
+            Self::TerminalSearch => "terminal-search",
             Self::CopyPanePath => "copy-pane-path",
             Self::ToggleWorktreePanel => "toggle-worktree-panel",
             Self::ToggleFileBrowser => "toggle-file-browser",
@@ -141,6 +143,7 @@ impl ActionId {
             Self::NewWorkspace => "New workspace",
             Self::NewWindow => "New window",
             Self::CommandPalette => "Command palette",
+            Self::TerminalSearch => "Find in terminal or page",
             Self::CopyPanePath => "Copy focused pane path",
             Self::ToggleWorktreePanel => "Toggle worktree panel",
             Self::ToggleFileBrowser => "Toggle file browser",
@@ -180,6 +183,7 @@ impl ActionId {
             Self::NewWorkspace,
             Self::NewWindow,
             Self::CommandPalette,
+            Self::TerminalSearch,
             Self::CopyPanePath,
             Self::ToggleWorktreePanel,
             Self::ToggleFileBrowser,
@@ -242,6 +246,7 @@ const DEFAULTS: &[(ActionId, &[&str])] = &[
     (ActionId::NewWorkspace, &["<Ctrl>n"]),
     (ActionId::NewWindow, &["<Ctrl><Shift>n"]),
     (ActionId::CommandPalette, &["<Ctrl><Shift>p"]),
+    (ActionId::TerminalSearch, &["<Ctrl><Shift>f"]),
     (ActionId::CopyPanePath, &["<Ctrl><Shift>k"]),
     (ActionId::ToggleWorktreePanel, &["<Ctrl><Alt>w"]),
     (ActionId::ToggleFileBrowser, &["<Ctrl><Alt>f"]),
@@ -290,6 +295,7 @@ const DEFAULTS: &[(ActionId, &[&str])] = &[
     (ActionId::NewWorkspace, &["<Meta>n"]),
     (ActionId::NewWindow, &["<Meta><Shift>n"]),
     (ActionId::CommandPalette, &["<Meta><Shift>p"]),
+    (ActionId::TerminalSearch, &["<Ctrl><Shift>f"]),
     (ActionId::CopyPanePath, &["<Meta><Shift>k"]),
     (ActionId::ToggleWorktreePanel, &["<Meta><Alt>w"]),
     (ActionId::ToggleFileBrowser, &["<Meta><Alt>f"]),
@@ -476,6 +482,26 @@ mod tests {
             .map(|s| s.to_string())
             .collect();
         assert_eq!(down.1, want_down);
+    }
+
+    #[test]
+    fn terminal_search_default_serializes_and_can_be_rebound() {
+        assert_eq!(
+            default_accels(ActionId::TerminalSearch),
+            &["<Ctrl><Shift>f"]
+        );
+
+        let mut overrides = KeybindingOverrides::new();
+        overrides.set(ActionId::TerminalSearch, vec!["<Alt>f".to_string()]);
+        let json = serde_json::to_string(&overrides).unwrap();
+        assert!(json.contains(r#""terminal-search":["<Alt>f"]"#));
+
+        let resolved = overrides.resolve();
+        let search = resolved
+            .iter()
+            .find(|(action, _)| *action == ActionId::TerminalSearch)
+            .unwrap();
+        assert_eq!(search.1, vec!["<Alt>f".to_string()]);
     }
 
     #[test]

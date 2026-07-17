@@ -38,6 +38,8 @@ pub struct GhosttyPane {
     /// (commit eb2d176, reverted) broke `gtk::Paned` minimum-size
     /// propagation and clipped tig / vim / htop in nested splits.
     pub container: gtk::Overlay,
+    search_revealer: gtk::Revealer,
+    search_entry: gtk::SearchEntry,
     /// PID of the spawned shell.
     pub pid: Rc<Cell<Option<i32>>>,
     /// Last cwd returned by [`Self::poll_cwd_if_changed`], so the poller only
@@ -61,6 +63,225 @@ pub struct GhosttyPane {
 /// literal newline" at the prompt without submitting.
 pub const INSERT_NEWLINE_BYTES: &[u8] = b"\x1b\r";
 
+const SEARCH_REGEX_COMPILE_FLAGS: u32 = 0x0008_0000 | 0x4000_0000;
+const PCRE2_CASELESS: u32 = 0x0000_0008;
+
+fn set_terminal_search(
+    term: &vte::Terminal,
+    pattern: &str,
+    case_sensitive: bool,
+    is_regex: bool,
+) -> Result<(), glib::Error> {
+    let pattern = if is_regex {
+        pattern.to_string()
+    } else {
+        escape_pcre_literal(pattern)
+    };
+    let flags = SEARCH_REGEX_COMPILE_FLAGS | if case_sensitive { 0 } else { PCRE2_CASELESS };
+    let regex = vte::Regex::for_search(&pattern, flags)?;
+    term.search_set_regex(Some(&regex), 0);
+    term.search_set_wrap_around(true);
+    Ok(())
+}
+
+fn escape_pcre_literal(pattern: &str) -> String {
+    let mut escaped = String::with_capacity(pattern.len());
+    for ch in pattern.chars() {
+        if matches!(
+            ch,
+            '\\' | '^' | '$' | '.' | '|' | '?' | '*' | '+' | '(' | ')' | '[' | ']' | '{' | '}'
+        ) {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
+}
+
+#[derive(Clone)]
+struct TerminalSearchUi {
+    term: vte::Terminal,
+    entry: gtk::SearchEntry,
+    case_toggle: gtk::ToggleButton,
+    regex_toggle: gtk::ToggleButton,
+    error_label: gtk::Label,
+    revealer: gtk::Revealer,
+}
+
+impl TerminalSearchUi {
+    fn update(&self) -> bool {
+        let pattern = self.entry.text();
+        if pattern.is_empty() {
+            self.term.search_set_regex(None, 0);
+            self.clear_error();
+            return false;
+        }
+        match set_terminal_search(
+            &self.term,
+            &pattern,
+            self.case_toggle.is_active(),
+            self.regex_toggle.is_active(),
+        ) {
+            Ok(()) => {
+                self.clear_error();
+                true
+            }
+            Err(error) => {
+                self.term.search_set_regex(None, 0);
+                self.error_label.set_visible(true);
+                self.error_label.set_tooltip_text(Some(&error.to_string()));
+                false
+            }
+        }
+    }
+
+    fn next(&self) {
+        if self.update() {
+            self.term.search_find_next();
+        }
+    }
+
+    fn previous(&self) {
+        if self.update() {
+            self.term.search_find_previous();
+        }
+    }
+
+    fn close(&self) {
+        self.term.search_set_regex(None, 0);
+        self.clear_error();
+        self.revealer.set_reveal_child(false);
+        self.term.grab_focus();
+    }
+
+    fn clear_error(&self) {
+        self.error_label.set_visible(false);
+        self.error_label.set_tooltip_text(None);
+    }
+}
+
+fn build_terminal_search_overlay(term: &vte::Terminal) -> (gtk::Revealer, gtk::SearchEntry) {
+    let entry = gtk::SearchEntry::builder()
+        .placeholder_text("Find in terminal…")
+        .hexpand(true)
+        .build();
+    let case_toggle = gtk::ToggleButton::with_label("Aa");
+    case_toggle.add_css_class("flat");
+    case_toggle.set_tooltip_text(Some("Match case"));
+    let regex_toggle = gtk::ToggleButton::with_label(".*");
+    regex_toggle.add_css_class("flat");
+    regex_toggle.set_tooltip_text(Some("Regular expression"));
+
+    let previous = gtk::Button::builder()
+        .icon_name("go-up-symbolic")
+        .tooltip_text("Previous match (Shift+Enter)")
+        .build();
+    previous.add_css_class("flat");
+    let next = gtk::Button::builder()
+        .icon_name("go-down-symbolic")
+        .tooltip_text("Next match (Enter)")
+        .build();
+    next.add_css_class("flat");
+    let close = gtk::Button::builder()
+        .icon_name("window-close-symbolic")
+        .tooltip_text("Close search (Esc)")
+        .build();
+    close.add_css_class("flat");
+
+    let error_label = gtk::Label::new(Some("Invalid regular expression"));
+    error_label.add_css_class("error");
+    error_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    error_label.set_max_width_chars(24);
+    error_label.set_visible(false);
+
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    row.add_css_class("toolbar");
+    row.set_margin_top(6);
+    row.set_margin_end(18);
+    row.set_margin_start(6);
+    row.set_margin_bottom(6);
+    row.append(&entry);
+    row.append(&error_label);
+    row.append(&case_toggle);
+    row.append(&regex_toggle);
+    row.append(&previous);
+    row.append(&next);
+    row.append(&close);
+
+    let revealer = gtk::Revealer::builder()
+        .transition_type(gtk::RevealerTransitionType::SlideDown)
+        .transition_duration(120)
+        .halign(gtk::Align::Fill)
+        .valign(gtk::Align::Start)
+        .reveal_child(false)
+        .child(&row)
+        .build();
+
+    let ui = TerminalSearchUi {
+        term: term.clone(),
+        entry: entry.clone(),
+        case_toggle: case_toggle.clone(),
+        regex_toggle: regex_toggle.clone(),
+        error_label,
+        revealer: revealer.clone(),
+    };
+
+    entry.connect_search_changed({
+        let ui = ui.clone();
+        move |_| {
+            ui.update();
+        }
+    });
+    case_toggle.connect_toggled({
+        let ui = ui.clone();
+        move |_| {
+            ui.update();
+        }
+    });
+    regex_toggle.connect_toggled({
+        let ui = ui.clone();
+        move |_| {
+            ui.update();
+        }
+    });
+    entry.connect_activate({
+        let ui = ui.clone();
+        move |_| ui.next()
+    });
+    previous.connect_clicked({
+        let ui = ui.clone();
+        move |_| ui.previous()
+    });
+    next.connect_clicked({
+        let ui = ui.clone();
+        move |_| ui.next()
+    });
+    entry.connect_stop_search({
+        let ui = ui.clone();
+        move |_| ui.close()
+    });
+    close.connect_clicked({
+        let ui = ui.clone();
+        move |_| ui.close()
+    });
+
+    let key = gtk::EventControllerKey::new();
+    key.connect_key_pressed(move |_, keyval, _keycode, state| {
+        let is_enter = matches!(
+            keyval,
+            gtk::gdk::Key::Return | gtk::gdk::Key::ISO_Enter | gtk::gdk::Key::KP_Enter
+        );
+        if is_enter && state.contains(gtk::gdk::ModifierType::SHIFT_MASK) {
+            ui.previous();
+            return glib::Propagation::Stop;
+        }
+        glib::Propagation::Proceed
+    });
+    entry.add_controller(key);
+
+    (revealer, entry)
+}
+
 impl GhosttyPane {
     pub fn id(&self) -> PaneId {
         self.id.get()
@@ -68,6 +289,38 @@ impl GhosttyPane {
 
     pub fn set_pane_id(&self, id: PaneId) {
         self.id.set(id);
+    }
+
+    /// Compile and install a scrollback search pattern on this terminal.
+    #[allow(dead_code)]
+    pub fn search_set(
+        &self,
+        pattern: &str,
+        case_sensitive: bool,
+        is_regex: bool,
+    ) -> Result<(), glib::Error> {
+        set_terminal_search(&self.widget, pattern, case_sensitive, is_regex)
+    }
+
+    #[allow(dead_code)]
+    pub fn search_next(&self) -> bool {
+        self.widget.search_find_next()
+    }
+
+    #[allow(dead_code)]
+    pub fn search_prev(&self) -> bool {
+        self.widget.search_find_previous()
+    }
+
+    #[allow(dead_code)]
+    pub fn search_clear(&self) {
+        self.widget.search_set_regex(None, 0);
+    }
+
+    pub fn show_search(&self) {
+        self.search_revealer.set_reveal_child(true);
+        self.search_entry.grab_focus();
+        self.search_entry.select_region(0, -1);
     }
 
     /// Enable/disable the VTE cursor blink. VTE drives the blink interval from
@@ -351,6 +604,9 @@ impl GhosttyPane {
         container.set_hexpand(true);
         container.set_vexpand(true);
         container.set_child(Some(&term));
+        let (search_revealer, search_entry) = build_terminal_search_overlay(&term);
+        container.add_overlay(&search_revealer);
+        container.set_measure_overlay(&search_revealer, false);
         let scrollbar = gtk::Scrollbar::new(gtk::Orientation::Vertical, Some(&scroll_adjustment));
         scrollbar.set_halign(gtk::Align::End);
         scrollbar.set_valign(gtk::Align::Fill);
@@ -671,6 +927,8 @@ impl GhosttyPane {
             id: pane_id,
             widget: term,
             container,
+            search_revealer,
+            search_entry,
             pid,
             last_polled_cwd: Rc::new(RefCell::new(None)),
             last_selection,
@@ -1243,6 +1501,9 @@ fn install_wsl_ctrl_c_interrupt_passthrough(container: &gtk::Overlay, term: &vte
     key.set_propagation_phase(gtk::PropagationPhase::Capture);
     let term_widget = term.clone();
     key.connect_key_pressed(move |_, keyval, _keycode, state| {
+        if !term_widget.has_focus() {
+            return glib::Propagation::Proceed;
+        }
         if !is_plain_ctrl_c(keyval, state) {
             return glib::Propagation::Proceed;
         }
@@ -1290,6 +1551,9 @@ fn install_ibus_shifted_symbol_passthrough(container: &gtk::Overlay, term: &vte:
     key.set_propagation_phase(gtk::PropagationPhase::Capture);
     let term_widget = term.clone();
     key.connect_key_pressed(move |_, keyval, _keycode, state| {
+        if !term_widget.has_focus() {
+            return glib::Propagation::Proceed;
+        }
         let relevant = state
             & (ModifierType::CONTROL_MASK | ModifierType::ALT_MASK | ModifierType::SHIFT_MASK);
         if relevant != ModifierType::SHIFT_MASK {
@@ -2315,6 +2579,22 @@ except (ChildProcessError, ValueError):
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn literal_search_escapes_every_pcre_metacharacter() {
+        assert_eq!(
+            escape_pcre_literal(r"a\b^c$d.e|f?g*h+i(j)k[l]m{n}"),
+            r"a\\b\^c\$d\.e\|f\?g\*h\+i\(j\)k\[l\]m\{n\}"
+        );
+    }
+
+    #[test]
+    fn terminal_search_regex_accepts_literals_and_rejects_invalid_regex() {
+        let literal = escape_pcre_literal("[not regex](literal)");
+        vte::Regex::for_search(&literal, SEARCH_REGEX_COMPILE_FLAGS)
+            .expect("escaped literal should compile");
+        assert!(vte::Regex::for_search("(", SEARCH_REGEX_COMPILE_FLAGS).is_err());
+    }
 
     #[test]
     fn animated_title_storm_only_settles_after_a_quiet_window() {
