@@ -483,13 +483,15 @@ mod tests {
     #[test]
     fn detect_conflicts_flags_duplicate_accel_across_actions() {
         let mut overrides = KeybindingOverrides::new();
-        // Bind close-surface to split-right's default key. Both actions
-        // are user-editable, so the conflict surfaces in the report.
-        overrides.set(ActionId::CloseSurface, vec!["<Ctrl><Shift>Page_Up".into()]);
+        // Bind close-surface to split-right's default key (which differs per
+        // platform). Both actions are user-editable, so the conflict surfaces
+        // in the report.
+        let split_right_key = default_accels(ActionId::SplitRight)[0].to_string();
+        overrides.set(ActionId::CloseSurface, vec![split_right_key.clone()]);
         let conflicts = detect_conflicts(&overrides);
         assert!(
             conflicts.iter().any(|(accel, owners)| {
-                accel == "<Ctrl><Shift>Page_Up"
+                *accel == split_right_key
                     && owners.contains(&ActionId::CloseSurface)
                     && owners.contains(&ActionId::SplitRight)
             }),

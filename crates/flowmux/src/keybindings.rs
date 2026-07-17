@@ -745,11 +745,33 @@ mod tests {
 
     #[test]
     fn ctrl_shift_b_opens_new_browser_surface_distinct_from_terminal_tab() {
-        assert_eq!(default_for(ActionId::NewSurface), vec!["<Ctrl><Shift>t"]);
-        assert_eq!(
-            default_for(ActionId::NewBrowserSurface),
-            vec!["<Ctrl><Shift>b"]
-        );
+        // Same layout on both platforms; only the primary modifier differs
+        // (Ctrl on Linux, Command/`<Meta>` on macOS — see the DEFAULTS tables).
+        let (new_tab, new_browser) = if cfg!(target_os = "macos") {
+            ("<Meta><Shift>t", "<Meta><Shift>b")
+        } else {
+            ("<Ctrl><Shift>t", "<Ctrl><Shift>b")
+        };
+        assert_eq!(default_for(ActionId::NewSurface), vec![new_tab]);
+        assert_eq!(default_for(ActionId::NewBrowserSurface), vec![new_browser]);
+    }
+
+    /// Every macOS default must be a unique accelerator. The Ctrl→Command
+    /// substitution collapses combos onto a shared modifier, so a naive swap
+    /// can alias two actions onto the same key (e.g. quit and close both
+    /// landing on `<Meta>w`). Pin uniqueness so a future table edit can't
+    /// silently reintroduce such a collision.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_defaults_have_no_duplicate_accelerators() {
+        let mut seen = std::collections::HashMap::new();
+        for action in ActionId::all() {
+            for accel in default_for(*action) {
+                if let Some(other) = seen.insert(accel, *action) {
+                    panic!("{accel} bound to both {other:?} and {action:?}");
+                }
+            }
+        }
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -776,10 +798,15 @@ mod tests {
             resolved_accels(&overrides, ActionId::SplitRight),
             vec!["<Ctrl><Alt>r".to_string()]
         );
-        // Untouched action keeps its default.
+        // Untouched action keeps its default (differs per platform).
+        let want_down = if cfg!(target_os = "macos") {
+            "<Meta><Shift>Page_Down"
+        } else {
+            "<Ctrl><Shift>Page_Down"
+        };
         assert_eq!(
             resolved_accels(&overrides, ActionId::SplitDown),
-            vec!["<Ctrl><Shift>Page_Down".to_string()]
+            vec![want_down.to_string()]
         );
     }
 
@@ -798,8 +825,13 @@ mod tests {
     /// flip them back.
     #[test]
     fn ctrl_n_opens_new_workspace_and_ctrl_shift_n_opens_new_window() {
-        assert_eq!(default_for(ActionId::NewWorkspace), vec!["<Ctrl>n"]);
-        assert_eq!(default_for(ActionId::NewWindow), vec!["<Ctrl><Shift>n"]);
+        let (new_ws, new_win) = if cfg!(target_os = "macos") {
+            ("<Meta>n", "<Meta><Shift>n")
+        } else {
+            ("<Ctrl>n", "<Ctrl><Shift>n")
+        };
+        assert_eq!(default_for(ActionId::NewWorkspace), vec![new_ws]);
+        assert_eq!(default_for(ActionId::NewWindow), vec![new_win]);
         // The two actions must not share an accelerator — sharing would
         // collapse "new workspace in this window" and "new window" onto
         // the same key.
@@ -849,7 +881,14 @@ mod tests {
     /// onto the same key.
     #[test]
     fn ctrl_shift_w_quits_app_distinct_from_alt_w_close_surface() {
-        assert_eq!(default_for(ActionId::QuitApp), vec!["<Ctrl><Shift>w"]);
+        // Close stays Alt+W on both platforms (Option+W on macOS); quit swaps
+        // its primary modifier to Command on macOS.
+        let quit = if cfg!(target_os = "macos") {
+            "<Meta><Shift>w"
+        } else {
+            "<Ctrl><Shift>w"
+        };
+        assert_eq!(default_for(ActionId::QuitApp), vec![quit]);
         assert_eq!(default_for(ActionId::CloseSurface), vec!["<Alt>w"]);
         // The two bindings must not share an accelerator — sharing
         // would mean one key both closes a tab and asks to quit the
@@ -1004,7 +1043,12 @@ mod tests {
 
     #[test]
     fn copy_pane_path_default_is_ctrl_shift_k() {
-        assert_eq!(default_for(ActionId::CopyPanePath), vec!["<Ctrl><Shift>k"]);
+        let want = if cfg!(target_os = "macos") {
+            "<Meta><Shift>k"
+        } else {
+            "<Ctrl><Shift>k"
+        };
+        assert_eq!(default_for(ActionId::CopyPanePath), vec![want]);
     }
 
     #[test]
@@ -1018,10 +1062,12 @@ mod tests {
 
     #[test]
     fn toggle_worktree_panel_default_is_ctrl_alt_w() {
-        assert_eq!(
-            default_for(ActionId::ToggleWorktreePanel),
-            vec!["<Ctrl><Alt>w"]
-        );
+        let want = if cfg!(target_os = "macos") {
+            "<Meta><Alt>w"
+        } else {
+            "<Ctrl><Alt>w"
+        };
+        assert_eq!(default_for(ActionId::ToggleWorktreePanel), vec![want]);
     }
 
     #[test]

@@ -213,6 +213,7 @@ impl ActionId {
 /// here mirror what `BINDINGS` used to hold before the table moved into
 /// the config crate — keep changes in lock-step with the regression
 /// tests in `flowmux::keybindings`.
+#[cfg(not(target_os = "macos"))]
 const DEFAULTS: &[(ActionId, &[&str])] = &[
     (ActionId::SplitRight, &["<Ctrl><Shift>Page_Up"]),
     (ActionId::SplitDown, &["<Ctrl><Shift>Page_Down"]),
@@ -244,6 +245,54 @@ const DEFAULTS: &[(ActionId, &[&str])] = &[
     (ActionId::CopyPanePath, &["<Ctrl><Shift>k"]),
     (ActionId::ToggleWorktreePanel, &["<Ctrl><Alt>w"]),
     (ActionId::ToggleFileBrowser, &["<Ctrl><Alt>f"]),
+];
+
+/// macOS keeps the Linux layout and only substitutes the modifier keys:
+/// `<Ctrl>` becomes `<Meta>` (the Command key on GTK's Quartz backend) and
+/// `<Alt>` stays `<Alt>` (the Option key — the same physical key). Base keys
+/// (Page_Up/Down, arrows, digits, letters) are unchanged, so every binding maps
+/// 1:1 to its Linux counterpart. Two deliberate exceptions:
+///
+/// * Workspace cycling keeps `<Ctrl>Tab` / `<Ctrl><Shift>Tab`. Substituting to
+///   `<Meta>Tab` would collide with the macOS system application switcher, which
+///   the app can never intercept. On macOS plain Ctrl is free (app shortcuts
+///   moved to Command), so `<Ctrl>Tab` is safe to keep.
+/// * Copy / Paste drop Shift to become `<Meta>c` / `<Meta>v` — the universal
+///   macOS copy/paste. The Linux `Ctrl+Shift+C/V` carve-out exists only to keep
+///   plain `Ctrl+C` free for SIGINT; Command can never produce a control code,
+///   so that carve-out does not apply here.
+#[cfg(target_os = "macos")]
+const DEFAULTS: &[(ActionId, &[&str])] = &[
+    (ActionId::SplitRight, &["<Meta><Shift>Page_Up"]),
+    (ActionId::SplitDown, &["<Meta><Shift>Page_Down"]),
+    (ActionId::FocusLeft, &["<Alt>Left"]),
+    (ActionId::FocusRight, &["<Alt>Right"]),
+    (ActionId::FocusUp, &["<Alt>Up"]),
+    (ActionId::FocusDown, &["<Alt>Down"]),
+    (ActionId::CloseSurface, &["<Alt>w"]),
+    (ActionId::QuitApp, &["<Meta><Shift>w"]),
+    (ActionId::NextSurface, &["<Meta><Shift>Right"]),
+    (ActionId::PrevSurface, &["<Meta><Shift>Left"]),
+    (ActionId::NextWorkspace, &["<Ctrl>Tab"]),
+    (ActionId::PrevWorkspace, &["<Ctrl><Shift>Tab"]),
+    (ActionId::Workspace1, &["<Alt>1"]),
+    (ActionId::Workspace2, &["<Alt>2"]),
+    (ActionId::Workspace3, &["<Alt>3"]),
+    (ActionId::Workspace4, &["<Alt>4"]),
+    (ActionId::Workspace5, &["<Alt>5"]),
+    (ActionId::Workspace6, &["<Alt>6"]),
+    (ActionId::Workspace7, &["<Alt>7"]),
+    (ActionId::Workspace8, &["<Alt>8"]),
+    (ActionId::Copy, &["<Meta>c"]),
+    (ActionId::Paste, &["<Meta>v"]),
+    (ActionId::NewSurface, &["<Meta><Shift>t"]),
+    (ActionId::NewBrowserSurface, &["<Meta><Shift>b"]),
+    (ActionId::NewWorkspace, &["<Meta>n"]),
+    (ActionId::NewWindow, &["<Meta><Shift>n"]),
+    (ActionId::CommandPalette, &["<Meta><Shift>p"]),
+    (ActionId::CopyPanePath, &["<Meta><Shift>k"]),
+    (ActionId::ToggleWorktreePanel, &["<Meta><Alt>w"]),
+    (ActionId::ToggleFileBrowser, &["<Meta><Alt>f"]),
 ];
 
 /// Built-in default accelerators. The first install path reads this and
@@ -417,12 +466,16 @@ mod tests {
             .unwrap();
         assert_eq!(split.1, vec!["<Ctrl><Alt>r".to_string()]);
 
-        // Untouched action keeps its default.
+        // Untouched action keeps its default (which differs per platform).
         let down = resolved
             .iter()
             .find(|(a, _)| *a == ActionId::SplitDown)
             .unwrap();
-        assert_eq!(down.1, vec!["<Ctrl><Shift>Page_Down".to_string()]);
+        let want_down: Vec<String> = default_accels(ActionId::SplitDown)
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(down.1, want_down);
     }
 
     #[test]
@@ -508,8 +561,10 @@ mod tests {
             .iter()
             .find(|(a, _)| *a == ActionId::Paste)
             .unwrap();
-        assert_eq!(copy.1, vec!["<Ctrl><Shift>c".to_string()]);
-        assert_eq!(paste.1, vec!["<Ctrl><Shift>v".to_string()]);
+        // The override is ignored, so both resolve to the platform default.
+        let want = |a| -> Vec<String> { default_accels(a).iter().map(|s| s.to_string()).collect() };
+        assert_eq!(copy.1, want(ActionId::Copy));
+        assert_eq!(paste.1, want(ActionId::Paste));
     }
 
     #[test]
