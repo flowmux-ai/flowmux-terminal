@@ -69,7 +69,7 @@ AI coding agents:
 - provide reliable terminal, pane, workspace, and browser control in one GTK
   application;
 - make the agent-facing CLI predictable enough for scripts and local skills;
-- support Ubuntu 24.04 natively, Ubuntu 22.04 through Flatpak, and WSL Ubuntu
+- support Ubuntu 24.04 natively and WSL Ubuntu; Ubuntu 22.04 and Flatpak are unsupported
   for terminal/CLI workflows where desktop integration is limited;
 - avoid large product surfaces until the core local workflow is stable.
 
@@ -77,7 +77,7 @@ AI coding agents:
 
 | Area | Current state | Main gap |
 |---|---|---|
-| Platform | Linux/GTK4 app. Ubuntu 24.04 native path, Ubuntu 22.04 Flatpak path. | Needs a clear release validation matrix for Ubuntu and WSL. |
+| Platform | Linux/GTK4 app. Ubuntu 24.04 native path; Ubuntu 22.04 and Flatpak unsupported. | Needs a clear release validation matrix for Ubuntu and WSL. |
 | Terminal panes | Workspaces, panes, terminal/browser surfaces, flowmux-owned PTYs. | Needs more complete CLI control over panes and surfaces. |
 | Browser | WebKitGTK in-app browser, IPC-driven snapshot/actions, Firefox cookie import, partial Chromium-family cookie detection. | Needs complete core action/query CLI exposure and one consistent snapshot/ref implementation. |
 | CLI shape | Several useful top-level commands exist, but documented browser namespace and actual parser are not fully aligned. | Highest priority is aligning CLI behavior with project docs and agent instructions. |
@@ -183,7 +183,7 @@ The required support targets are Linux targets:
 | Target | Required support level | Why it matters |
 |---|---|---|
 | Ubuntu 24.04 native | Full support | Main native build target for GTK4, libadwaita, WebKitGTK 6.0, libnotify, PTY behavior, XDG paths, and host browser integration. |
-| Ubuntu 22.04 Flatpak | Full support through Flatpak | 22.04 does not provide the required native GTK/WebKit stack, so the Flatpak path must be treated as a first-class target. |
+| Ubuntu 22.04 / Flatpak | Unsupported | No release validation or support commitment. |
 | WSL Ubuntu | Terminal/CLI support, limited desktop support | WSL can cover CLI, IPC, PTY, hooks, config, and many daemon flows. Browser/desktop notification behavior depends on WSLg and should be tested separately from native Linux. |
 | macOS development host | Development aid only | macOS cannot validate GTK/WebKitGTK runtime behavior, Linux desktop integration, Flatpak packaging, libsecret, D-Bus notifications, or WSL-specific behavior. |
 
@@ -214,10 +214,10 @@ The required support targets are Linux targets:
 
 Use macOS for fast development, then gate user-facing changes with this matrix:
 
-| Check | macOS | Ubuntu 24.04 native | Ubuntu 22.04 Flatpak | WSL Ubuntu |
+| Check | macOS | Ubuntu 24.04 native | Ubuntu 22.04 / Flatpak (unsupported) | WSL Ubuntu |
 |---|---:|---:|---:|---:|
 | `cargo fmt --check` | yes | yes | yes | yes |
-| `cargo check --workspace` | partial | yes | yes, via Flatpak build context | yes for non-GUI-safe subsets |
+| `cargo check --workspace` | partial | yes | not applicable | yes for non-GUI-safe subsets |
 | CLI parser tests | yes | yes | yes | yes |
 | IPC protocol tests | yes | yes | yes | yes |
 | GTK window/pane smoke test | no | yes | yes | WSLg only |
@@ -226,7 +226,7 @@ Use macOS for fast development, then gate user-facing changes with this matrix:
 | Cookie import | no | yes | yes | browser-dependent |
 | Agent hook install/repair | partial | yes | yes | yes |
 | Session restore | no | yes | yes | yes for terminal/CLI state |
-| Packaging/install | no | native install scripts | Flatpak build/install | install script or documented WSL path |
+| Packaging/install | no | native install scripts | not applicable | install script or documented WSL path |
 
 ### Recommended test automation stages
 
@@ -236,7 +236,7 @@ Use macOS for fast development, then gate user-facing changes with this matrix:
 3. Ubuntu 24.04 graphical smoke tests under a virtual display for GTK startup,
    pane creation, browser open, snapshot, click/fill/type, and notification
    state.
-4. Ubuntu 22.04 Flatpak build test with a smoke run of the installed app.
+4. Ubuntu 22.04 and Flatpak validation are intentionally out of scope.
 5. Manual or scheduled WSL Ubuntu checks for install, CLI, PTY env injection,
    agent hooks, and WSLg browser behavior.
 
@@ -258,7 +258,7 @@ development checkout. For flowmux, completion means:
 
 - it has focused unit or integration tests where practical;
 - the documented CLI form works on Ubuntu 24.04;
-- the Ubuntu 22.04 Flatpak path still builds and launches;
+- Ubuntu 22.04 and Flatpak are not presented as supported paths;
 - WSL impact is known and documented;
 - unsupported features return explicit unsupported/not-supported responses
   instead of failing ambiguously.

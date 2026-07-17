@@ -95,6 +95,9 @@ scrollable preview.
   `$XDG_CONFIG_HOME/flowmux/options.json`. IME/scroll terminal shortcuts
   (Shift+Enter Hangul flush, smart PgUp/PgDn) are fixed and not editable.
 
+See the [keyboard shortcut reference](docs/keybindings.md) and
+[configuration reference](docs/configuration.md).
+
 ## Layout
 
 ```
@@ -239,6 +242,13 @@ flowmux fix      # re-install / refresh what doctor flagged
 install/upgrade and after installing a new agent. `fix` is idempotent and
 never clobbers hand-edited entries lacking the flowmux marker. Add `--json` to
 either for machine-readable output.
+
+### Troubleshooting
+
+Set `FLOWMUX_LOG=/path/to/flowmux.log` for a persistent diagnostic log.
+Crash diagnostics are stored under `$XDG_STATE_HOME/flowmux/crashes` (usually
+`~/.local/state/flowmux/crashes`). Start with `flowmux doctor`; it is read-only,
+while `flowmux fix` repairs marked integration entries.
 
 ## WSL / WSLg
 
