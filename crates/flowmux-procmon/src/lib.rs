@@ -216,6 +216,7 @@ fn read_children(pid: u32) -> Option<Vec<u32>> {
 
 /// Cap on process-tree nodes visited per detection, a defensive bound so a
 /// pathological tree can never turn one poll into an unbounded `/proc` walk.
+#[cfg(target_os = "linux")]
 const AGENT_TREE_NODE_CAP: usize = 512;
 
 /// Detect which AI coding agent, if any, is running anywhere in the process

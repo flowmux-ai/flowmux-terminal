@@ -881,6 +881,7 @@ impl WindowController {
     }
 
     #[cfg(test)]
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     fn right_tool_order_for_test(&self) -> [&'static str; 3] {
         let sidebar_view = self
             .sidebar_split
@@ -7696,6 +7697,7 @@ mod tests {
 
     /// Moving a tab to another pane re-homes the *same* live terminal widget
     /// (state preserved) and updates the model on both ends.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn move_surface_to_pane_preserves_live_widget() {
         adw::init().expect("libadwaita should initialize in GTK test");
@@ -7769,6 +7771,7 @@ mod tests {
 
     /// Moving the only tab out of a pane collapses that pane but keeps the
     /// workspace, and the moved widget survives.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn move_last_tab_collapses_source_pane() {
         adw::init().expect("libadwaita should initialize in GTK test");
@@ -7850,6 +7853,7 @@ mod tests {
 
     /// A singleton tab cannot split its own pane without leaving an empty source
     /// leaf. The rejected drop must restore the same live terminal widget.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn splitting_singleton_surface_into_its_own_pane_restores_live_widget() {
         adw::init().expect("libadwaita should initialize in GTK test");
@@ -7917,6 +7921,7 @@ mod tests {
 
     /// Dropping a tab on another pane's split region creates a sibling pane
     /// holding the same live terminal widget.
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn split_surface_into_pane_preserves_live_widget() {
         adw::init().expect("libadwaita should initialize in GTK test");

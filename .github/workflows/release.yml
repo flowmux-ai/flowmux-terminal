@@ -60,18 +60,14 @@ jobs:
             libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev \
             libwebkitgtk-6.0-dev libssl-dev \
             libssh2-1-dev libdbus-1-dev libsecret-1-dev \
-            meson ninja-build
+            meson ninja-build \
+            dbus xvfb
 
       - name: Install ThorVG (image viewer backend, all loaders + C API)
         run: sudo ./scripts/install-thorvg.sh
 
-      - name: Install Zig (builds the vendored libghostty-vt terminal backend)
-        run: |
-          ZIG_VERSION=0.15.2
-          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz
-          mkdir -p "$HOME/zig"
-          tar -xJf /tmp/zig.tar.xz -C "$HOME/zig" --strip-components=1
-          echo "$HOME/zig" >> "$GITHUB_PATH"
+      - name: Run test suite
+        run: xvfb-run -a dbus-run-session -- cargo test --workspace --locked -- --nocapture
 
       - name: Install cargo-deb
         run: cargo install cargo-deb --locked

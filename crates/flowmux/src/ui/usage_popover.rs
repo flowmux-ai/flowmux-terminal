@@ -538,6 +538,7 @@ mod tests {
             .any(|row| row.starts_with("Rate limits last updated ")));
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn menu_button_owns_a_wide_upward_popover() {
         if gtk::init().is_err() {
@@ -578,6 +579,7 @@ mod tests {
         assert!(spinner.is_spinning());
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn dropping_usage_popover_releases_refresh_widgets() {
         if gtk::init().is_err() {
@@ -605,6 +607,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "macos"))]
     fn find_named_widget(root: &gtk::Widget, name: &str) -> Option<gtk::Widget> {
         if root.widget_name() == name {
             return Some(root.clone());

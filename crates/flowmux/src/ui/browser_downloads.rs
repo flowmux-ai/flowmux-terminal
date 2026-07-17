@@ -167,7 +167,7 @@ pub(crate) struct DownloadManager {
 
 struct DownloadManagerInner {
     button: gtk::MenuButton,
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(any(not(test), target_os = "macos"), allow(dead_code))]
     scroll: gtk::ScrolledWindow,
     list: gtk::Box,
     empty: gtk::Label,
@@ -194,6 +194,7 @@ pub(crate) struct DownloadItem {
     id: u64,
 }
 
+#[cfg_attr(all(test, target_os = "macos"), allow(dead_code))]
 impl DownloadManager {
     pub(crate) fn new() -> Self {
         let button = gtk::MenuButton::builder()
@@ -389,6 +390,7 @@ impl DownloadManager {
     }
 }
 
+#[cfg_attr(all(test, target_os = "macos"), allow(dead_code))]
 impl DownloadItem {
     pub(crate) fn set_destination(&self, destination: &std::path::Path) {
         let Some(inner) = self.inner.upgrade() else {
@@ -644,6 +646,8 @@ impl DownloadManagerInner {
 
 #[cfg(test)]
 mod tests {
+    #![cfg_attr(target_os = "macos", allow(unused_imports))]
+
     use super::*;
     use std::cell::Cell;
 

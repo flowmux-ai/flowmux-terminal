@@ -3,6 +3,13 @@
 name: License audit
 
 on:
+  pull_request:
+    paths:
+      - Cargo.lock
+      - deny.toml
+      - about.toml
+  schedule:
+    - cron: '17 3 * * 1'
   workflow_dispatch:
 
 jobs:

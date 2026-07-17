@@ -675,8 +675,10 @@ mod tests {
 
     #[test]
     fn resolve_layers_color_overrides_on_top_of_the_preset() {
-        let mut options = flowmux_config::options::Options::default();
-        options.theme = Some("nord".into());
+        let mut options = flowmux_config::options::Options {
+            theme: Some("nord".into()),
+            ..Default::default()
+        };
         options.theme_overrides.background = Some("#123456".into());
         options.theme_overrides.cursor = Some("not-a-color".into());
 
@@ -689,8 +691,10 @@ mod tests {
 
     #[test]
     fn resolve_with_unknown_preset_falls_back_to_default_look() {
-        let mut options = flowmux_config::options::Options::default();
-        options.theme = Some("deleted-preset".into());
+        let options = flowmux_config::options::Options {
+            theme: Some("deleted-preset".into()),
+            ..Default::default()
+        };
 
         let theme = ResolvedTheme::resolve_with_file(&options, None);
 

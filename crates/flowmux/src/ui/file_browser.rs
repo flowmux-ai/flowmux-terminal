@@ -536,6 +536,7 @@ impl FileBrowserPanel {
         });
     }
 
+    #[cfg_attr(test, allow(dead_code))]
     fn install_directory_monitors(&self, directories: Vec<PathBuf>) {
         let directories = directories.into_iter().collect::<HashSet<_>>();
         if *self.monitored_directories.borrow() == directories {
@@ -573,6 +574,7 @@ impl FileBrowserPanel {
         *self.monitored_directories.borrow_mut() = directories;
     }
 
+    #[cfg_attr(test, allow(dead_code))]
     fn queue_monitored_directory_refresh(&self, directory: PathBuf) {
         if !self.open.get() {
             return;
@@ -583,6 +585,7 @@ impl FileBrowserPanel {
         self.schedule_pending_monitor_refresh();
     }
 
+    #[cfg_attr(test, allow(dead_code))]
     fn schedule_pending_monitor_refresh(&self) {
         if self.pending_monitor_refreshes.borrow().is_empty()
             || self.monitor_reload_in_progress.get()
@@ -603,6 +606,7 @@ impl FileBrowserPanel {
         });
     }
 
+    #[cfg_attr(test, allow(dead_code))]
     fn reload_monitored_directories(&self) {
         if self.monitor_reload_in_progress.replace(true) {
             return;

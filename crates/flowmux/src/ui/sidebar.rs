@@ -521,6 +521,7 @@ impl Sidebar {
     }
 
     #[cfg(test)]
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub(crate) fn workspace_row_contains(&self, id: WorkspaceId, text: &str) -> bool {
         fn contains(widget: &gtk::Widget, text: &str) -> bool {
             if widget
@@ -2021,6 +2022,7 @@ mod tests {
         assert_eq!(agent_block_label_text(&block), "claude +3 agents");
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn footer_orders_usage_worktrees_and_file_browser_buttons() {
         if gtk::init().is_err() {
@@ -2057,6 +2059,7 @@ mod tests {
         assert_eq!(worktrees + 1, folder);
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn workspace_titles_track_display_title_through_rename() {
         if gtk::init().is_err() {
@@ -2109,6 +2112,7 @@ mod tests {
         assert!(sidebar_tab_drop_accepts_formats(&legacy_tab_formats));
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn removing_workspace_preserves_survivor_order_for_followup_reorder() {
         if gtk::init().is_err() {

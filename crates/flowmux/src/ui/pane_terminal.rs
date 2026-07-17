@@ -145,6 +145,7 @@ pub struct PaneCallbacks {
 
 #[cfg(test)]
 impl PaneCallbacks {
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub(crate) fn noop_for_test() -> Self {
         Self {
             on_child_exited: Rc::new(RefCell::new(|_, _| {})),
