@@ -154,7 +154,14 @@ impl WindowController {
                     .borrow()
                     .terminals
                     .get(&surface)
-                    .and_then(|t| t.current_dir());
+                    .and_then(|t| t.current_dir())
+                    .or_else(|| {
+                        self.pane_registry
+                            .borrow()
+                            .editors
+                            .get(&surface)
+                            .map(|editor| editor.workspace_root().to_path_buf())
+                    });
                 let workspace_for_pane = self.pane_registry.borrow().workspace_of_pane(pane);
                 let stored = match workspace_for_pane {
                     Some(workspace) => self

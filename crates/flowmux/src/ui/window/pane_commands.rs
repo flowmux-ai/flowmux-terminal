@@ -57,6 +57,8 @@ impl WindowController {
                                 term.grab_focus();
                             } else if let Some(browser) = r.active_browser(new_pane) {
                                 browser.grab_focus();
+                            } else if let Some(editor) = r.active_editor(new_pane) {
+                                editor.grab_focus();
                             }
                         });
                         let _ = ack.send(Ok(new_pane));
@@ -235,6 +237,8 @@ impl WindowController {
                         term.grab_focus();
                     } else if let Some(browser) = r.browsers.get(&surface) {
                         browser.grab_focus();
+                    } else if let Some(editor) = r.editors.get(&surface) {
+                        editor.grab_focus();
                     }
                 });
             }

@@ -3,6 +3,7 @@ pub mod agent_bar;
 mod browser_bookmarks;
 mod browser_downloads;
 pub mod browser_pane;
+pub mod editor_pane;
 pub mod file_browser;
 pub mod ghostty_pane;
 pub mod image_viewer;

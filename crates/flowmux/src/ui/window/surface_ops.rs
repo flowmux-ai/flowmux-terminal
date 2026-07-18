@@ -211,6 +211,8 @@ impl WindowController {
                 term.grab_focus();
             } else if let Some(browser) = r.active_browser(target) {
                 browser.grab_focus();
+            } else if let Some(editor) = r.active_editor(target) {
+                editor.grab_focus();
             }
         });
     }
@@ -343,6 +345,8 @@ impl WindowController {
                         term.grab_focus();
                     } else if let Some(browser) = r.browsers.get(&surface_id) {
                         browser.grab_focus();
+                    } else if let Some(editor) = r.editors.get(&surface_id) {
+                        editor.grab_focus();
                     }
                 });
                 return;

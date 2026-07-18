@@ -1206,6 +1206,11 @@ impl WindowController {
         if let Some(term) = registry.terminals.get(&surface) {
             return term.current_dir().map(CopyableText::live_path);
         }
+        if let Some(editor) = registry.editors.get(&surface) {
+            return Some(CopyableText::live_path(
+                editor.workspace_root().to_path_buf(),
+            ));
+        }
         registry
             .browsers
             .get(&surface)
@@ -1546,6 +1551,8 @@ impl WindowController {
                 term.grab_focus();
             } else if let Some(browser) = r.active_browser(pane) {
                 browser.grab_focus();
+            } else if let Some(editor) = r.active_editor(pane) {
+                editor.grab_focus();
             } else {
                 tracing::debug!(%pane, "focus_pane: no surface registered for pane");
             }
@@ -1590,6 +1597,8 @@ impl WindowController {
                 term.grab_focus();
             } else if let Some(browser) = r.active_browser(leaf_id) {
                 browser.grab_focus();
+            } else if let Some(editor) = r.active_editor(leaf_id) {
+                editor.grab_focus();
             }
         });
     }
@@ -1773,8 +1782,9 @@ impl WindowController {
         }
         let _ = Rect::new(0.0, 0.0, 0.0, 0.0); // ensure import used in non-tests path
         if let Some((id, _)) = best {
-            let has_active_surface =
-                registry.active_terminal(id).is_some() || registry.active_browser(id).is_some();
+            let has_active_surface = registry.active_terminal(id).is_some()
+                || registry.active_browser(id).is_some()
+                || registry.active_editor(id).is_some();
             drop(registry);
 
             if has_active_surface {

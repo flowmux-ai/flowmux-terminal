@@ -7,6 +7,7 @@
 
 use crate::theme::ResolvedTheme;
 use crate::ui::browser_pane::BrowserPane;
+use crate::ui::editor_pane::EditorPane;
 use crate::ui::ghostty_pane::{is_flatpak_sandbox, GhosttyPane};
 use crate::ui::pane_terminal::{PaneCallbacks, PaneTerminal, TabDropCommand};
 use flowmux_core::{
@@ -122,8 +123,10 @@ pub fn solo_workspace_pane(ws: &Workspace) -> Option<PaneId> {
 pub struct PaneRegistry {
     pub terminals: HashMap<SurfaceId, PaneTerminal>,
     pub browsers: HashMap<SurfaceId, BrowserPane>,
+    pub editors: HashMap<SurfaceId, EditorPane>,
     active_terminal_by_pane: HashMap<PaneId, SurfaceId>,
     active_browser_by_pane: HashMap<PaneId, SurfaceId>,
+    active_editor_by_pane: HashMap<PaneId, SurfaceId>,
     pane_frames: HashMap<PaneId, gtk::Widget>,
     surface_stacks: HashMap<PaneId, gtk::Stack>,
     pub surface_tabs: HashMap<PaneId, Vec<(SurfaceId, gtk::Widget)>>,
@@ -169,6 +172,12 @@ impl PaneRegistry {
         self.active_browser_by_pane
             .get(&pane)
             .and_then(|surface| self.browsers.get(surface))
+    }
+
+    pub fn active_editor(&self, pane: PaneId) -> Option<&EditorPane> {
+        self.active_editor_by_pane
+            .get(&pane)
+            .and_then(|surface| self.editors.get(surface))
     }
 
     pub fn pane_frame(&self, pane: PaneId) -> Option<gtk::Widget> {
@@ -258,6 +267,7 @@ impl PaneRegistry {
         self.active_terminal_by_pane
             .get(&pane)
             .or_else(|| self.active_browser_by_pane.get(&pane))
+            .or_else(|| self.active_editor_by_pane.get(&pane))
             .copied()
     }
 
@@ -417,6 +427,7 @@ impl PaneRegistry {
         for pane in panes {
             self.active_terminal_by_pane.remove(&pane);
             self.active_browser_by_pane.remove(&pane);
+            self.active_editor_by_pane.remove(&pane);
             self.pane_frames.remove(&pane);
             self.surface_stacks.remove(&pane);
             self.surface_tabs.remove(&pane);
@@ -446,6 +457,9 @@ impl PaneRegistry {
             }
             if let Some(browser) = self.browsers.remove(&surface) {
                 browser.prepare_for_close();
+            }
+            if let Some(editor) = self.editors.remove(&surface) {
+                editor.prepare_for_close();
             }
             self.surface_tab_labels.remove(&surface);
             self.surface_workspace.remove(&surface);
@@ -542,9 +556,15 @@ impl PaneRegistry {
         if self.terminals.contains_key(&surface) {
             self.active_terminal_by_pane.insert(pane, surface);
             self.active_browser_by_pane.remove(&pane);
+            self.active_editor_by_pane.remove(&pane);
         } else if self.browsers.contains_key(&surface) {
             self.active_browser_by_pane.insert(pane, surface);
             self.active_terminal_by_pane.remove(&pane);
+            self.active_editor_by_pane.remove(&pane);
+        } else if self.editors.contains_key(&surface) {
+            self.active_editor_by_pane.insert(pane, surface);
+            self.active_terminal_by_pane.remove(&pane);
+            self.active_browser_by_pane.remove(&pane);
         }
         if let Some(tabs) = self.surface_tabs.get(&pane) {
             for (id, tab) in tabs {
@@ -611,6 +631,9 @@ impl PaneRegistry {
             if let Some(browser) = self.browsers.remove(&s) {
                 browser.prepare_for_close();
             }
+            if let Some(editor) = self.editors.remove(&s) {
+                editor.prepare_for_close();
+            }
             self.surface_tab_labels.remove(&s);
             self.surface_workspace.remove(&s);
         }
@@ -621,6 +644,7 @@ impl PaneRegistry {
         self.pane_zoom_badges.remove(&pane);
         self.active_terminal_by_pane.remove(&pane);
         self.active_browser_by_pane.remove(&pane);
+        self.active_editor_by_pane.remove(&pane);
         // pane_workspace is keyed by this same leaf PaneId; dropping it here
         // keeps the map from growing without bound across split/close churn in
         // a long-lived workspace (clear_workspace only fires on full teardown).
@@ -676,6 +700,9 @@ impl PaneRegistry {
         if let Some(browser) = self.browsers.remove(&surface) {
             browser.prepare_for_close();
         }
+        if let Some(editor) = self.editors.remove(&surface) {
+            editor.prepare_for_close();
+        }
         self.surface_tab_labels.remove(&surface);
         self.surface_workspace.remove(&surface);
         if self.active_terminal_by_pane.get(&pane) == Some(&surface) {
@@ -683,6 +710,9 @@ impl PaneRegistry {
         }
         if self.active_browser_by_pane.get(&pane) == Some(&surface) {
             self.active_browser_by_pane.remove(&pane);
+        }
+        if self.active_editor_by_pane.get(&pane) == Some(&surface) {
+            self.active_editor_by_pane.remove(&pane);
         }
         self.refresh_tab_multi_class(pane);
     }
@@ -732,6 +762,14 @@ impl PaneRegistry {
                 browser.focus_widget(),
                 SurfaceKind::Browser { initial_url: None },
             )
+        } else if let Some(editor) = self.editors.remove(&surface) {
+            (
+                editor.focus_widget(),
+                SurfaceKind::Editor {
+                    workspace_root: editor.workspace_root().to_path_buf(),
+                    session: flowmux_core::EditorSessionState::default(),
+                },
+            )
         } else {
             (
                 content.clone(),
@@ -748,6 +786,9 @@ impl PaneRegistry {
         }
         if self.active_browser_by_pane.get(&pane) == Some(&surface) {
             self.active_browser_by_pane.remove(&pane);
+        }
+        if self.active_editor_by_pane.get(&pane) == Some(&surface) {
+            self.active_editor_by_pane.remove(&pane);
         }
         self.refresh_tab_multi_class(pane);
 
@@ -782,6 +823,8 @@ impl PaneRegistry {
             MovingHandle::Terminal(terminal)
         } else if let Some(browser) = self.browsers.remove(&surface) {
             MovingHandle::Browser(browser)
+        } else if let Some(editor) = self.editors.remove(&surface) {
+            MovingHandle::Editor(editor)
         } else {
             return None;
         };
@@ -806,6 +849,9 @@ impl PaneRegistry {
         }
         if self.active_browser_by_pane.get(&pane) == Some(&surface) {
             self.active_browser_by_pane.remove(&pane);
+        }
+        if self.active_editor_by_pane.get(&pane) == Some(&surface) {
+            self.active_editor_by_pane.remove(&pane);
         }
         self.refresh_tab_multi_class(pane);
 
@@ -847,6 +893,10 @@ impl PaneRegistry {
                 browser.set_pane_id(dst_pane);
                 self.browsers.insert(surface, browser);
             }
+            MovingHandle::Editor(editor) => {
+                editor.set_pane_id(dst_pane);
+                self.editors.insert(surface, editor);
+            }
         }
         self.surface_tab_labels.insert(surface, label);
         self.surface_workspace.insert(surface, dst_workspace);
@@ -872,6 +922,7 @@ pub struct MovingSurface {
 pub enum MovingHandle {
     Terminal(PaneTerminal),
     Browser(BrowserPane),
+    Editor(EditorPane),
 }
 
 /// Apply a `gtk::Paned` ratio immediately after its first allocation.
@@ -1678,6 +1729,64 @@ mod tab_dnd_tests {
         assert!(!registry.surface_tab_labels.contains_key(&surface));
         assert!(!registry.surface_workspace.contains_key(&surface));
         assert!(registry.active_surface(pane).is_none());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[gtk::test]
+    fn editor_surface_moves_between_panes_with_live_handle() {
+        let src = PaneId::new();
+        let dst = PaneId::new();
+        let surface = SurfaceId::new();
+        let src_workspace = WorkspaceId::new();
+        let dst_workspace = WorkspaceId::new();
+        let editor = EditorPane::new(src, "/tmp/다국어-プロジェクト".into());
+        let content = editor.root.clone().upcast::<gtk::Widget>();
+
+        let src_stack = gtk::Stack::new();
+        src_stack.add_named(&content, Some(&surface.to_string()));
+        let src_tabs = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        let src_tab = gtk::Button::new().upcast::<gtk::Widget>();
+        src_tabs.append(&src_tab);
+
+        let mut registry = PaneRegistry::default();
+        registry.surface_stacks.insert(src, src_stack);
+        registry.surface_tabs.insert(src, vec![(surface, src_tab)]);
+        registry.pane_tab_containers.insert(src, src_tabs);
+        registry
+            .surface_tab_labels
+            .insert(surface, gtk::Label::new(Some("Editor")));
+        registry.surface_workspace.insert(surface, src_workspace);
+        registry.editors.insert(surface, editor);
+        registry.activate_surface(src, surface);
+
+        assert_eq!(registry.active_surface(src), Some(surface));
+        assert_eq!(
+            registry.active_editor(src).map(EditorPane::pane_id),
+            Some(src)
+        );
+
+        let moving = registry
+            .detach_surface_for_move(src, surface)
+            .expect("editor surface should detach with its live handle");
+        assert!(matches!(&moving.handle, MovingHandle::Editor(_)));
+        assert!(registry.active_surface(src).is_none());
+        assert!(!registry.editors.contains_key(&surface));
+
+        registry.surface_stacks.insert(dst, gtk::Stack::new());
+        registry
+            .pane_tab_containers
+            .insert(dst, gtk::Box::new(gtk::Orientation::Horizontal, 0));
+        let dst_tab = gtk::Button::new().upcast::<gtk::Widget>();
+        let dst_label = gtk::Label::new(Some("Editor"));
+        assert!(registry.attach_moved_surface(dst, dst_workspace, moving, dst_tab, dst_label,));
+
+        let moved = registry.active_editor(dst).expect("moved editor is active");
+        assert_eq!(moved.pane_id(), dst);
+        assert_eq!(
+            moved.workspace_root(),
+            std::path::Path::new("/tmp/다국어-プロジェクト")
+        );
+        assert_eq!(registry.active_surface(dst), Some(surface));
     }
 }
 
@@ -2686,41 +2795,29 @@ fn build_panel(
             widget
         }
         SurfaceKind::Editor { workspace_root, .. } => {
-            let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
-            root.set_hexpand(true);
-            root.set_vexpand(true);
-            root.set_focusable(true);
-            root.set_halign(gtk::Align::Fill);
-            root.set_valign(gtk::Align::Fill);
-
-            let title = gtk::Label::new(Some("Editor"));
-            title.add_css_class("title-2");
-            let path = gtk::Label::new(Some(&workspace_root.display().to_string()));
-            path.add_css_class("dim-label");
-            path.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
-            root.append(&title);
-            root.append(&path);
+            let editor = EditorPane::new(pane_id, workspace_root.clone());
 
             let frame_in = frame.clone();
             let frame_out = frame.clone();
             let on_focus = callbacks.on_focus.clone();
+            let editor_pane_id = editor.clone();
             let focus = gtk::EventControllerFocus::new();
             focus.connect_enter(move |_| {
                 if !frame_in.has_css_class("focused") {
                     frame_in.add_css_class("focused");
                 }
-                (on_focus.borrow_mut())(pane_id);
+                (on_focus.borrow_mut())(editor_pane_id.pane_id());
             });
             focus.connect_leave(move |_| {
                 frame_out.remove_css_class("focused");
             });
-            root.add_controller(focus);
+            editor.root.add_controller(focus);
 
-            registry
-                .borrow_mut()
-                .surface_workspace
-                .insert(surface.id, workspace);
-            root.upcast::<gtk::Widget>()
+            let widget = editor.root.clone().upcast::<gtk::Widget>();
+            let mut registry = registry.borrow_mut();
+            registry.editors.insert(surface.id, editor);
+            registry.surface_workspace.insert(surface.id, workspace);
+            widget
         }
     }
 }
