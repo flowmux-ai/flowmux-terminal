@@ -9,8 +9,7 @@ description = "Document and persistence services for the Flowmux editor."
 
 [dependencies]
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 tempfile = "3"
-
-[dev-dependencies]
-serde_json = { workspace = true }
+uuid = { workspace = true }

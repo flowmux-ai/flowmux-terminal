@@ -5,6 +5,16 @@
 //! owns workspace boundaries, text decoding, version checks, external-change
 //! detection, and atomic persistence.
 
+mod protocol;
+mod web_assets;
+
+pub use protocol::{
+    parse_editor_message, serialize_host_message, DocumentPayload, EditorMessage, HostMessage,
+    ProtocolError, TextDocumentEncoding, TextDocumentLineEnding, MAX_BRIDGE_MESSAGE_BYTES,
+    PROTOCOL_VERSION,
+};
+pub use web_assets::{EditorAssetServer, EditorAssetServerError};
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, Permissions};
