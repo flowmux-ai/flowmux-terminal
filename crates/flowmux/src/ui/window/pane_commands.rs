@@ -3,6 +3,8 @@
 
 use super::*;
 
+const OPEN_TIG_SHELL_COMMAND: &str = "tig\r";
+
 impl WindowController {
     pub(super) async fn dispatch_pane_command(&self, cmd: GtkCommand) {
         let zoomed = self.zoomed_pane();
@@ -134,6 +136,32 @@ impl WindowController {
                 {
                     self.attach_or_rerender_surface(ws_id, pane, surface_id)
                         .await;
+                }
+            }
+            GtkCommand::OpenTig { pane } => {
+                let cwd = {
+                    let registry = self.pane_registry.borrow();
+                    registry
+                        .active_terminal(pane)
+                        .and_then(|terminal| terminal.current_dir())
+                };
+                if let Some((workspace, surface)) =
+                    self.store.add_terminal_surface_to_pane(pane, cwd).await
+                {
+                    self.attach_or_rerender_surface(workspace, pane, surface)
+                        .await;
+                    let terminal = self.pane_registry.borrow().terminals.get(&surface).cloned();
+                    if let Some(terminal) = terminal {
+                        glib::timeout_add_local_once(Duration::from_millis(250), move || {
+                            if let Err(error) =
+                                terminal.write_input(OPEN_TIG_SHELL_COMMAND.as_bytes())
+                            {
+                                tracing::warn!(%pane, %surface, %error, "failed to start tig");
+                            }
+                        });
+                    } else {
+                        tracing::warn!(%pane, %surface, "tig tab was not attached");
+                    }
                 }
             }
             GtkCommand::CreateSurface {

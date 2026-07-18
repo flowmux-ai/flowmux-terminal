@@ -118,6 +118,8 @@ current agent token and activity totals without interrupting running sessions.
   (Shift+Enter Hangul flush, smart PgUp/PgDn) are fixed and not editable. The
   AI Usage popover opens and closes with **Ctrl+Alt+U** by default
   (**Cmd+Alt+U** on macOS; `toggle-usage-popover` in the Keybindings options).
+  **Ctrl+Alt+G** opens `tig` in a new tab in the focused pane
+  (**Cmd+Alt+G** on macOS; `open-tig` in the Keybindings options).
 
 See the [keyboard shortcut reference](docs/keybindings.md) and
 [configuration reference](docs/configuration.md).

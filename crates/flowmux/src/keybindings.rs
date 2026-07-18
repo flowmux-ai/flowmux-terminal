@@ -247,6 +247,7 @@ pub fn install_actions(
             }
         }),
     );
+    let open_tig = make_open_tig_action(focused.clone(), bridge.clone());
     let new_browser_surface = make_pane_action(
         "new-browser-surface",
         focused.clone(),
@@ -391,6 +392,7 @@ pub fn install_actions(
         close_surface,
         quit_app,
         new_surface,
+        open_tig,
         new_browser_surface,
         next_surface,
         prev_surface,
@@ -417,6 +419,22 @@ pub fn install_actions(
         toggle_file_browser,
         toggle_usage_popover,
     ]);
+}
+
+fn make_open_tig_action(
+    focused: FocusedPane,
+    bridge: Bridge,
+) -> gtk::gio::ActionEntry<adw::ApplicationWindow> {
+    make_pane_action(
+        "open-tig",
+        focused,
+        Box::new(move |pane| {
+            let bridge = bridge.clone();
+            glib::MainContext::default().spawn_local(async move {
+                let _ = bridge.tx.send(GtkCommand::OpenTig { pane }).await;
+            });
+        }),
+    )
 }
 
 /// Toggle the existing side-panel AI usage popover. `MenuButton::active` is
@@ -1186,6 +1204,37 @@ mod tests {
             "<Ctrl><Shift>k"
         };
         assert_eq!(default_for(ActionId::CopyPanePath), vec![want]);
+    }
+
+    #[test]
+    fn open_tig_default_targets_git_key() {
+        let want = if cfg!(target_os = "macos") {
+            "<Meta><Alt>g"
+        } else {
+            "<Ctrl><Alt>g"
+        };
+        assert_eq!(default_for(ActionId::OpenTig), vec![want]);
+        assert!(ActionId::OpenTig.is_user_editable());
+        assert_eq!(ActionId::from_wire("open-tig"), Some(ActionId::OpenTig));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[gtk::test]
+    async fn open_tig_action_targets_last_focused_pane() {
+        adw::init().expect("libadwaita should initialize in GTK test");
+        let window = adw::ApplicationWindow::builder()
+            .default_width(320)
+            .default_height(240)
+            .build();
+        let pane = flowmux_core::PaneId::new();
+        let focused = Rc::new(Cell::new(Some(pane)));
+        let (bridge, rx) = Bridge::new();
+        window.add_action_entries([make_open_tig_action(focused, bridge)]);
+
+        gtk::prelude::WidgetExt::activate_action(&window, "win.open-tig", None)
+            .expect("open-tig action should be registered");
+        let command = rx.recv().await.expect("open-tig command should be sent");
+        assert!(matches!(command, GtkCommand::OpenTig { pane: target } if target == pane));
     }
 
     #[test]

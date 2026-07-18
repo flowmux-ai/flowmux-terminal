@@ -23,6 +23,7 @@ under Options → Keybindings. Action names are the keys used in
 | copy-pane-path | Ctrl+Shift+K | Cmd+Shift+K |
 | toggle-worktree-panel / toggle-file-browser | Ctrl+Alt+W / Ctrl+Alt+F | Cmd+Alt+W / Cmd+Alt+F |
 | toggle-usage-popover | Ctrl+Alt+U | Cmd+Alt+U |
+| open-tig | Ctrl+Alt+G | Cmd+Alt+G |
 
 The terminal IME and scroll workarounds are intentionally fixed: Shift+Enter
 flushes composed Hangul input, and PgUp/PgDn use smart scrollback behavior.

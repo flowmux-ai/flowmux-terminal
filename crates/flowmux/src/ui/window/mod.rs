@@ -1666,6 +1666,7 @@ impl WindowController {
             | GtkCommand::CloseFocused { .. }
             | GtkCommand::FocusDirection { .. }
             | GtkCommand::NewSurface { .. }
+            | GtkCommand::OpenTig { .. }
             | GtkCommand::CreateSurface { .. }
             | GtkCommand::NewBrowserSurface { .. }
             | GtkCommand::ActivateSurface { .. }
@@ -3361,6 +3362,66 @@ mod tests {
             Some(format!("flowmux - {expected}")),
             "window title should follow the newly-active tab — initial was {initial:?}"
         );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[gtk::test]
+    async fn open_tig_dispatch_adds_active_tab_to_target_pane_with_its_cwd() {
+        adw::init().expect("libadwaita should initialize in GTK test");
+        let root = std::env::temp_dir().join("flowmux-ui-open-tig");
+        std::fs::create_dir_all(&root).unwrap();
+        let store = StateStore::new_lazy(State::default());
+        let workspace = store
+            .create_workspace(Some("ui".into()), root.clone())
+            .await;
+        let initial = store.get_workspace(workspace).await.unwrap();
+        let pane = initial.surfaces[0].root_pane.first_leaf_id().unwrap();
+        let initial_surface = initial.surfaces[0]
+            .root_pane
+            .active_surface_id(pane)
+            .unwrap();
+
+        let (bridge, _rx) = Bridge::new();
+        let app = adw::Application::builder()
+            .application_id("com.flowmux.App.UiTest.OpenTig")
+            .build();
+        app.register(None::<&gtk::gio::Cancellable>).unwrap();
+        let controller = WindowController::new(
+            &app,
+            store.clone(),
+            Arc::new(ResolvedTheme::load()),
+            bridge,
+            gtk::CssProvider::new(),
+            None,
+        );
+        controller.render_workspace(&initial);
+        controller.focused_pane.set(Some(pane));
+
+        controller.dispatch(GtkCommand::OpenTig { pane }).await;
+
+        let updated = store.get_workspace(workspace).await.unwrap();
+        let content = updated.surfaces[0]
+            .root_pane
+            .find_leaf_content(pane)
+            .expect("target pane should remain present");
+        let PaneContent::Tabs { active, surfaces } = content else {
+            panic!("target pane should contain tabs");
+        };
+        assert_eq!(surfaces.len(), 2);
+        assert_ne!(*active, initial_surface);
+        let tig_surface = surfaces
+            .iter()
+            .find(|surface| surface.id == *active)
+            .expect("new tig tab should be active");
+        assert!(matches!(
+            &tig_surface.kind,
+            SurfaceKind::Terminal { cwd: Some(cwd), .. } if cwd == &root
+        ));
+        assert!(controller
+            .pane_registry
+            .borrow()
+            .terminals
+            .contains_key(active));
     }
 
     /// ActivateSurface dispatch alone recomputes the window title from the active tab.

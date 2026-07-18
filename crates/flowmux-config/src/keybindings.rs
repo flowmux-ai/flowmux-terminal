@@ -77,6 +77,8 @@ pub enum ActionId {
     ToggleFileBrowser,
     /// Toggle the AI usage popover in the side-panel footer.
     ToggleUsagePopover,
+    /// Open tig in a new tab in the focused pane.
+    OpenTig,
 }
 
 impl ActionId {
@@ -115,6 +117,7 @@ impl ActionId {
             Self::ToggleWorktreePanel => "toggle-worktree-panel",
             Self::ToggleFileBrowser => "toggle-file-browser",
             Self::ToggleUsagePopover => "toggle-usage-popover",
+            Self::OpenTig => "open-tig",
         }
     }
 
@@ -154,6 +157,7 @@ impl ActionId {
             Self::ToggleWorktreePanel => "Toggle worktree panel",
             Self::ToggleFileBrowser => "Toggle file browser",
             Self::ToggleUsagePopover => "Toggle AI usage",
+            Self::OpenTig => "Open tig",
         }
     }
 
@@ -196,6 +200,7 @@ impl ActionId {
             Self::ToggleWorktreePanel,
             Self::ToggleFileBrowser,
             Self::ToggleUsagePopover,
+            Self::OpenTig,
         ]
     }
 
@@ -261,6 +266,7 @@ const DEFAULTS: &[(ActionId, &[&str])] = &[
     (ActionId::ToggleWorktreePanel, &["<Ctrl><Alt>w"]),
     (ActionId::ToggleFileBrowser, &["<Ctrl><Alt>f"]),
     (ActionId::ToggleUsagePopover, &["<Ctrl><Alt>u"]),
+    (ActionId::OpenTig, &["<Ctrl><Alt>g"]),
 ];
 
 /// macOS keeps the Linux layout and only substitutes the modifier keys:
@@ -312,6 +318,7 @@ const DEFAULTS: &[(ActionId, &[&str])] = &[
     (ActionId::ToggleWorktreePanel, &["<Meta><Alt>w"]),
     (ActionId::ToggleFileBrowser, &["<Meta><Alt>f"]),
     (ActionId::ToggleUsagePopover, &["<Meta><Alt>u"]),
+    (ActionId::OpenTig, &["<Meta><Alt>g"]),
 ];
 
 /// Built-in default accelerators. The first install path reads this and
@@ -515,6 +522,28 @@ mod tests {
             .find(|(action, _)| *action == ActionId::TerminalSearch)
             .unwrap();
         assert_eq!(search.1, vec!["<Alt>f".to_string()]);
+    }
+
+    #[test]
+    fn open_tig_default_serializes_and_can_be_rebound() {
+        let default = if cfg!(target_os = "macos") {
+            "<Meta><Alt>g"
+        } else {
+            "<Ctrl><Alt>g"
+        };
+        assert_eq!(default_accels(ActionId::OpenTig), &[default]);
+
+        let mut overrides = KeybindingOverrides::new();
+        overrides.set(ActionId::OpenTig, vec!["<Alt>g".to_string()]);
+        let json = serde_json::to_string(&overrides).unwrap();
+        assert!(json.contains(r#""open-tig":["<Alt>g"]"#));
+
+        let resolved = overrides.resolve();
+        let open_tig = resolved
+            .iter()
+            .find(|(action, _)| *action == ActionId::OpenTig)
+            .unwrap();
+        assert_eq!(open_tig.1, vec!["<Alt>g".to_string()]);
     }
 
     #[test]

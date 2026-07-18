@@ -277,6 +277,8 @@ pub enum GtkCommand {
     /// (Reserved for the planned horizontal surface-tab bar; currently
     /// unused since the sidebar shows workspaces, not surfaces.)
     NewSurface { pane: PaneId },
+    /// Open a new tab in the target pane and run tig in its shell.
+    OpenTig { pane: PaneId },
     /// Open a terminal tab in the target workspace for `flowmux new-tab`.
     CreateSurface {
         workspace: WorkspaceId,
