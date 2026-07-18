@@ -1,10 +1,10 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
-# Flowmux 정밀 IDE 편집 환경 구현 계획
+# Flowmux pane 내장 에디터 구현 계획
 
 ## 1. 문서 목적
 
-이 문서는 Flowmux에 확장 마켓이나 VS Code 호환 계층을 넣지 않고도, 일상적인 개발 작업에 충분히 정밀하고 안정적인 편집 환경을 추가하기 위한 구현 계획이다.
+이 문서는 Flowmux에 확장 마켓이나 별도 IDE shell을 넣지 않고도, 일상적인 개발 작업에 충분히 정밀하고 안정적인 pane 내장 편집 환경을 추가하기 위한 구현 계획이다.
 
 핵심 목표는 다음과 같다.
 
@@ -12,10 +12,29 @@
 - 편집, 저장, 찾기, 바꾸기, 빠른 파일 열기, 워크스페이스 검색을 제품 기본 기능으로 제공한다.
 - 파일 변경 충돌, dirty 문서 종료, 비정상 종료 복구까지 포함해 데이터 손실을 방지한다.
 - Flowmux의 기존 pane, surface, focus, tab, workspace 복원 구조에 자연스럽게 통합한다.
-- 언어별 지능형 기능은 확장 시스템 대신 표준 Language Server Protocol(LSP)을 직접 연결한다.
-- Flowmux를 작은 VS Code처럼 복제하지 않고, terminal·browser·file browser와 조화를 이루는 Flowmux 고유의 편집 경험을 만든다.
+- 언어별 지능형 기능은 핵심 편집기가 안정된 뒤 선택적인 후속 작업으로 분리한다.
+- 범용 IDE shell을 복제하지 않고 terminal·browser·file browser와 조화를 이루는 Flowmux 고유의 편집 경험을 만든다.
 
 이 계획에서 `Editor surface`는 Flowmux pane의 바깥 tab 하나를 뜻한다. 화면에는 현재 파일 하나만 표시하며, 다른 파일 선택은 기존 file browser가 담당한다.
+
+## 구현 상태 (2026-07-19)
+
+사용자가 파일을 선택하면 선택 대상 pane 안에서 바로 편집하는 단순한 흐름을 v1 기준으로 구현했다. Editor surface 안에는 별도 explorer, activity bar, document tab 또는 IDE shell을 만들지 않았으며 Monaco 편집 화면과 필요한 순간에만 나타나는 검색·충돌·복구 UI만 둔다.
+
+| 영역 | 상태 | 구현 결과 |
+|---|---|---|
+| 파일 열기 | 완료 | file browser의 단일 클릭과 `Enter`가 같은 경로를 사용해 source pane, 최근 focus pane, 첫 pane 순으로 Editor surface를 생성하거나 재사용한다. |
+| 기본 편집 | 완료 | 다국어 본문·경로, syntax highlighting, undo/redo, multi-cursor, 들여쓰기, 접기, bracket matching을 지원한다. |
+| 저장 | 완료 | atomic save, Save As, save all, read-only 처리와 version 기반 dirty 상태를 지원한다. |
+| 찾기와 탐색 | 완료 | 파일 내 find/replace, go to line, Quick Open, 취소 가능한 workspace 검색과 결과 range 이동을 지원한다. |
+| 데이터 안전 | 완료 | 외부 변경 감지, clean reload, dirty conflict 비교·선택, 삭제 파일 재생성, 종료 guard, 비정상 종료 복구를 지원한다. |
+| 세션 통합 | 완료 | 열린 파일, 활성 파일, cursor·scroll 상태를 workspace와 함께 복원하고 pane 이동·분할·닫기 수명주기에 연결한다. |
+| 외형과 배포 | 완료 | 앱 light/dark appearance, editor 색상·글꼴·zoom을 연동하고 frontend asset과 license notice를 Linux/macOS 패키지에 포함한다. |
+| workspace 일괄 바꾸기 | 후속 | 여러 파일을 한 번에 수정하는 기능은 단순 편집 흐름에 필요하지 않고 안전한 preview·부분 실패 정책이 더 필요하므로 v1에서 제외한다. |
+| Workspace Tools 패널 | 후속 | 기존 file browser와 검색 overlay로 v1 흐름이 완성되므로 별도 Files/Search/Problems panel은 추가하지 않는다. |
+| LSP와 Problems | 선택적 v1.1 | 핵심 편집·저장과 분리해 별도 결정과 검증을 거친 뒤 추가한다. 언어 서버를 자동 설치하거나 내려받지는 않는다. |
+
+현재 구현의 출시 전 남은 검증은 실제 입력 장치로 Linux와 macOS에서 단일 클릭, 한글·일본어 IME, clipboard, screen reader 흐름을 반복하는 것이다. 자동화 환경에서는 macOS bundle 실행과 창 렌더링까지 확인했지만 운영체제 보조 접근 권한이 없어 합성 클릭과 키 입력은 수행하지 못했다.
 
 ## 2. 확정 범위와 비목표
 
@@ -27,14 +46,12 @@
 - undo/redo, multi-cursor, 들여쓰기, 주석, 접기, bracket matching
 - 파일 내 찾기·바꾸기
 - 빠른 파일 열기
-- 워크스페이스 전체 검색·바꾸기
+- 워크스페이스 전체 검색
 - syntax highlighting과 언어 자동 판별
 - 외부 파일 변경 감지와 충돌 처리
 - dirty 문서 종료 보호
 - 비정상 종료 후 문서 복구
 - 테마, 글꼴, zoom, word wrap, minimap 등 기본 설정
-- 선택적 직접 LSP 연동
-- Problems/diagnostics 표시
 - 기존 pane 이동, 분할, 닫기, tear-off, workspace 복원과의 통합
 
 ### 2.2 명시적 비목표
@@ -52,6 +69,8 @@
 - AI completion, 실시간 공동 편집
 - multi-root workspace
 - 언어 서버 자동 다운로드 또는 임의 실행 파일 설치
+
+workspace 일괄 바꾸기, 별도 Workspace Tools 패널, 직접 LSP 연동과 Problems UI는 v1 비목표이며 별도 후속 결정으로 다룬다.
 
 이 경계를 유지해야 제품 복잡도, 공급망 위험, 메모리 사용량, 라이선스 검토 범위를 통제할 수 있다. 나중에 plugin 시스템이 필요해지더라도 이번 Editor API와 직접 결합하지 않고 별도 ADR로 다룬다.
 
@@ -296,7 +315,7 @@ Flowmux Editor는 별도 IDE shell이나 activity bar를 만들지 않는다.
 - 편집 화면: 별도 toolbar, document tab, context rail, status strip 없이 Monaco가 pane을 채움
 - 저장 상태: 평상시 숨기고 dirty, read-only, external-change일 때만 작은 상태 표시
 - 기존 file browser: 프로젝트 탐색의 유일한 기본 UI
-- 기존 right panel: 후속 phase에서 Files/Search/Problems mode를 갖는 `Workspace Tools`로 확장
+- 기존 right panel: v1에서는 변경하지 않으며 file browser와 검색 overlay를 그대로 사용
 
 파일 이름은 바깥 tab에서, 파일 전환은 file browser에서 담당한다. 편집 영역 안에는 현재 작업에 필요한 요소만 표시한다.
 
@@ -410,9 +429,9 @@ dirty buffer는 debounce된 recovery snapshot으로 저장한다.
 
 초기 구현은 검증된 Rust 검색 라이브러리 또는 ripgrep과 동일한 ignore/regex 계층을 재사용한다. 쉘 문자열을 조립해 검색 명령을 실행하지 않는다.
 
-### 9.3 workspace 바꾸기
+### 9.3 후속 후보: workspace 일괄 바꾸기
 
-replace는 검색보다 강한 안전장치를 둔다.
+workspace 일괄 바꾸기는 v1에 포함하지 않는다. 후속 구현을 결정할 경우 검색보다 강한 다음 안전장치를 먼저 충족해야 한다.
 
 - 적용 전 변경 파일 수와 match 수를 표시한다.
 - preview에서 파일별 변경 내용을 확인할 수 있게 한다.
@@ -551,14 +570,14 @@ replace는 검색보다 강한 안전장치를 둔다.
 - quick open과 recent weighting 구현
 - 취소 가능한 workspace search 구현
 - 검색 결과 preview와 range reveal 구현
-- 확인·preview가 있는 workspace replace 구현
-- 기존 right panel을 Files/Search mode의 Workspace Tools로 확장
 
 완료 조건:
 
 - 대형 검색을 취소한 뒤 background task나 stale 결과가 남지 않는다.
-- dirty document가 검색·바꾸기에서 누락되거나 디스크 내용으로 덮이지 않는다.
+- dirty document의 현재 내용이 검색에서 누락되지 않는다.
 - index와 실제 파일 트리의 변경이 수렴한다.
+
+workspace 일괄 바꾸기와 별도 Workspace Tools panel은 v1 이후에 각각 독립적으로 재평가한다.
 
 ### Phase 6 — 직접 LSP 연동, 약 2~3주, 선택적 v1.1
 
@@ -685,7 +704,7 @@ large-file mode는 syntax tokenization, minimap, semantic 기능을 단계적으
 
 ## 16. 출시 승인 기준
 
-다음 조건을 모두 만족해야 정밀 IDE 편집 기능 v1으로 간주한다.
+다음 조건을 모두 만족해야 pane 내장 에디터 v1으로 간주한다.
 
 - 파일 단일 클릭과 `Enter`가 source pane → MRU → first pane 규칙대로 동작한다.
 - 선택한 pane의 Editor surface와 열린 문서를 중복 없이 재사용한다.
@@ -701,16 +720,17 @@ large-file mode는 syntax tokenization, minimap, semantic 기능을 단계적으
 - dependency license notice, source, build 절차가 배포물과 저장소에 준비되어 있다.
 - 실행 중인 Flowmux에서 사용자 시나리오 검증을 완료한다.
 
-## 17. 구현 시작 전 필요한 ADR
+## 17. 구현 결정 결과
 
-구현을 시작하기 전에 다음 네 결정을 짧은 ADR로 확정한다.
+구현 과정에서 다음 결정을 확정했다.
 
-1. Monaco WebView spike 결과와 GtkSourceView 대체 여부
-2. editor local origin과 Rust-WebView transport 방식
-3. symlink 및 workspace 밖 파일의 open/save 정책
-4. v1에 직접 LSP를 포함할지 v1.1로 분리할지
+1. Monaco를 platform WebView에 직접 임베드하고 GtkSourceView를 함께 유지하지 않는다.
+2. build된 editor asset은 앱에 포함하고 version이 있는 Rust-WebView message로 문서 상태를 교환한다.
+3. Rust `DocumentService`만 파일을 읽고 쓰며 workspace 경계와 path를 검증한다.
+4. 직접 LSP와 Problems UI는 핵심 에디터와 분리해 선택적 v1.1로 둔다.
+5. workspace 일괄 바꾸기와 별도 Workspace Tools panel은 단순 pane 편집 UX의 v1 범위에서 제외한다.
 
-ADR가 확정되기 전에도 Phase 0 spike는 진행할 수 있지만, Phase 1 이후의 영구 API와 저장 형식은 먼저 고정하지 않는다.
+향후 후속 기능은 현재 Editor protocol과 문서 수명주기를 깨뜨리지 않는 별도 결정으로 추가한다.
 
 ## 참고 자료
 
