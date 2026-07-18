@@ -297,9 +297,12 @@ impl EditorPane {
     }
 
     pub fn open_file(&self, path: &Path) -> Result<(), String> {
-        let message = self.host.open_document(path)?;
+        let messages = self.host.open_document(path)?;
         self.install_file_monitor(path);
-        self.send(message).map_err(|error| error.to_string())
+        for message in messages {
+            self.send(message).map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 
     pub fn dirty_document_paths(&self) -> Vec<PathBuf> {
@@ -314,6 +317,10 @@ impl EditorPane {
             }
         }
         result
+    }
+
+    pub fn discard_all_dirty(&self) {
+        self.host.discard_all_dirty();
     }
 
     fn install_file_monitor(&self, path: &Path) {

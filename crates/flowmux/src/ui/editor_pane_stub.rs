@@ -60,6 +60,8 @@ impl EditorPane {
         Ok(())
     }
 
+    pub fn discard_all_dirty(&self) {}
+
     pub fn send(&self, message: HostMessage) -> Result<(), ProtocolError> {
         flowmux_editor::serialize_host_message("unavailable", &message).map(|_| ())
     }

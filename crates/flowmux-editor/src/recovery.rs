@@ -13,11 +13,27 @@ use thiserror::Error;
 pub const RECOVERY_FORMAT_VERSION: u16 = 1;
 const MAX_RECOVERY_FILE_BYTES: u64 = DEFAULT_MAX_DOCUMENT_BYTES + 1024 * 1024;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RecoveryDiskState {
     Unchanged,
     Changed,
     Deleted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecoveryOperation {
+    Write(RecoverySnapshot),
+    Remove(PathBuf),
+}
+
+impl RecoveryOperation {
+    pub fn identity_path(&self) -> &Path {
+        match self {
+            Self::Write(snapshot) => &snapshot.identity_path,
+            Self::Remove(path) => path,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -214,6 +230,13 @@ impl RecoveryStore {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(source) => Err(recovery_io("remove snapshot", path, source)),
+        }
+    }
+
+    pub fn apply(&self, operation: &RecoveryOperation) -> Result<(), RecoveryError> {
+        match operation {
+            RecoveryOperation::Write(snapshot) => self.write(snapshot),
+            RecoveryOperation::Remove(path) => self.remove(path),
         }
     }
 

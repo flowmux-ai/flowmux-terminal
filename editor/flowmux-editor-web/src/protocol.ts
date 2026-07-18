@@ -18,6 +18,7 @@ export interface DocumentPayload {
 }
 
 export type DocumentDiskStatus = "unchanged" | "modified" | "deleted";
+export type RecoveryDiskState = "unchanged" | "changed" | "deleted";
 
 interface HostMessageBase {
   protocolVersion: typeof PROTOCOL_VERSION;
@@ -57,6 +58,12 @@ export type HostMessage =
       documentId: string;
       documentVersion: number;
       status: DocumentDiskStatus;
+    })
+  | (HostMessageBase & {
+      type: "recovery_available";
+      documentId: string;
+      documentVersion: number;
+      diskState: RecoveryDiskState;
     });
 
 interface EditorMessageBase {
@@ -95,6 +102,12 @@ export type EditorMessage =
       type: "discard_close_requested";
       documentId: string;
       documentVersion: number;
+    })
+  | (EditorMessageBase & {
+      type: "recovery_decision";
+      documentId: string;
+      documentVersion: number;
+      choice: "restore" | "discard";
     });
 
 export interface DocumentEditAdvance {
@@ -158,6 +171,14 @@ export function isHostMessage(value: unknown): value is HostMessage {
         typeof value.documentId === "string" &&
         isVersion(value.documentVersion) &&
         (value.status === "unchanged" || value.status === "modified" || value.status === "deleted")
+      );
+    case "recovery_available":
+      return (
+        typeof value.documentId === "string" &&
+        isVersion(value.documentVersion) &&
+        (value.diskState === "unchanged" ||
+          value.diskState === "changed" ||
+          value.diskState === "deleted")
       );
     default:
       return false;

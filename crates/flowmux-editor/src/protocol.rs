@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Versioned messages exchanged with the editor WebView.
 
-use crate::DEFAULT_MAX_DOCUMENT_BYTES;
+use crate::{RecoveryDiskState, DEFAULT_MAX_DOCUMENT_BYTES};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -93,6 +93,18 @@ pub enum HostMessage {
         document_version: u64,
         status: DocumentDiskStatus,
     },
+    RecoveryAvailable {
+        document_id: String,
+        document_version: u64,
+        disk_state: RecoveryDiskState,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryChoice {
+    Restore,
+    Discard,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,6 +139,11 @@ pub enum EditorMessage {
     DiscardCloseRequested {
         document_id: String,
         document_version: u64,
+    },
+    RecoveryDecision {
+        document_id: String,
+        document_version: u64,
+        choice: RecoveryChoice,
     },
 }
 
@@ -214,7 +231,8 @@ fn validate_editor_message(message: &EditorMessage) -> Result<(), ProtocolError>
         EditorMessage::EditorReady => Ok(()),
         EditorMessage::ActiveDocumentChanged { document_id, .. }
         | EditorMessage::CloseRequested { document_id, .. }
-        | EditorMessage::DiscardCloseRequested { document_id, .. } => {
+        | EditorMessage::DiscardCloseRequested { document_id, .. }
+        | EditorMessage::RecoveryDecision { document_id, .. } => {
             validate_identifier("document ID", document_id)
         }
         EditorMessage::DocumentChanged {
@@ -256,6 +274,9 @@ fn validate_host_message(message: &HostMessage) -> Result<(), ProtocolError> {
         | HostMessage::SaveCompleted { document_id, .. }
         | HostMessage::SaveFailed { document_id, .. }
         | HostMessage::DocumentDiskStatus { document_id, .. } => {
+            validate_identifier("document ID", document_id)
+        }
+        HostMessage::RecoveryAvailable { document_id, .. } => {
             validate_identifier("document ID", document_id)
         }
     }
@@ -396,6 +417,40 @@ mod tests {
 
         assert_eq!(value["type"], "document_disk_status");
         assert_eq!(value["status"], "deleted");
+    }
+
+    #[test]
+    fn recovery_messages_are_versioned_and_explicit() {
+        let encoded = serialize_host_message(
+            "surface-1",
+            &HostMessage::RecoveryAvailable {
+                document_id: "document-1".into(),
+                document_version: 3,
+                disk_state: RecoveryDiskState::Changed,
+            },
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(value["type"], "recovery_available");
+        assert_eq!(value["diskState"], "changed");
+
+        let decision = serde_json::json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "surfaceId": "surface-1",
+            "type": "recovery_decision",
+            "documentId": "document-1",
+            "documentVersion": 3,
+            "choice": "restore"
+        })
+        .to_string();
+        assert_eq!(
+            parse_editor_message(&decision).unwrap().1,
+            EditorMessage::RecoveryDecision {
+                document_id: "document-1".into(),
+                document_version: 3,
+                choice: RecoveryChoice::Restore,
+            }
+        );
     }
 
     #[test]

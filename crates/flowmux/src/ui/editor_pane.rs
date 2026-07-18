@@ -4,10 +4,16 @@
 use flowmux_core::SurfaceId;
 use flowmux_editor::{
     javascript_for_host_message, parse_editor_message, EditorMessage, EditorSession, HostMessage,
-    ProtocolError,
+    ProtocolError, RecoveryOperation, RecoveryStore,
 };
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::sync::mpsc::{self, Sender};
+use std::time::Duration;
+
+const RECOVERY_DEBOUNCE: Duration = Duration::from_millis(350);
 
 #[derive(Default)]
 pub(super) struct EditorBridgeReceive {
@@ -90,17 +96,37 @@ impl EditorBridgeState {
 
 pub(super) struct EditorHostState {
     session: RefCell<Result<EditorSession, String>>,
+    recovery_sender: Option<Sender<RecoveryOperation>>,
+    pending_recovery: RefCell<HashMap<PathBuf, RecoveryOperation>>,
+    recovery_generation: Cell<u64>,
 }
 
 impl EditorHostState {
     pub(super) fn new(workspace_root: &Path) -> Self {
-        let session = EditorSession::new(workspace_root).map_err(|error| {
+        let recovery_store = flowmux_config::paths::state_dir().and_then(|state_root| {
+            match RecoveryStore::new(state_root, workspace_root) {
+                Ok(store) => Some(store),
+                Err(error) => {
+                    tracing::warn!(%error, "editor recovery store is unavailable");
+                    None
+                }
+            }
+        });
+        let session = match &recovery_store {
+            Some(store) => EditorSession::with_recovery_store(workspace_root, store.clone()),
+            None => EditorSession::new(workspace_root),
+        }
+        .map_err(|error| {
             let error = error.to_string();
             tracing::error!(%error, "failed to initialize editor document session");
             error
         });
+        let recovery_sender = recovery_store.and_then(start_recovery_worker);
         Self {
             session: RefCell::new(session),
+            recovery_sender,
+            pending_recovery: RefCell::new(HashMap::new()),
+            recovery_generation: Cell::new(0),
         }
     }
 
@@ -115,13 +141,15 @@ impl EditorHostState {
         }
     }
 
-    pub(super) fn open_document(&self, path: &Path) -> Result<HostMessage, String> {
-        match &mut *self.session.borrow_mut() {
+    pub(super) fn open_document(&self, path: &Path) -> Result<Vec<HostMessage>, String> {
+        let result = match &mut *self.session.borrow_mut() {
             Ok(session) => session
                 .open_document(path)
                 .map_err(|error| error.to_string()),
             Err(error) => Err(error.clone()),
-        }
+        };
+        self.stage_recovery_operations();
+        result
     }
 
     pub(super) fn dirty_document_paths(&self) -> Vec<PathBuf> {
@@ -132,13 +160,22 @@ impl EditorHostState {
     }
 
     pub(super) fn save_all_dirty(&self) -> (Vec<HostMessage>, Result<(), String>) {
-        match &mut *self.session.borrow_mut() {
+        let result = match &mut *self.session.borrow_mut() {
             Ok(session) => {
                 let (messages, result) = session.save_all_dirty();
                 (messages, result.map_err(|error| error.to_string()))
             }
             Err(error) => (Vec::new(), Err(error.clone())),
+        };
+        self.stage_recovery_operations();
+        result
+    }
+
+    pub(super) fn discard_all_dirty(&self) {
+        if let Ok(session) = &mut *self.session.borrow_mut() {
+            session.discard_all_dirty();
         }
+        self.stage_recovery_operations();
     }
 
     fn handle(&self, message: EditorMessage) -> Vec<HostMessage> {
@@ -154,6 +191,59 @@ impl EditorHostState {
             Err(error) => {
                 tracing::warn!(%error, "editor document message was rejected");
                 Vec::new()
+            }
+        }
+    }
+
+    fn stage_recovery_operations(&self) -> bool {
+        let operations = match &mut *self.session.borrow_mut() {
+            Ok(session) => session.take_recovery_operations(),
+            Err(_) => Vec::new(),
+        };
+        if operations.is_empty() {
+            return false;
+        }
+
+        let Some(sender) = &self.recovery_sender else {
+            return false;
+        };
+        let mut pending = self.pending_recovery.borrow_mut();
+        let mut has_write = false;
+        for operation in operations {
+            let path = operation.identity_path().to_path_buf();
+            match operation {
+                RecoveryOperation::Write(_) => {
+                    pending.insert(path, operation);
+                    has_write = true;
+                }
+                RecoveryOperation::Remove(_) => {
+                    pending.remove(&path);
+                    if sender.send(operation).is_err() {
+                        tracing::warn!("editor recovery worker stopped unexpectedly");
+                    }
+                }
+            }
+        }
+        if has_write {
+            self.recovery_generation
+                .set(self.recovery_generation.get().wrapping_add(1));
+        }
+        has_write
+    }
+
+    fn flush_recovery(&self) {
+        let Some(sender) = &self.recovery_sender else {
+            return;
+        };
+        for operation in self
+            .pending_recovery
+            .borrow_mut()
+            .drain()
+            .map(|(_, value)| value)
+        {
+            if sender.send(operation).is_err() {
+                tracing::warn!("editor recovery worker stopped unexpectedly");
+                break;
             }
         }
     }
@@ -196,15 +286,51 @@ pub(super) fn queue_host_messages(
 
 pub(super) fn handle_bridge_message(
     bridge: &EditorBridgeState,
-    host: &EditorHostState,
+    host: &Rc<EditorHostState>,
     raw: &str,
 ) -> Vec<String> {
     let received = bridge.receive(raw);
     let mut scripts = received.scripts;
     if let Some(message) = received.message {
         scripts.extend(queue_host_messages(bridge, host.handle(message)));
+        if host.stage_recovery_operations() {
+            schedule_recovery_flush(host);
+        }
     }
     scripts
+}
+
+fn schedule_recovery_flush(host: &Rc<EditorHostState>) {
+    let expected_generation = host.recovery_generation.get();
+    let host = Rc::downgrade(host);
+    gtk::glib::timeout_add_local_once(RECOVERY_DEBOUNCE, move || {
+        let Some(host) = host.upgrade() else {
+            return;
+        };
+        if host.recovery_generation.get() == expected_generation {
+            host.flush_recovery();
+        }
+    });
+}
+
+fn start_recovery_worker(store: RecoveryStore) -> Option<Sender<RecoveryOperation>> {
+    let (sender, receiver) = mpsc::channel::<RecoveryOperation>();
+    let result = std::thread::Builder::new()
+        .name("flowmux-editor-recovery".into())
+        .spawn(move || {
+            for operation in receiver {
+                if let Err(error) = store.apply(&operation) {
+                    tracing::warn!(%error, "failed to update editor recovery snapshot");
+                }
+            }
+        });
+    match result {
+        Ok(_) => Some(sender),
+        Err(error) => {
+            tracing::warn!(%error, "failed to start editor recovery worker");
+            None
+        }
+    }
 }
 
 pub(super) fn is_allowed_editor_navigation(url: &str, allowed_prefix: &str) -> bool {

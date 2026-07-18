@@ -26,6 +26,19 @@
           <button id="close-dialog-save" class="suggested" type="button">Save</button>
         </div>
       </dialog>
+      <dialog id="recovery-dialog" class="close-dialog" aria-labelledby="recovery-dialog-title">
+        <h2 id="recovery-dialog-title">Recover unsaved changes?</h2>
+        <p>
+          A recovery copy is available for <span id="recovery-dialog-document"></span>.
+          <span id="recovery-dialog-warning"></span>
+        </p>
+        <div class="close-dialog-actions">
+          <button id="recovery-dialog-discard" class="destructive" type="button">
+            Discard Recovery
+          </button>
+          <button id="recovery-dialog-restore" class="suggested" type="button">Restore</button>
+        </div>
+      </dialog>
     </main>
     <script type="module" src="./main.js"></script>
   </body>

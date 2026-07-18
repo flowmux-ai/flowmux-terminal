@@ -91,6 +91,22 @@ test("accepts only known document disk states", () => {
   assert.equal(isHostMessage({ ...message, status: "unknown" }), false);
 });
 
+test("accepts only complete recovery proposals", () => {
+  const message = {
+    protocolVersion: 1,
+    surfaceId: "surface-1",
+    type: "recovery_available",
+    documentId: "document-1",
+    documentVersion: 2,
+    diskState: "unchanged",
+  };
+  assert.equal(isHostMessage(message), true);
+  assert.equal(isHostMessage({ ...message, diskState: "changed" }), true);
+  assert.equal(isHostMessage({ ...message, diskState: "deleted" }), true);
+  assert.equal(isHostMessage({ ...message, diskState: "unknown" }), false);
+  assert.equal(isHostMessage({ ...message, documentVersion: -1 }), false);
+});
+
 test("advances the local version while sending the host's current base version", () => {
   assert.deepEqual(advanceDocumentEdit(7, 3), {
     baseVersion: 7,

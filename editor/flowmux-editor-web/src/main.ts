@@ -67,6 +67,11 @@ const closeDialogDocument = requiredElement("close-dialog-document");
 const closeDialogCancel = requiredButton("close-dialog-cancel");
 const closeDialogDiscard = requiredButton("close-dialog-discard");
 const closeDialogSave = requiredButton("close-dialog-save");
+const recoveryDialog = requiredDialog("recovery-dialog");
+const recoveryDialogDocument = requiredElement("recovery-dialog-document");
+const recoveryDialogWarning = requiredElement("recovery-dialog-warning");
+const recoveryDialogDiscard = requiredButton("recovery-dialog-discard");
+const recoveryDialogRestore = requiredButton("recovery-dialog-restore");
 
 let surfaceId = new URLSearchParams(window.location.search).get("surface") ?? "unbound";
 let activeDocumentId: string | null = null;
@@ -75,6 +80,8 @@ let wordWrapEnabled = false;
 let minimapEnabled = false;
 let closeDialogDocumentId: string | null = null;
 let closeAfterSaveDocumentId: string | null = null;
+let recoveryDialogDocumentId: string | null = null;
+let recoveryDialogDocumentVersion = 0;
 const documents = new Map<string, OpenDocument>();
 
 monaco.editor.defineTheme("flowmux-dark", {
@@ -116,6 +123,9 @@ closeDialog.addEventListener("cancel", (event) => {
   event.preventDefault();
   hideCloseDialog();
 });
+recoveryDialogDiscard.addEventListener("click", () => resolveRecovery("discard"));
+recoveryDialogRestore.addEventListener("click", () => resolveRecovery("restore"));
+recoveryDialog.addEventListener("cancel", (event) => event.preventDefault());
 
 editor.addAction({
   id: "flowmux.save",
@@ -198,6 +208,7 @@ function handleHostMessage(message: HostMessage): void {
   switch (message.type) {
     case "initialize_editor":
       resetCloseDialog();
+      resetRecoveryDialog();
       for (const document of [...documents.values()]) {
         document.model.dispose();
       }
@@ -256,6 +267,9 @@ function handleHostMessage(message: HostMessage): void {
       }
       break;
     }
+    case "recovery_available":
+      showRecoveryDialog(message.documentId, message.documentVersion, message.diskState);
+      break;
   }
 }
 
@@ -334,6 +348,9 @@ function closeDocument(documentId: string): void {
   const index = ids.indexOf(documentId);
   if (closeDialogDocumentId === documentId || closeAfterSaveDocumentId === documentId) {
     resetCloseDialog();
+  }
+  if (recoveryDialogDocumentId === documentId) {
+    resetRecoveryDialog();
   }
   document.model.dispose();
   documents.delete(documentId);
@@ -416,6 +433,54 @@ function discardCloseDialogDocument(): void {
     documentId: document.payload.id,
     documentVersion: document.payload.version,
   });
+}
+
+function showRecoveryDialog(
+  documentId: string,
+  documentVersion: number,
+  diskState: "unchanged" | "changed" | "deleted",
+): void {
+  const document = documents.get(documentId);
+  if (document === undefined || document.payload.version !== documentVersion) {
+    return;
+  }
+  recoveryDialogDocumentId = documentId;
+  recoveryDialogDocumentVersion = documentVersion;
+  recoveryDialogDocument.textContent = `“${document.payload.name}”`;
+  recoveryDialogWarning.textContent =
+    diskState === "unchanged"
+      ? ""
+      : "The file also changed on disk, so restoring it will require resolving a conflict before saving.";
+  if (!recoveryDialog.open) {
+    recoveryDialog.showModal();
+  }
+  recoveryDialogRestore.focus();
+}
+
+function resolveRecovery(choice: "restore" | "discard"): void {
+  if (recoveryDialogDocumentId === null) {
+    return;
+  }
+  const documentId = recoveryDialogDocumentId;
+  const documentVersion = recoveryDialogDocumentVersion;
+  resetRecoveryDialog();
+  postToHost({
+    protocolVersion: PROTOCOL_VERSION,
+    surfaceId,
+    type: "recovery_decision",
+    documentId,
+    documentVersion,
+    choice,
+  });
+}
+
+function resetRecoveryDialog(): void {
+  recoveryDialogDocumentId = null;
+  recoveryDialogDocumentVersion = 0;
+  if (recoveryDialog.open) {
+    recoveryDialog.close();
+  }
+  editor.focus();
 }
 
 function requestSave(documentId: string | null = activeDocumentId): void {

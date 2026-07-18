@@ -3,7 +3,8 @@
 
 use crate::{
     DiskStatus, DocumentDiskStatus, DocumentError, DocumentId, DocumentPayload, DocumentService,
-    DocumentSnapshot, EditorMessage, HostMessage, LineEnding, TextDocumentEncoding,
+    DocumentSnapshot, EditorMessage, HostMessage, LineEnding, RecoveryChoice, RecoveryDiskState,
+    RecoveryOperation, RecoverySnapshot, RecoveryStore, TextDocumentEncoding,
     TextDocumentLineEnding, TextEncoding,
 };
 use std::collections::HashMap;
@@ -31,6 +32,10 @@ pub struct EditorSession {
     open_order: Vec<DocumentId>,
     active: Option<DocumentId>,
     reported_disk_status: HashMap<DocumentId, DiskStatus>,
+    recovery_store: Option<RecoveryStore>,
+    pending_recoveries: HashMap<DocumentId, (RecoverySnapshot, RecoveryDiskState)>,
+    recovery_base_hashes: HashMap<DocumentId, String>,
+    recovery_operations: Vec<RecoveryOperation>,
 }
 
 impl EditorSession {
@@ -41,7 +46,24 @@ impl EditorSession {
             open_order: Vec::new(),
             active: None,
             reported_disk_status: HashMap::new(),
+            recovery_store: None,
+            pending_recoveries: HashMap::new(),
+            recovery_base_hashes: HashMap::new(),
+            recovery_operations: Vec::new(),
         })
+    }
+
+    pub fn with_recovery_store(
+        workspace_root: impl AsRef<Path>,
+        recovery_store: RecoveryStore,
+    ) -> Result<Self, DocumentError> {
+        let mut session = Self::new(workspace_root)?;
+        session.recovery_store = Some(recovery_store);
+        Ok(session)
+    }
+
+    pub fn take_recovery_operations(&mut self) -> Vec<RecoveryOperation> {
+        std::mem::take(&mut self.recovery_operations)
     }
 
     pub fn initialize_message(&self, workspace_name: String) -> HostMessage {
@@ -88,6 +110,7 @@ impl EditorSession {
             match self.documents.save(id, snapshot.version) {
                 Ok(saved) => {
                     self.reported_disk_status.insert(id, DiskStatus::Unchanged);
+                    self.queue_recovery_removal(id, &saved.identity_path);
                     messages.push(HostMessage::ReplaceDocument {
                         document: self.payload(saved),
                     });
@@ -98,7 +121,38 @@ impl EditorSession {
         (messages, Ok(()))
     }
 
-    pub fn open_document(&mut self, path: impl AsRef<Path>) -> Result<HostMessage, DocumentError> {
+    pub fn discard_all_dirty(&mut self) {
+        let dirty_ids: Vec<DocumentId> = self
+            .open_order
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.documents
+                    .snapshot(*id)
+                    .is_ok_and(|snapshot| snapshot.is_dirty())
+            })
+            .collect();
+        for id in dirty_ids {
+            let Ok(snapshot) = self.documents.snapshot(id) else {
+                continue;
+            };
+            if self.documents.discard(id).is_err() {
+                continue;
+            }
+            self.protocol_ids.retain(|_, mapped| *mapped != id);
+            self.open_order.retain(|candidate| *candidate != id);
+            self.reported_disk_status.remove(&id);
+            self.queue_recovery_removal(id, &snapshot.identity_path);
+        }
+        if self.active.is_some_and(|id| !self.open_order.contains(&id)) {
+            self.active = self.open_order.last().copied();
+        }
+    }
+
+    pub fn open_document(
+        &mut self,
+        path: impl AsRef<Path>,
+    ) -> Result<Vec<HostMessage>, DocumentError> {
         let opened = self.documents.open(path)?;
         let id = opened.document.id;
         let document_id = protocol_id(id);
@@ -112,15 +166,32 @@ impl EditorSession {
         self.active = Some(id);
 
         if opened.already_open {
-            Ok(HostMessage::SetActiveDocument {
+            return Ok(vec![HostMessage::SetActiveDocument {
                 document_id,
                 document_version: opened.document.version,
-            })
-        } else {
-            Ok(HostMessage::OpenDocument {
-                document: self.payload(opened.document),
-            })
+            }]);
         }
+
+        let mut messages = vec![HostMessage::OpenDocument {
+            document: self.payload(opened.document.clone()),
+        }];
+        if let Some(store) = &self.recovery_store {
+            if let Ok(Some((recovery, disk_state))) = store.read(&opened.document.identity_path) {
+                if recovery.content == opened.document.text {
+                    self.recovery_operations.push(RecoveryOperation::Remove(
+                        opened.document.identity_path.clone(),
+                    ));
+                } else {
+                    messages.push(HostMessage::RecoveryAvailable {
+                        document_id: document_id.clone(),
+                        document_version: opened.document.version,
+                        disk_state,
+                    });
+                    self.pending_recoveries.insert(id, (recovery, disk_state));
+                }
+            }
+        }
+        Ok(messages)
     }
 
     pub fn poll_external_changes(&mut self) -> Result<Vec<HostMessage>, EditorSessionError> {
@@ -178,6 +249,7 @@ impl EditorSession {
             } => {
                 let id = self.checked_document(&document_id, document_version)?;
                 self.documents.update_text(id, document_version, content)?;
+                self.queue_recovery_write(id)?;
                 Ok(Vec::new())
             }
             EditorMessage::SaveRequested {
@@ -200,6 +272,11 @@ impl EditorSession {
                 document_id,
                 document_version,
             } => self.close_document(document_id, document_version, true),
+            EditorMessage::RecoveryDecision {
+                document_id,
+                document_version,
+                choice,
+            } => self.recovery_decision(document_id, document_version, choice),
         }
     }
 
@@ -210,6 +287,7 @@ impl EditorSession {
         discard: bool,
     ) -> Result<Vec<HostMessage>, EditorSessionError> {
         let id = self.checked_document(&document_id, document_version)?;
+        let identity_path = self.documents.snapshot(id)?.identity_path;
         if discard {
             self.documents.discard(id)?;
         } else {
@@ -218,6 +296,7 @@ impl EditorSession {
         self.protocol_ids.remove(&document_id);
         self.open_order.retain(|candidate| *candidate != id);
         self.reported_disk_status.remove(&id);
+        self.queue_recovery_removal(id, &identity_path);
         if self.active == Some(id) {
             self.active = self.open_order.last().copied();
         }
@@ -236,6 +315,12 @@ impl EditorSession {
     ) -> HostMessage {
         let result: Result<DocumentSnapshot, EditorSessionError> = (|| {
             let id = self.checked_document(&document_id, document_version)?;
+            if self.recovery_base_hashes.contains_key(&id) {
+                return Err(DocumentError::ExternalChange {
+                    path: self.documents.snapshot(id)?.display_path,
+                }
+                .into());
+            }
             let snapshot = self.documents.snapshot(id)?;
             let version = if snapshot.text == content {
                 snapshot.version
@@ -244,7 +329,9 @@ impl EditorSession {
                     .update_text(id, document_version, content)?
                     .version
             };
-            Ok(self.documents.save(id, version)?)
+            let saved = self.documents.save(id, version)?;
+            self.queue_recovery_removal(id, &saved.identity_path);
+            Ok(saved)
         })();
 
         match result {
@@ -259,6 +346,59 @@ impl EditorSession {
                 change_sequence,
                 reason: error.to_string(),
             },
+        }
+    }
+
+    fn recovery_decision(
+        &mut self,
+        document_id: String,
+        document_version: u64,
+        choice: RecoveryChoice,
+    ) -> Result<Vec<HostMessage>, EditorSessionError> {
+        let id = self.checked_document(&document_id, document_version)?;
+        let Some((mut recovery, disk_state)) = self.pending_recoveries.remove(&id) else {
+            return Ok(Vec::new());
+        };
+        if choice == RecoveryChoice::Discard {
+            self.recovery_operations
+                .push(RecoveryOperation::Remove(recovery.identity_path));
+            return Ok(Vec::new());
+        }
+
+        let restored =
+            self.documents
+                .update_text(id, document_version, recovery.content.clone())?;
+        recovery.document_version = restored.version;
+        if disk_state != RecoveryDiskState::Unchanged {
+            self.recovery_base_hashes
+                .insert(id, recovery.base_hash.clone());
+        }
+        self.recovery_operations
+            .push(RecoveryOperation::Write(recovery));
+        Ok(vec![HostMessage::ReplaceDocument {
+            document: self.payload(restored),
+        }])
+    }
+
+    fn queue_recovery_write(&mut self, id: DocumentId) -> Result<(), DocumentError> {
+        let Some(store) = &self.recovery_store else {
+            return Ok(());
+        };
+        let mut recovery = self.documents.recovery_snapshot(id, store)?;
+        if let Some(base_hash) = self.recovery_base_hashes.get(&id) {
+            recovery.base_hash.clone_from(base_hash);
+        }
+        self.recovery_operations
+            .push(RecoveryOperation::Write(recovery));
+        Ok(())
+    }
+
+    fn queue_recovery_removal(&mut self, id: DocumentId, identity_path: &Path) {
+        self.pending_recoveries.remove(&id);
+        self.recovery_base_hashes.remove(&id);
+        if self.recovery_store.is_some() {
+            self.recovery_operations
+                .push(RecoveryOperation::Remove(identity_path.to_path_buf()));
         }
     }
 
@@ -300,10 +440,11 @@ impl EditorSession {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| relative_path.clone());
-        let external_change = !matches!(
-            self.documents.disk_status(snapshot.id),
-            Ok(DiskStatus::Unchanged)
-        );
+        let external_change = self.recovery_base_hashes.contains_key(&snapshot.id)
+            || !matches!(
+                self.documents.disk_status(snapshot.id),
+                Ok(DiskStatus::Unchanged)
+            );
         let dirty = snapshot.is_dirty();
         let encoding = match snapshot.encoding {
             TextEncoding::Utf8 => TextDocumentEncoding::Utf8,
@@ -349,11 +490,17 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
-    fn open_payload(message: HostMessage) -> DocumentPayload {
-        let HostMessage::OpenDocument { document } = message else {
+    fn open_payload(messages: Vec<HostMessage>) -> DocumentPayload {
+        let [HostMessage::OpenDocument { document }] = messages.as_slice() else {
             panic!("expected a newly opened document");
         };
-        document
+        document.clone()
+    }
+
+    fn apply_recovery_operations(session: &mut EditorSession, store: &RecoveryStore) {
+        for operation in session.take_recovery_operations() {
+            store.apply(&operation).unwrap();
+        }
     }
 
     #[test]
@@ -370,8 +517,8 @@ mod tests {
         assert!(!document.dirty);
 
         assert!(matches!(
-            session.open_document(&path).unwrap(),
-            HostMessage::SetActiveDocument { document_id, .. } if document_id == document.id
+            session.open_document(&path).unwrap().as_slice(),
+            [HostMessage::SetActiveDocument { document_id, .. }] if document_id == &document.id
         ));
         assert!(session.contains_document(&path));
         assert!(!session.contains_document(workspace.path().join("missing.rs")));
@@ -500,6 +647,36 @@ mod tests {
         assert_eq!(fs::read_to_string(&first).unwrap(), "editor first.txt\n");
         assert_eq!(fs::read_to_string(&conflict).unwrap(), "external 日本語\n");
         assert_eq!(session.dirty_document_paths(), vec![conflict]);
+    }
+
+    #[test]
+    fn close_guard_discard_removes_dirty_recovery_without_saving() {
+        let workspace = tempdir().unwrap();
+        let state = tempdir().unwrap();
+        let path = workspace.path().join("버리기-日本語.txt");
+        fs::write(&path, "disk\n").unwrap();
+        let identity_path = fs::canonicalize(&path).unwrap();
+        let store = RecoveryStore::new(state.path(), workspace.path()).unwrap();
+        let mut session =
+            EditorSession::with_recovery_store(workspace.path(), store.clone()).unwrap();
+        let document = open_payload(session.open_document(&path).unwrap());
+        session
+            .handle_editor_message(EditorMessage::DocumentChanged {
+                document_id: document.id,
+                document_version: document.version,
+                change_sequence: 1,
+                content: "discard me\n".into(),
+            })
+            .unwrap();
+        apply_recovery_operations(&mut session, &store);
+        assert!(store.read(&identity_path).unwrap().is_some());
+
+        session.discard_all_dirty();
+        apply_recovery_operations(&mut session, &store);
+
+        assert!(session.dirty_document_paths().is_empty());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "disk\n");
+        assert!(store.read(identity_path).unwrap().is_none());
     }
 
     #[test]
@@ -702,5 +879,177 @@ mod tests {
             [HostMessage::ReplaceDocument { document: replacement }]
                 if replacement.id == document.id && replacement.content == "복구됨 日本語 🙂\n"
         ));
+    }
+
+    #[test]
+    fn dirty_multilingual_document_is_offered_and_restored_after_restart() {
+        let workspace = tempdir().unwrap();
+        let state = tempdir().unwrap();
+        let path = workspace.path().join("복구-日本語-🙂.txt");
+        fs::write(&path, "원본\n").unwrap();
+        let store = RecoveryStore::new(state.path(), workspace.path()).unwrap();
+        let mut first =
+            EditorSession::with_recovery_store(workspace.path(), store.clone()).unwrap();
+        let document = open_payload(first.open_document(&path).unwrap());
+        first
+            .handle_editor_message(EditorMessage::DocumentChanged {
+                document_id: document.id,
+                document_version: document.version,
+                change_sequence: 1,
+                content: "복구됨\n日本語 🙂\n".into(),
+            })
+            .unwrap();
+        apply_recovery_operations(&mut first, &store);
+
+        let mut restarted =
+            EditorSession::with_recovery_store(workspace.path(), store.clone()).unwrap();
+        let messages = restarted.open_document(&path).unwrap();
+        let [HostMessage::OpenDocument { document }, HostMessage::RecoveryAvailable {
+            document_id,
+            document_version,
+            disk_state,
+        }] = messages.as_slice()
+        else {
+            panic!("expected the document and its recovery proposal");
+        };
+        assert_eq!(document.content, "원본\n");
+        assert_eq!(*disk_state, RecoveryDiskState::Unchanged);
+
+        let restored = restarted
+            .handle_editor_message(EditorMessage::RecoveryDecision {
+                document_id: document_id.clone(),
+                document_version: *document_version,
+                choice: RecoveryChoice::Restore,
+            })
+            .unwrap();
+        assert!(matches!(
+            restored.as_slice(),
+            [HostMessage::ReplaceDocument { document }]
+                if document.content == "복구됨\n日本語 🙂\n" && document.dirty
+        ));
+        let saved = restarted
+            .handle_editor_message(EditorMessage::SaveRequested {
+                document_id: document_id.clone(),
+                document_version: document_version + 1,
+                change_sequence: 0,
+                content: "복구됨\n日本語 🙂\n".into(),
+            })
+            .unwrap();
+        assert!(matches!(
+            saved.as_slice(),
+            [HostMessage::SaveCompleted { .. }]
+        ));
+        apply_recovery_operations(&mut restarted, &store);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "복구됨\n日本語 🙂\n");
+        assert!(store
+            .read(fs::canonicalize(&path).unwrap())
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn changed_original_blocks_saving_restored_recovery() {
+        let workspace = tempdir().unwrap();
+        let state = tempdir().unwrap();
+        let path = workspace.path().join("충돌.txt");
+        fs::write(&path, "원본\n").unwrap();
+        let store = RecoveryStore::new(state.path(), workspace.path()).unwrap();
+        let mut first =
+            EditorSession::with_recovery_store(workspace.path(), store.clone()).unwrap();
+        let document = open_payload(first.open_document(&path).unwrap());
+        first
+            .handle_editor_message(EditorMessage::DocumentChanged {
+                document_id: document.id,
+                document_version: document.version,
+                change_sequence: 1,
+                content: "편집 복구본\n".into(),
+            })
+            .unwrap();
+        apply_recovery_operations(&mut first, &store);
+        fs::write(&path, "외부 변경\n").unwrap();
+
+        let mut restarted =
+            EditorSession::with_recovery_store(workspace.path(), store.clone()).unwrap();
+        let messages = restarted.open_document(&path).unwrap();
+        let HostMessage::RecoveryAvailable {
+            document_id,
+            document_version,
+            disk_state,
+            ..
+        } = &messages[1]
+        else {
+            panic!("expected a recovery conflict");
+        };
+        assert_eq!(*disk_state, RecoveryDiskState::Changed);
+        let restored = restarted
+            .handle_editor_message(EditorMessage::RecoveryDecision {
+                document_id: document_id.clone(),
+                document_version: *document_version,
+                choice: RecoveryChoice::Restore,
+            })
+            .unwrap();
+        assert!(matches!(
+            restored.as_slice(),
+            [HostMessage::ReplaceDocument { document }]
+                if document.content == "편집 복구본\n" && document.external_change
+        ));
+        let response = restarted
+            .handle_editor_message(EditorMessage::SaveRequested {
+                document_id: document_id.clone(),
+                document_version: document_version + 1,
+                change_sequence: 0,
+                content: "편집 복구본\n".into(),
+            })
+            .unwrap();
+        assert!(matches!(
+            response.as_slice(),
+            [HostMessage::SaveFailed { .. }]
+        ));
+        assert_eq!(fs::read_to_string(path).unwrap(), "외부 변경\n");
+    }
+
+    #[test]
+    fn discarding_recovery_keeps_disk_and_removes_snapshot() {
+        let workspace = tempdir().unwrap();
+        let state = tempdir().unwrap();
+        let path = workspace.path().join("discard.txt");
+        fs::write(&path, "disk\n").unwrap();
+        let store = RecoveryStore::new(state.path(), workspace.path()).unwrap();
+        let recovery = RecoverySnapshot::new(
+            store.workspace_id().to_string(),
+            fs::canonicalize(&path).unwrap(),
+            b"disk\n",
+            2,
+            "unsaved\n".into(),
+            TextEncoding::Utf8,
+            LineEnding::Lf,
+        );
+        store.write(&recovery).unwrap();
+        let mut session =
+            EditorSession::with_recovery_store(workspace.path(), store.clone()).unwrap();
+        let messages = session.open_document(&path).unwrap();
+        let HostMessage::RecoveryAvailable {
+            document_id,
+            document_version,
+            ..
+        } = &messages[1]
+        else {
+            panic!("expected a recovery proposal");
+        };
+
+        assert!(session
+            .handle_editor_message(EditorMessage::RecoveryDecision {
+                document_id: document_id.clone(),
+                document_version: *document_version,
+                choice: RecoveryChoice::Discard,
+            })
+            .unwrap()
+            .is_empty());
+        apply_recovery_operations(&mut session, &store);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "disk\n");
+        assert!(store
+            .read(fs::canonicalize(path).unwrap())
+            .unwrap()
+            .is_none());
     }
 }

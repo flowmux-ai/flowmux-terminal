@@ -408,7 +408,12 @@ async fn confirm_dirty_editor_close(
     dialog.present(Some(parent));
 
     match rx.await.as_deref() {
-        Ok("discard") => true,
+        Ok("discard") => {
+            for editor in editors {
+                editor.discard_all_dirty();
+            }
+            true
+        }
         Ok("save") => {
             for editor in editors {
                 if let Err(error) = editor.save_all_dirty() {

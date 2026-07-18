@@ -12,11 +12,12 @@ mod web_assets;
 
 pub use protocol::{
     javascript_for_host_message, parse_editor_message, serialize_host_message, DocumentDiskStatus,
-    DocumentPayload, EditorMessage, HostMessage, ProtocolError, TextDocumentEncoding,
-    TextDocumentLineEnding, MAX_BRIDGE_MESSAGE_BYTES, PROTOCOL_VERSION,
+    DocumentPayload, EditorMessage, HostMessage, ProtocolError, RecoveryChoice,
+    TextDocumentEncoding, TextDocumentLineEnding, MAX_BRIDGE_MESSAGE_BYTES, PROTOCOL_VERSION,
 };
 pub use recovery::{
-    RecoveryDiskState, RecoveryError, RecoverySnapshot, RecoveryStore, RECOVERY_FORMAT_VERSION,
+    RecoveryDiskState, RecoveryError, RecoveryOperation, RecoverySnapshot, RecoveryStore,
+    RECOVERY_FORMAT_VERSION,
 };
 pub use session::{EditorSession, EditorSessionError};
 pub use web_assets::{EditorAssetServer, EditorAssetServerError};
@@ -236,6 +237,23 @@ impl DocumentService {
             .get(&id)
             .map(|document| document.snapshot.clone())
             .ok_or(DocumentError::NotOpen(id))
+    }
+
+    fn recovery_snapshot(
+        &self,
+        id: DocumentId,
+        store: &RecoveryStore,
+    ) -> Result<RecoverySnapshot, DocumentError> {
+        let document = self.documents.get(&id).ok_or(DocumentError::NotOpen(id))?;
+        Ok(RecoverySnapshot::new(
+            store.workspace_id().to_string(),
+            document.snapshot.identity_path.clone(),
+            &document.base_bytes,
+            document.snapshot.version,
+            document.snapshot.text.clone(),
+            document.snapshot.encoding,
+            document.snapshot.line_ending,
+        ))
     }
 
     pub fn update_text(
