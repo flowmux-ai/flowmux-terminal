@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! macOS editor surface backed by the system WKWebView.
 
-use super::{is_allowed_editor_navigation, EditorBridgeState};
+use super::{
+    handle_bridge_message, is_allowed_editor_navigation, EditorBridgeState, EditorHostState,
+};
 use flowmux_core::{PaneId, SurfaceId};
 use flowmux_editor::{EditorAssetServer, HostMessage, ProtocolError};
 use gtk::glib::{self, translate::ToGlibPtr};
@@ -39,6 +41,7 @@ pub struct EditorPane {
     web_widget: gtk::Widget,
     native: Rc<NativeEditorView>,
     bridge: Rc<EditorBridgeState>,
+    host: Rc<EditorHostState>,
     _asset_server: Rc<EditorAssetServer>,
 }
 
@@ -52,6 +55,7 @@ struct NativeEditorView {
 
 struct EditorScriptMessageHandlerIvars {
     bridge: Rc<EditorBridgeState>,
+    host: Rc<EditorHostState>,
 }
 
 define_class!(
@@ -77,7 +81,8 @@ define_class!(
                 tracing::warn!("editor WKWebView sent a non-string bridge message");
                 return;
             };
-            let scripts = self.ivars().bridge.receive(&body.to_string());
+            let scripts =
+                handle_bridge_message(&self.ivars().bridge, &self.ivars().host, &body.to_string());
             let Some(web_view) = (unsafe { message.webView() }) else {
                 return;
             };
@@ -196,10 +201,12 @@ impl EditorPane {
             .expect("editor URLs end with the generated entry point")
             .to_string();
         let bridge = Rc::new(EditorBridgeState::new(surface_id));
+        let host = Rc::new(EditorHostState::new(&workspace_root));
         let mtm = MainThreadMarker::new().expect("WKWebView must be created on the main thread");
         let native = Rc::new(create_native_editor_view(
             mtm,
             bridge.clone(),
+            host.clone(),
             &allowed_prefix,
         ));
 
@@ -249,13 +256,13 @@ impl EditorPane {
             web_widget,
             native,
             bridge,
+            host,
             _asset_server: asset_server,
         };
-        if let Err(error) = pane.send(HostMessage::InitializeEditor {
-            workspace_name: workspace_name(pane.workspace_root()),
-            documents: Vec::new(),
-            active_document_id: None,
-        }) {
+        if let Err(error) = pane.send(
+            pane.host
+                .initialize_message(workspace_name(pane.workspace_root())),
+        ) {
             tracing::error!(%error, "failed to queue editor initialization");
         }
         pane
@@ -298,13 +305,14 @@ impl EditorPane {
 fn create_native_editor_view(
     mtm: MainThreadMarker,
     bridge: Rc<EditorBridgeState>,
+    host: Rc<EditorHostState>,
     allowed_prefix: &str,
 ) -> NativeEditorView {
     let configuration = unsafe { WKWebViewConfiguration::new(mtm) };
     let preferences = unsafe { WKPreferences::new(mtm) };
     let user_content_controller = unsafe { WKUserContentController::new(mtm) };
     let script_message_handler = EditorScriptMessageHandler::alloc(mtm)
-        .set_ivars(EditorScriptMessageHandlerIvars { bridge });
+        .set_ivars(EditorScriptMessageHandlerIvars { bridge, host });
     let script_message_handler: Retained<EditorScriptMessageHandler> =
         unsafe { msg_send![super(script_message_handler), init] };
     let handler_name = NSString::from_str(MESSAGE_HANDLER_NAME);

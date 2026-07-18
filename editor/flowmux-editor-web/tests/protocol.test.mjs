@@ -2,7 +2,11 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isHostMessage, PROTOCOL_VERSION } from "../.test-build/protocol.js";
+import {
+  advanceDocumentEdit,
+  isHostMessage,
+  PROTOCOL_VERSION,
+} from "../.test-build/protocol.js";
 
 const koreanDocument = {
   id: "문서-1",
@@ -72,4 +76,17 @@ test("rejects negative and fractional document versions", () => {
       false,
     );
   }
+});
+
+test("advances the local version while sending the host's current base version", () => {
+  assert.deepEqual(advanceDocumentEdit(7, 3), {
+    baseVersion: 7,
+    nextVersion: 8,
+    changeSequence: 4,
+  });
+  assert.deepEqual(advanceDocumentEdit(8, 4), {
+    baseVersion: 8,
+    nextVersion: 9,
+    changeSequence: 5,
+  });
 });

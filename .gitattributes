@@ -1,0 +1,3 @@
+# Generated Monaco code contains multiline regular-expression literals whose
+# trailing whitespace is semantic and must not be stripped.
+editor/flowmux-editor-web/dist/main.js whitespace=-trailing-space

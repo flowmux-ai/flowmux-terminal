@@ -84,6 +84,23 @@ export type EditorMessage =
       dirty: boolean;
     });
 
+export interface DocumentEditAdvance {
+  baseVersion: number;
+  nextVersion: number;
+  changeSequence: number;
+}
+
+export function advanceDocumentEdit(
+  version: number,
+  changeSequence: number,
+): DocumentEditAdvance {
+  return {
+    baseVersion: version,
+    nextVersion: version + 1,
+    changeSequence: changeSequence + 1,
+  };
+}
+
 export function isHostMessage(value: unknown): value is HostMessage {
   if (!isRecord(value)) {
     return false;

@@ -6,6 +6,7 @@
 //! detection, and atomic persistence.
 
 mod protocol;
+mod session;
 mod web_assets;
 
 pub use protocol::{
@@ -13,6 +14,7 @@ pub use protocol::{
     EditorMessage, HostMessage, ProtocolError, TextDocumentEncoding, TextDocumentLineEnding,
     MAX_BRIDGE_MESSAGE_BYTES, PROTOCOL_VERSION,
 };
+pub use session::{EditorSession, EditorSessionError};
 pub use web_assets::{EditorAssetServer, EditorAssetServerError};
 
 use serde::{Deserialize, Serialize};

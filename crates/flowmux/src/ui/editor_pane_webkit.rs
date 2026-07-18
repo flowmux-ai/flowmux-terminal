@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Linux editor surface backed by an isolated WebKitGTK WebView.
 
-use super::{is_allowed_editor_navigation, EditorBridgeState};
+use super::{
+    handle_bridge_message, is_allowed_editor_navigation, EditorBridgeState, EditorHostState,
+};
 use flowmux_core::{PaneId, SurfaceId};
 use flowmux_editor::{EditorAssetServer, HostMessage, ProtocolError};
 use gtk::prelude::*;
@@ -20,6 +22,7 @@ pub struct EditorPane {
     web_view: webkit6::WebView,
     user_content_manager: webkit6::UserContentManager,
     bridge: Rc<EditorBridgeState>,
+    host: Rc<EditorHostState>,
     _asset_server: Rc<EditorAssetServer>,
     _network_session: webkit6::NetworkSession,
     closed: Rc<Cell<bool>>,
@@ -39,6 +42,7 @@ impl EditorPane {
             .expect("editor URLs end with the generated entry point")
             .to_string();
         let bridge = Rc::new(EditorBridgeState::new(surface_id));
+        let host = Rc::new(EditorHostState::new(&workspace_root));
         let user_content_manager = webkit6::UserContentManager::new();
         assert!(
             user_content_manager.register_script_message_handler(MESSAGE_HANDLER_NAME, None),
@@ -63,11 +67,12 @@ impl EditorPane {
 
         {
             let bridge = bridge.clone();
+            let host = host.clone();
             let web_view = web_view.downgrade();
             user_content_manager.connect_script_message_received(
                 Some(MESSAGE_HANDLER_NAME),
                 move |_, value| {
-                    let scripts = bridge.receive(&value.to_str());
+                    let scripts = handle_bridge_message(&bridge, &host, &value.to_str());
                     if let Some(web_view) = web_view.upgrade() {
                         for script in scripts {
                             evaluate_script(&web_view, &script);
@@ -126,15 +131,15 @@ impl EditorPane {
             web_view,
             user_content_manager,
             bridge,
+            host,
             _asset_server: asset_server,
             _network_session: network_session,
             closed: Rc::new(Cell::new(false)),
         };
-        if let Err(error) = pane.send(HostMessage::InitializeEditor {
-            workspace_name: workspace_name(pane.workspace_root()),
-            documents: Vec::new(),
-            active_document_id: None,
-        }) {
+        if let Err(error) = pane.send(
+            pane.host
+                .initialize_message(workspace_name(pane.workspace_root())),
+        ) {
             tracing::error!(%error, "failed to queue editor initialization");
         }
         pane

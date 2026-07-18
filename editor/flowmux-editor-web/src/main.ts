@@ -10,6 +10,7 @@ import "./styles.css";
 
 import { languageForPath, languageLabel } from "./language";
 import {
+  advanceDocumentEdit,
   type DocumentPayload,
   type EditorMessage,
   type HostMessage,
@@ -203,14 +204,16 @@ function addOrReplaceDocument(payload: DocumentPayload): void {
       return;
     }
     document.payload.dirty = true;
-    document.changeSequence += 1;
+    const edit = advanceDocumentEdit(document.payload.version, document.changeSequence);
+    document.payload.version = edit.nextVersion;
+    document.changeSequence = edit.changeSequence;
     postToHost({
       protocolVersion: PROTOCOL_VERSION,
       surfaceId,
       type: "document_changed",
       documentId: document.payload.id,
-      documentVersion: document.payload.version,
-      changeSequence: document.changeSequence,
+      documentVersion: edit.baseVersion,
+      changeSequence: edit.changeSequence,
       content: model.getValue(),
     });
     renderChrome();
