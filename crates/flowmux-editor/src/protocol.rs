@@ -181,6 +181,17 @@ pub fn serialize_host_message(
     Ok(encoded)
 }
 
+pub fn javascript_for_host_message(
+    surface_id: &str,
+    message: &HostMessage,
+) -> Result<String, ProtocolError> {
+    let message = serialize_host_message(surface_id, message)?;
+    let quoted = serde_json::to_string(&message)?;
+    Ok(format!(
+        "window.flowmuxEditorHost.receive(JSON.parse({quoted}));"
+    ))
+}
+
 fn validate_editor_message(message: &EditorMessage) -> Result<(), ProtocolError> {
     match message {
         EditorMessage::EditorReady => Ok(()),
@@ -359,5 +370,28 @@ mod tests {
             serialize_host_message("surface-1", &HostMessage::OpenDocument { document }),
             Err(ProtocolError::DocumentTooLarge { .. })
         ));
+    }
+
+    #[test]
+    fn host_javascript_keeps_script_like_and_line_separator_text_inside_json() {
+        let mut document = multilingual_document();
+        document.content = "</script>\u{2028}다음 줄\u{2029}".into();
+        let script =
+            javascript_for_host_message("surface-1", &HostMessage::OpenDocument { document })
+                .unwrap();
+
+        assert!(script.starts_with("window.flowmuxEditorHost.receive(JSON.parse("));
+        assert!(script.contains("JSON.parse(\"{\\\"protocolVersion"));
+        let quoted = script
+            .strip_prefix("window.flowmuxEditorHost.receive(JSON.parse(")
+            .unwrap()
+            .strip_suffix("));")
+            .unwrap();
+        let json: String = serde_json::from_str(quoted).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            value["document"]["content"],
+            "</script>\u{2028}다음 줄\u{2029}"
+        );
     }
 }

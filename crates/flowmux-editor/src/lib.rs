@@ -9,9 +9,9 @@ mod protocol;
 mod web_assets;
 
 pub use protocol::{
-    parse_editor_message, serialize_host_message, DocumentPayload, EditorMessage, HostMessage,
-    ProtocolError, TextDocumentEncoding, TextDocumentLineEnding, MAX_BRIDGE_MESSAGE_BYTES,
-    PROTOCOL_VERSION,
+    javascript_for_host_message, parse_editor_message, serialize_host_message, DocumentPayload,
+    EditorMessage, HostMessage, ProtocolError, TextDocumentEncoding, TextDocumentLineEnding,
+    MAX_BRIDGE_MESSAGE_BYTES, PROTOCOL_VERSION,
 };
 pub use web_assets::{EditorAssetServer, EditorAssetServerError};
 

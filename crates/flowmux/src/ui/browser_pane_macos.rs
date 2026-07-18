@@ -361,7 +361,7 @@ fn pop_native_browser_view_suspend() -> bool {
     })
 }
 
-fn native_browser_views_are_suspended() -> bool {
+pub(crate) fn native_browser_views_are_suspended() -> bool {
     NATIVE_BROWSER_VIEW_SUSPEND_COUNT.with(|count| count.get() > 0)
 }
 

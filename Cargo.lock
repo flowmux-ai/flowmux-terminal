@@ -893,6 +893,7 @@ dependencies = [
  "flowmux-cookies",
  "flowmux-core",
  "flowmux-daemon",
+ "flowmux-editor",
  "flowmux-ipc",
  "flowmux-notify",
  "flowmux-procmon",

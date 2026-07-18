@@ -2795,7 +2795,7 @@ fn build_panel(
             widget
         }
         SurfaceKind::Editor { workspace_root, .. } => {
-            let editor = EditorPane::new(pane_id, workspace_root.clone());
+            let editor = EditorPane::new(pane_id, surface.id, workspace_root.clone());
 
             let frame_in = frame.clone();
             let frame_out = frame.clone();
