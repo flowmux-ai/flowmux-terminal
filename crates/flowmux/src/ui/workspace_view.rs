@@ -347,17 +347,23 @@ impl PaneRegistry {
     pub fn terminal_cwd_poll_inputs(
         &self,
     ) -> Vec<(PaneId, SurfaceId, Option<std::path::PathBuf>, Option<i32>)> {
-        self.terminals
-            .iter()
-            .map(|(surface, terminal)| {
-                (
-                    terminal.id(),
-                    *surface,
-                    terminal.announced_current_dir(),
-                    terminal.pid.get(),
-                )
-            })
-            .collect()
+        #[cfg(not(target_os = "linux"))]
+        {
+            Vec::new()
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            self.terminals
+                .iter()
+                .filter_map(|(surface, terminal)| {
+                    terminal
+                        .announced_current_dir()
+                        .is_none()
+                        .then(|| (terminal.id(), *surface, None, terminal.pid.get()))
+                })
+                .collect()
+        }
     }
 
     pub fn apply_terminal_cwd_poll_results(

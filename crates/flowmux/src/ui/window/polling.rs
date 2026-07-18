@@ -141,6 +141,9 @@ impl WindowController {
     }
     pub(super) async fn poll_terminal_cwds(&self) {
         let inputs = self.pane_registry.borrow().terminal_cwd_poll_inputs();
+        if inputs.is_empty() {
+            return;
+        }
         let generation = self.cwd_poll_generation.get().wrapping_add(1);
         self.cwd_poll_generation.set(generation);
         let started = Instant::now();
