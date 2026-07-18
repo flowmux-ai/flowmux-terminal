@@ -1055,6 +1055,7 @@ pub fn build_surface(
             cwd.clone(),
         ),
         SurfaceKind::Browser { .. } => (Vec::new(), None),
+        SurfaceKind::Editor { .. } => (Vec::new(), None),
     };
     build_pane(
         workspace,
@@ -2392,6 +2393,7 @@ fn surface_tab(surface: &PaneSurface, active: bool) -> (gtk::Box, gtk::Label) {
     let icon_name = match surface.kind {
         SurfaceKind::Terminal { .. } => "utilities-terminal-symbolic",
         SurfaceKind::Browser { .. } => "web-browser-symbolic",
+        SurfaceKind::Editor { .. } => "text-x-generic-symbolic",
     };
     row.append(&gtk::Image::from_icon_name(icon_name));
     let label = gtk::Label::new(Some(&surface.title));
@@ -2682,6 +2684,43 @@ fn build_panel(
             r.browsers.insert(surface.id, pane);
             r.surface_workspace.insert(surface.id, workspace);
             widget
+        }
+        SurfaceKind::Editor { workspace_root, .. } => {
+            let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
+            root.set_hexpand(true);
+            root.set_vexpand(true);
+            root.set_focusable(true);
+            root.set_halign(gtk::Align::Fill);
+            root.set_valign(gtk::Align::Fill);
+
+            let title = gtk::Label::new(Some("Editor"));
+            title.add_css_class("title-2");
+            let path = gtk::Label::new(Some(&workspace_root.display().to_string()));
+            path.add_css_class("dim-label");
+            path.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+            root.append(&title);
+            root.append(&path);
+
+            let frame_in = frame.clone();
+            let frame_out = frame.clone();
+            let on_focus = callbacks.on_focus.clone();
+            let focus = gtk::EventControllerFocus::new();
+            focus.connect_enter(move |_| {
+                if !frame_in.has_css_class("focused") {
+                    frame_in.add_css_class("focused");
+                }
+                (on_focus.borrow_mut())(pane_id);
+            });
+            focus.connect_leave(move |_| {
+                frame_out.remove_css_class("focused");
+            });
+            root.add_controller(focus);
+
+            registry
+                .borrow_mut()
+                .surface_workspace
+                .insert(surface.id, workspace);
+            root.upcast::<gtk::Widget>()
         }
     }
 }

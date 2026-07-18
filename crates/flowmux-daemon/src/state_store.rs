@@ -1790,6 +1790,40 @@ impl StateStore {
         None
     }
 
+    /// Add an editor surface to a workspace's first pane and return its id.
+    pub async fn add_editor_surface(&self, workspace: WorkspaceId) -> Option<SurfaceId> {
+        let mut s = self.inner.lock().await;
+        let w = s.workspaces.iter_mut().find(|w| w.id == workspace)?;
+        let pane = w.surfaces.first()?.root_pane.first_leaf_id()?;
+        let tab = PaneSurface::editor("Editor", w.root_dir.clone());
+        let surface_id = w.surfaces[0].root_pane.add_surface_to_leaf(pane, tab)?;
+        drop(s);
+        self.mark_dirty();
+        Some(surface_id)
+    }
+
+    /// Add an editor surface to a specific pane. The containing workspace's
+    /// root is persisted with the surface so editor sessions restore without
+    /// depending on the process cwd.
+    pub async fn add_editor_surface_to_pane(
+        &self,
+        pane: PaneId,
+    ) -> Option<(WorkspaceId, SurfaceId)> {
+        let mut s = self.inner.lock().await;
+        for ws in s.workspaces.iter_mut() {
+            for surface in ws.surfaces.iter_mut() {
+                let tab = PaneSurface::editor("Editor", ws.root_dir.clone());
+                if let Some(surface_id) = surface.root_pane.add_surface_to_leaf(pane, tab) {
+                    let ws_id = ws.id;
+                    drop(s);
+                    self.mark_dirty();
+                    return Some((ws_id, surface_id));
+                }
+            }
+        }
+        None
+    }
+
     pub async fn set_active_surface(
         &self,
         pane: PaneId,
@@ -2089,7 +2123,7 @@ fn normalize_state(state: &mut State) -> bool {
         for surface in &mut ws.surfaces {
             let fallback_cwd = match &surface.kind {
                 SurfaceKind::Terminal { cwd, .. } => cwd.clone(),
-                SurfaceKind::Browser { .. } => None,
+                SurfaceKind::Browser { .. } | SurfaceKind::Editor { .. } => None,
             };
             changed |= surface.root_pane.normalize_leaf_tabs(fallback_cwd);
         }
@@ -3987,6 +4021,50 @@ Do you want to continue?";
     }
 
     #[tokio::test]
+    async fn add_editor_surface_to_pane_uses_workspace_root_and_activates() {
+        let store = StateStore::new_lazy(State::default());
+        let root = std::path::PathBuf::from("/tmp/다국어-プロジェクト");
+        let ws_id = store
+            .create_workspace(Some("demo".into()), root.clone())
+            .await;
+        let pane = first_pane(&store.get_workspace(ws_id).await.unwrap());
+
+        let (returned_ws, editor_surface) = store
+            .add_editor_surface_to_pane(pane)
+            .await
+            .expect("editor tab should be added to existing pane");
+        assert_eq!(returned_ws, ws_id);
+
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        assert_eq!(first_pane_tab_count(&ws), 2);
+        assert_eq!(first_pane_active_surface(&ws), editor_surface);
+        let added = pane_surfaces(&ws, pane)
+            .into_iter()
+            .find(|surface| surface.id == editor_surface)
+            .expect("new editor surface must be present");
+        assert!(matches!(
+            added.kind,
+            SurfaceKind::Editor {
+                workspace_root,
+                session
+            } if workspace_root == root && session.open_files.is_empty()
+        ));
+    }
+
+    #[tokio::test]
+    async fn add_editor_surface_to_pane_returns_none_for_unknown_pane() {
+        let store = StateStore::new_lazy(State::default());
+        let _ = store
+            .create_workspace(Some("demo".into()), std::path::PathBuf::from("/tmp/demo"))
+            .await;
+
+        assert!(store
+            .add_editor_surface_to_pane(PaneId::new())
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
     async fn add_browser_surface_to_pane_targets_correct_pane_after_split() {
         // A newly split sibling pane, not the original pane, should also accept
         // browser tabs without affecting tab counts in other panes.
@@ -4403,6 +4481,11 @@ Do you want to continue?";
         Browser {
             initial_url: Option<String>,
         },
+        Editor {
+            workspace_root: std::path::PathBuf,
+            open_files: Vec<std::path::PathBuf>,
+            active_file: Option<std::path::PathBuf>,
+        },
     }
 
     fn fingerprint(s: &PaneSurface) -> SurfaceFingerprint {
@@ -4413,6 +4496,18 @@ Do you want to continue?";
             },
             SurfaceKind::Browser { initial_url } => SurfaceKindFingerprint::Browser {
                 initial_url: initial_url.clone(),
+            },
+            SurfaceKind::Editor {
+                workspace_root,
+                session,
+            } => SurfaceKindFingerprint::Editor {
+                workspace_root: workspace_root.clone(),
+                open_files: session
+                    .open_files
+                    .iter()
+                    .map(|file| file.path.clone())
+                    .collect(),
+                active_file: session.active_file.clone(),
             },
         };
         SurfaceFingerprint {

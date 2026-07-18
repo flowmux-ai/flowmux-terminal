@@ -386,6 +386,7 @@ impl WindowController {
         let icon_name = match torn.kind {
             SurfaceKind::Terminal { .. } => "utilities-terminal-symbolic",
             SurfaceKind::Browser { .. } => "web-browser-symbolic",
+            SurfaceKind::Editor { .. } => "text-x-generic-symbolic",
         };
         row.append(&gtk::Image::from_icon_name(icon_name));
         let label = gtk::Label::new(Some(title));

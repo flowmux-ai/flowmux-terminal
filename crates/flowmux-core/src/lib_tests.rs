@@ -2914,6 +2914,69 @@ fn pane_surface_scrollback_round_trips_and_old_json_defaults_empty() {
     assert_eq!(restored.scrollback, None);
 }
 
+#[test]
+fn editor_surface_round_trips_multilingual_session_state() {
+    let workspace_root = PathBuf::from("/tmp/프로젝트");
+    let mut surface = PaneSurface::editor("편집기", workspace_root.clone());
+    let SurfaceKind::Editor { session, .. } = &mut surface.kind else {
+        panic!("expected editor surface")
+    };
+    session.open_files.push(EditorFileState {
+        path: workspace_root.join("소스/日本語.rs"),
+        cursor_line: 42,
+        cursor_column: 7,
+        scroll_top: 128.5,
+    });
+    session.active_file = session.open_files.first().map(|file| file.path.clone());
+
+    let json = serde_json::to_string(&surface).unwrap();
+    let restored: PaneSurface = serde_json::from_str(&json).unwrap();
+    let SurfaceKind::Editor {
+        workspace_root: restored_root,
+        session,
+    } = restored.kind
+    else {
+        panic!("expected restored editor surface")
+    };
+    assert_eq!(restored_root, workspace_root);
+    assert_eq!(session.open_files.len(), 1);
+    assert_eq!(session.open_files[0].cursor_line, 42);
+    assert_eq!(session.open_files[0].cursor_column, 7);
+    assert_eq!(session.open_files[0].scroll_top, 128.5);
+    assert_eq!(
+        session.active_file,
+        Some(workspace_root.join("소스/日本語.rs"))
+    );
+}
+
+#[test]
+fn editor_surface_without_session_defaults_to_empty() {
+    let json = format!(
+        r#"{{"id":"{}","title":"Editor","kind":{{"type":"editor","workspace_root":"/tmp/project"}}}}"#,
+        SurfaceId::new()
+    );
+    let restored: PaneSurface = serde_json::from_str(&json).unwrap();
+    let SurfaceKind::Editor { session, .. } = restored.kind else {
+        panic!("expected editor surface")
+    };
+    assert_eq!(session, EditorSessionState::default());
+}
+
+#[test]
+fn cwd_for_new_terminal_uses_prior_terminal_when_editor_is_active() {
+    let terminal = PaneSurface::terminal("shell", Some("/tmp/work".into()));
+    let editor = PaneSurface::editor("Editor", "/tmp/project".into());
+    let content = PaneContent::Tabs {
+        active: editor.id,
+        surfaces: vec![terminal, editor],
+    };
+
+    assert_eq!(
+        content.cwd_for_new_terminal(),
+        Some(PathBuf::from("/tmp/work"))
+    );
+}
+
 // ---- tab move (take / insert) ----
 
 fn leaf_with_tabs(pane_id: PaneId, titles: &[&str]) -> (Pane, Vec<SurfaceId>) {

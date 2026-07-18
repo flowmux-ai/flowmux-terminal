@@ -162,6 +162,9 @@ fn stored_surface_copy_text_from_workspace(
             SurfaceKind::Terminal { cwd: Some(cwd), .. } => Some(CopyableText::stored_path(cwd)),
             SurfaceKind::Terminal { cwd: None, .. } => None,
             SurfaceKind::Browser { initial_url } => initial_url.and_then(CopyableText::url),
+            SurfaceKind::Editor { workspace_root, .. } => {
+                Some(CopyableText::stored_path(workspace_root))
+            }
         })
 }
 
@@ -175,7 +178,7 @@ fn stored_terminal_cwd_from_workspace(
         .find_map(|surface_root| surface_root.root_pane.find_surface(pane, surface))
         .and_then(|pane_surface| match pane_surface.kind {
             SurfaceKind::Terminal { cwd, .. } => cwd,
-            SurfaceKind::Browser { .. } => None,
+            SurfaceKind::Browser { .. } | SurfaceKind::Editor { .. } => None,
         })
 }
 
@@ -2019,6 +2022,7 @@ fn collect_subtitle_lines_excluding(
             SurfaceKind::Terminal { cwd: Some(cwd), .. } => Some(shorten_cwd_path(cwd)),
             SurfaceKind::Terminal { cwd: None, .. } => None,
             SurfaceKind::Browser { .. } => Some(format!("Browser-{}", surface.title)),
+            SurfaceKind::Editor { .. } => Some(format!("Editor-{}", surface.title)),
         }
     };
 
@@ -6830,6 +6834,7 @@ mod tests {
                 surfaces.first().map(|surface| match surface.kind {
                     SurfaceKind::Terminal { .. } => "terminal",
                     SurfaceKind::Browser { .. } => "browser",
+                    SurfaceKind::Editor { .. } => "editor",
                 })
             })
             .collect();

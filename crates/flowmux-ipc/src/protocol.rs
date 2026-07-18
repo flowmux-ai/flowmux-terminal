@@ -79,7 +79,7 @@ pub fn capabilities() -> Capabilities {
 pub struct TreeTab {
     pub id: SurfaceId,
     pub title: String,
-    /// `"terminal"` or `"browser"`.
+    /// `"terminal"`, `"browser"`, or `"editor"`.
     pub kind: String,
     /// True for the tab currently shown in this pane.
     pub active: bool,
@@ -126,6 +126,7 @@ fn surface_kind_label(kind: &SurfaceKind) -> &'static str {
     match kind {
         SurfaceKind::Terminal { .. } => "terminal",
         SurfaceKind::Browser { .. } => "browser",
+        SurfaceKind::Editor { .. } => "editor",
     }
 }
 
@@ -791,6 +792,16 @@ mod tests {
         );
         assert!(!tabs[0].active, "tab1 is not the active surface");
         assert!(tabs[1].active, "tab2 is the active surface");
+    }
+
+    #[test]
+    fn surface_kind_label_reports_editor() {
+        let kind = SurfaceKind::Editor {
+            workspace_root: "/tmp/프로젝트".into(),
+            session: flowmux_core::EditorSessionState::default(),
+        };
+
+        assert_eq!(surface_kind_label(&kind), "editor");
     }
 
     #[test]

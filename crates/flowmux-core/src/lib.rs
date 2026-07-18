@@ -312,6 +312,25 @@ pub struct Surface {
     pub root_pane: Pane,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct EditorSessionState {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub open_files: Vec<EditorFileState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EditorFileState {
+    pub path: PathBuf,
+    #[serde(default)]
+    pub cursor_line: u32,
+    #[serde(default)]
+    pub cursor_column: u32,
+    #[serde(default)]
+    pub scroll_top: f64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SurfaceKind {
@@ -322,10 +341,15 @@ pub enum SurfaceKind {
     Browser {
         initial_url: Option<String>,
     },
+    Editor {
+        workspace_root: PathBuf,
+        #[serde(default)]
+        session: EditorSessionState,
+    },
 }
 
 /// A tab inside a leaf pane. cmux calls these surfaces: each pane can
-/// host multiple terminal/browser surfaces, with exactly one active at
+/// host multiple terminal/browser/editor surfaces, with exactly one active at
 /// a time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaneSurface {
@@ -905,9 +929,9 @@ impl Pane {
                         SurfaceKind::Terminal { cwd: Some(cwd), .. } => {
                             Some(cwd.display().to_string())
                         }
-                        SurfaceKind::Terminal { cwd: None, .. } | SurfaceKind::Browser { .. } => {
-                            None
-                        }
+                        SurfaceKind::Terminal { cwd: None, .. }
+                        | SurfaceKind::Browser { .. }
+                        | SurfaceKind::Editor { .. } => None,
                     };
                     out.push(WorkspaceAgentBlock {
                         pane: *id,
@@ -1668,6 +1692,20 @@ impl PaneSurface {
             agent: None,
         }
     }
+
+    pub fn editor(title: impl Into<String>, workspace_root: PathBuf) -> Self {
+        Self {
+            id: SurfaceId::new(),
+            title: title.into(),
+            title_locked: false,
+            kind: SurfaceKind::Editor {
+                workspace_root,
+                session: EditorSessionState::default(),
+            },
+            scrollback: None,
+            agent: None,
+        }
+    }
 }
 
 impl PaneContent {
@@ -1687,6 +1725,14 @@ impl PaneContent {
         }
     }
 
+    pub fn tabbed_editor(title: impl Into<String>, workspace_root: PathBuf) -> Self {
+        let surface = PaneSurface::editor(title, workspace_root);
+        Self::Tabs {
+            active: surface.id,
+            surfaces: vec![surface],
+        }
+    }
+
     pub fn active_surface(&self) -> Option<&PaneSurface> {
         match self {
             PaneContent::Tabs { active, surfaces } => surfaces
@@ -1698,7 +1744,7 @@ impl PaneContent {
     }
 
     /// cwd to seed a new terminal spawned inside this pane. Active terminal's
-    /// cwd wins. If the active surface is a browser, walks earlier tabs and
+    /// cwd wins. If the active surface is a browser or editor, walks earlier tabs and
     /// returns the most recent terminal's cwd so the new terminal opens in
     /// the user's last directory rather than the workspace root.
     pub fn cwd_for_new_terminal(&self) -> Option<PathBuf> {
@@ -1712,15 +1758,13 @@ impl PaneContent {
         let active_surface = surfaces.get(active_idx)?;
         match &active_surface.kind {
             SurfaceKind::Terminal { cwd, .. } => cwd.clone(),
-            SurfaceKind::Browser { .. } => {
-                surfaces[..active_idx]
-                    .iter()
-                    .rev()
-                    .find_map(|surface| match &surface.kind {
-                        SurfaceKind::Terminal { cwd: Some(cwd), .. } => Some(cwd.clone()),
-                        _ => None,
-                    })
-            }
+            SurfaceKind::Browser { .. } | SurfaceKind::Editor { .. } => surfaces[..active_idx]
+                .iter()
+                .rev()
+                .find_map(|surface| match &surface.kind {
+                    SurfaceKind::Terminal { cwd: Some(cwd), .. } => Some(cwd.clone()),
+                    _ => None,
+                }),
         }
     }
 
