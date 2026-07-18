@@ -8,6 +8,7 @@ import "monaco-editor/esm/vs/language/json/monaco.contribution.js";
 import "monaco-editor/esm/vs/language/typescript/monaco.contribution.js";
 import "./styles.css";
 
+import { adjustedFontSize, movedTabIndex, type TabMove } from "./editor_state";
 import { languageForPath, languageLabel } from "./language";
 import {
   advanceDocumentEdit,
@@ -63,12 +64,16 @@ const documentState = requiredElement("document-state");
 const emptyState = requiredElement("empty-state");
 const editorContainer = requiredElement("editor");
 const cursorStatus = requiredElement("cursor-status");
+const indentationStatus = requiredElement("indentation-status");
 const languageStatus = requiredElement("language-status");
 const encodingStatus = requiredElement("encoding-status");
 const eolStatus = requiredElement("eol-status");
 
 let surfaceId = new URLSearchParams(window.location.search).get("surface") ?? "unbound";
 let activeDocumentId: string | null = null;
+let editorFontSize = 13;
+let wordWrapEnabled = false;
+let minimapEnabled = false;
 const documents = new Map<string, OpenDocument>();
 
 monaco.editor.defineTheme("flowmux-dark", {
@@ -110,8 +115,78 @@ editor.addAction({
   run: () => requestSave(),
 });
 
+editor.addAction({
+  id: "flowmux.saveAll",
+  label: "Save All",
+  keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyMod.Alt | monaco.KeyCode.KeyS],
+  run: () => requestSaveAll(),
+});
+
+editor.addAction({
+  id: "flowmux.closeDocument",
+  label: "Close Current Document",
+  keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyW],
+  run: () => requestCloseActiveDocument(),
+});
+
+editor.addAction({
+  id: "flowmux.toggleWordWrap",
+  label: "Toggle Word Wrap",
+  keybindings: [monaco.KeyMod.Alt | monaco.KeyCode.KeyZ],
+  run: () => {
+    wordWrapEnabled = !wordWrapEnabled;
+    editor.updateOptions({ wordWrap: wordWrapEnabled ? "on" : "off" });
+  },
+});
+
+editor.addAction({
+  id: "flowmux.toggleMinimap",
+  label: "Toggle Minimap",
+  run: () => {
+    minimapEnabled = !minimapEnabled;
+    editor.updateOptions({ minimap: { enabled: minimapEnabled } });
+  },
+});
+
+editor.addAction({
+  id: "flowmux.increaseFontSize",
+  label: "Increase Editor Font Size",
+  keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.Equal],
+  run: () => setEditorFontSize(adjustedFontSize(editorFontSize, 1)),
+});
+
+editor.addAction({
+  id: "flowmux.decreaseFontSize",
+  label: "Decrease Editor Font Size",
+  keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.Minus],
+  run: () => setEditorFontSize(adjustedFontSize(editorFontSize, -1)),
+});
+
+editor.addAction({
+  id: "flowmux.resetFontSize",
+  label: "Reset Editor Font Size",
+  keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.Digit0],
+  run: () => setEditorFontSize(13),
+});
+
 editor.onDidChangeCursorPosition(({ position }) => {
   cursorStatus.textContent = `Ln ${position.lineNumber}, Col ${position.column}`;
+});
+
+tabs.addEventListener("keydown", (event) => {
+  const move = tabMoveForKey(event.key);
+  if (move === null) {
+    return;
+  }
+  const ids = [...documents.keys()];
+  const current = activeDocumentId === null ? 0 : Math.max(ids.indexOf(activeDocumentId), 0);
+  const next = movedTabIndex(current, ids.length, move);
+  const nextId = next === null ? undefined : ids[next];
+  if (nextId === undefined) {
+    return;
+  }
+  event.preventDefault();
+  activateDocumentAndNotify(nextId, true);
 });
 
 window.flowmuxEditorHost = {
@@ -260,12 +335,16 @@ function requestClose(document: OpenDocument): void {
   });
 }
 
-function requestSave(): void {
-  if (activeDocumentId === null) {
-    return;
+function requestCloseActiveDocument(): void {
+  const document = activeDocumentId === null ? undefined : documents.get(activeDocumentId);
+  if (document !== undefined) {
+    requestClose(document);
   }
-  const document = documents.get(activeDocumentId);
-  if (document === undefined || document.payload.readOnly) {
+}
+
+function requestSave(documentId: string | null = activeDocumentId): void {
+  const document = documentId === null ? undefined : documents.get(documentId);
+  if (document === undefined || document.payload.readOnly || !document.payload.dirty) {
     return;
   }
   postToHost({
@@ -279,6 +358,54 @@ function requestSave(): void {
   });
 }
 
+function requestSaveAll(): void {
+  for (const document of documents.values()) {
+    if (document.payload.dirty && !document.payload.readOnly) {
+      requestSave(document.payload.id);
+    }
+  }
+}
+
+function activateDocumentAndNotify(documentId: string, focusTab: boolean): void {
+  const document = documents.get(documentId);
+  if (document === undefined) {
+    return;
+  }
+  activateDocument(documentId);
+  postToHost({
+    protocolVersion: PROTOCOL_VERSION,
+    surfaceId,
+    type: "active_document_changed",
+    documentId,
+    documentVersion: document.payload.version,
+  });
+  if (focusTab) {
+    tabs
+      .querySelector<HTMLButtonElement>(`.tab-activate[data-document-id="${CSS.escape(documentId)}"]`)
+      ?.focus();
+  }
+}
+
+function setEditorFontSize(fontSize: number): void {
+  editorFontSize = fontSize;
+  editor.updateOptions({ fontSize });
+}
+
+function tabMoveForKey(key: string): TabMove | null {
+  switch (key) {
+    case "ArrowLeft":
+      return "previous";
+    case "ArrowRight":
+      return "next";
+    case "Home":
+      return "first";
+    case "End":
+      return "last";
+    default:
+      return null;
+  }
+}
+
 function renderChrome(): void {
   tabs.replaceChildren();
   for (const document of documents.values()) {
@@ -289,18 +416,11 @@ function renderChrome(): void {
     const activate = window.document.createElement("button");
     activate.type = "button";
     activate.className = "tab-activate";
+    activate.dataset.documentId = document.payload.id;
     activate.setAttribute("role", "tab");
     activate.setAttribute("aria-selected", String(isActive));
-    activate.addEventListener("click", () => {
-      activateDocument(document.payload.id);
-      postToHost({
-        protocolVersion: PROTOCOL_VERSION,
-        surfaceId,
-        type: "active_document_changed",
-        documentId: document.payload.id,
-        documentVersion: document.payload.version,
-      });
-    });
+    activate.tabIndex = isActive ? 0 : -1;
+    activate.addEventListener("click", () => activateDocumentAndNotify(document.payload.id, false));
 
     const title = window.document.createElement("span");
     title.className = "tab-title";
@@ -330,6 +450,7 @@ function renderChrome(): void {
     documentState.textContent = "Ready";
     documentState.className = "document-state";
     languageStatus.textContent = "Plain text";
+    indentationStatus.textContent = "Spaces: 4";
     encodingStatus.textContent = "UTF-8";
     eolStatus.textContent = "LF";
     return;
@@ -338,6 +459,10 @@ function renderChrome(): void {
   const language = active.payload.language ?? languageForPath(active.payload.relativePath);
   documentPath.textContent = active.payload.relativePath;
   languageStatus.textContent = languageLabel(language);
+  const modelOptions = active.model.getOptions();
+  indentationStatus.textContent = modelOptions.insertSpaces
+    ? `Spaces: ${modelOptions.tabSize}`
+    : `Tab Size: ${modelOptions.tabSize}`;
   encodingStatus.textContent = active.payload.encoding;
   eolStatus.textContent = active.payload.eol;
   if (active.payload.externalChange) {
