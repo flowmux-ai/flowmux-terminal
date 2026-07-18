@@ -8,6 +8,9 @@ on:
       - Cargo.lock
       - deny.toml
       - about.toml
+      - about.hbs
+      - THIRD_PARTY_LICENSES.md
+      - scripts/generate-third-party-licenses.sh
   schedule:
     - cron: '17 3 * * 1'
   workflow_dispatch:
@@ -34,5 +37,5 @@ jobs:
 
       - name: Check third-party license notice
         run: |
-          cargo about generate about.hbs --workspace --locked --fail -o THIRD_PARTY_LICENSES.md
+          scripts/generate-third-party-licenses.sh
           git diff --exit-code THIRD_PARTY_LICENSES.md

@@ -284,6 +284,11 @@ rm -rf "$bundle_work"
 mkdir -p "$macos" "$resources"
 install -m755 "$REPO_ROOT/target/$target_subdir/flowmux" "$macos/flowmux"
 install -m755 "$REPO_ROOT/target/$target_subdir/flowmuxctl" "$macos/flowmuxctl"
+install -m644 \
+    "$REPO_ROOT/LICENSE" \
+    "$REPO_ROOT/NOTICE" \
+    "$REPO_ROOT/THIRD_PARTY_LICENSES.md" \
+    "$resources/"
 create_icon "$resources"
 write_info_plist "$contents/Info.plist" "$version"
 plutil -lint "$contents/Info.plist" >/dev/null
