@@ -180,6 +180,30 @@ impl PaneRegistry {
             .and_then(|surface| self.editors.get(surface))
     }
 
+    pub fn editor_surface_in_pane(&self, pane: PaneId) -> Option<SurfaceId> {
+        self.surface_tabs.get(&pane).and_then(|tabs| {
+            tabs.iter()
+                .find_map(|(surface, _)| self.editors.contains_key(surface).then_some(*surface))
+        })
+    }
+
+    pub fn editor_for_file(
+        &self,
+        workspace: WorkspaceId,
+        path: &std::path::Path,
+    ) -> Option<(PaneId, SurfaceId)> {
+        self.surface_tabs.iter().find_map(|(pane, tabs)| {
+            (self.workspace_of_pane(*pane) == Some(workspace)).then(|| {
+                tabs.iter().find_map(|(surface, _)| {
+                    self.editors
+                        .get(surface)
+                        .filter(|editor| editor.contains_file(path))
+                        .map(|_| (*pane, *surface))
+                })
+            })?
+        })
+    }
+
     pub fn pane_frame(&self, pane: PaneId) -> Option<gtk::Widget> {
         self.pane_frames.get(&pane).cloned()
     }

@@ -165,6 +165,15 @@ impl EditorPane {
         self.web_view.grab_focus();
     }
 
+    pub fn contains_file(&self, path: &Path) -> bool {
+        self.host.contains_document(path)
+    }
+
+    pub fn open_file(&self, path: &Path) -> Result<(), String> {
+        let message = self.host.open_document(path)?;
+        self.send(message).map_err(|error| error.to_string())
+    }
+
     pub fn send(&self, message: HostMessage) -> Result<(), ProtocolError> {
         if let Some(script) = self.bridge.queue(message)? {
             evaluate_script(&self.web_view, &script);

@@ -56,6 +56,10 @@ impl EditorSession {
         }
     }
 
+    pub fn contains_document(&self, path: impl AsRef<Path>) -> bool {
+        self.documents.contains_path(path)
+    }
+
     pub fn open_document(&mut self, path: impl AsRef<Path>) -> Result<HostMessage, DocumentError> {
         let opened = self.documents.open(path)?;
         let id = opened.document.id;
@@ -271,6 +275,8 @@ mod tests {
             session.open_document(&path).unwrap(),
             HostMessage::SetActiveDocument { document_id, .. } if document_id == document.id
         ));
+        assert!(session.contains_document(&path));
+        assert!(!session.contains_document(workspace.path().join("missing.rs")));
     }
 
     #[test]

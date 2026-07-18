@@ -5,7 +5,119 @@
 
 use super::*;
 
+fn resolve_editor_target(
+    source_pane: Option<PaneId>,
+    pane_mru: &[PaneId],
+    workspace_leaves: &[PaneId],
+) -> Option<PaneId> {
+    source_pane
+        .filter(|pane| workspace_leaves.contains(pane))
+        .or_else(|| {
+            pane_mru
+                .iter()
+                .find(|pane| workspace_leaves.contains(pane))
+                .copied()
+        })
+        .or_else(|| workspace_leaves.first().copied())
+}
+
 impl WindowController {
+    pub(super) async fn open_file_in_editor(&self, path: PathBuf, source_pane: Option<PaneId>) {
+        if !crate::ui::file_browser::should_open_in_editor(&path) {
+            crate::ui::file_browser::open_file(&path);
+            return;
+        }
+
+        let mut workspace = {
+            let registry = self.pane_registry.borrow();
+            source_pane
+                .and_then(|pane| registry.workspace_of_pane(pane))
+                .or_else(|| {
+                    self.focused_pane
+                        .get()
+                        .and_then(|pane| registry.workspace_of_pane(pane))
+                })
+        };
+        if workspace.is_none() {
+            workspace = self.store.active_or_first().await;
+        }
+        let Some(workspace) = workspace else {
+            self.clipboard_toast
+                .show_with_message("No workspace is available for the editor");
+            return;
+        };
+        let Some(workspace_state) = self.store.get_workspace(workspace).await else {
+            self.clipboard_toast
+                .show_with_message("The editor workspace is no longer available");
+            return;
+        };
+
+        let already_open = self
+            .pane_registry
+            .borrow()
+            .editor_for_file(workspace, &path);
+        let (target_pane, editor_surface) = if let Some(existing) = already_open {
+            existing
+        } else {
+            let mut leaves = Vec::new();
+            for surface in &workspace_state.surfaces {
+                surface.root_pane.for_each_leaf(|pane| leaves.push(pane));
+            }
+            let pane_mru = self
+                .focus_mru
+                .borrow()
+                .get(&workspace)
+                .map(|queue| queue.iter().copied().collect::<Vec<_>>())
+                .unwrap_or_default();
+            let Some(target_pane) = resolve_editor_target(source_pane, &pane_mru, &leaves) else {
+                self.clipboard_toast
+                    .show_with_message("The workspace has no pane for the editor");
+                return;
+            };
+
+            let existing_surface = self
+                .pane_registry
+                .borrow()
+                .editor_surface_in_pane(target_pane);
+            let editor_surface = if let Some(surface) = existing_surface {
+                surface
+            } else {
+                let Some((workspace_id, surface)) =
+                    self.store.add_editor_surface_to_pane(target_pane).await
+                else {
+                    self.clipboard_toast
+                        .show_with_message("Could not create an editor tab");
+                    return;
+                };
+                self.attach_or_rerender_surface(workspace_id, target_pane, surface)
+                    .await;
+                surface
+            };
+            (target_pane, editor_surface)
+        };
+
+        self.store
+            .set_active_surface(target_pane, editor_surface)
+            .await;
+        self.pane_registry
+            .borrow_mut()
+            .activate_surface(target_pane, editor_surface);
+        let open_result = self
+            .pane_registry
+            .borrow()
+            .editors
+            .get(&editor_surface)
+            .ok_or_else(|| "the editor view is not ready".to_string())
+            .and_then(|editor| editor.open_file(&path));
+        if let Err(error) = open_result {
+            tracing::warn!(path = %path.display(), %error, "failed to open file in editor");
+            self.clipboard_toast
+                .show_with_message(&format!("Could not open file: {error}"));
+        }
+        self.refresh_window_title().await;
+        self.focus_pane(target_pane);
+    }
+
     /// Single entry point for recomputing workspace label and subtitles.
     ///
     /// Design:
@@ -181,5 +293,32 @@ impl WindowController {
         if let Some(pane) = self.focused_pane.get() {
             self.show_file_browser_for_pane(pane).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn editor_target_prefers_live_source_then_mru_then_first_leaf() {
+        let first = PaneId::new();
+        let second = PaneId::new();
+        let stale = PaneId::new();
+        let leaves = [first, second];
+
+        assert_eq!(
+            resolve_editor_target(Some(second), &[first], &leaves),
+            Some(second)
+        );
+        assert_eq!(
+            resolve_editor_target(Some(stale), &[stale, second], &leaves),
+            Some(second)
+        );
+        assert_eq!(
+            resolve_editor_target(Some(stale), &[stale], &leaves),
+            Some(first)
+        );
+        assert_eq!(resolve_editor_target(None, &[], &[]), None);
     }
 }

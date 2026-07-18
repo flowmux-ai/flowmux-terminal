@@ -174,6 +174,16 @@ impl DocumentService {
         &self.workspace_root
     }
 
+    pub fn contains_path(&self, path: impl AsRef<Path>) -> bool {
+        let Ok(display_path) = absolute_path(path.as_ref()) else {
+            return false;
+        };
+        let Ok(identity_path) = fs::canonicalize(display_path) else {
+            return false;
+        };
+        self.identities.contains_key(&identity_path)
+    }
+
     pub fn open(&mut self, path: impl AsRef<Path>) -> Result<OpenDocument, DocumentError> {
         let display_path = absolute_path(path.as_ref())?;
         let identity_path = fs::canonicalize(&display_path)

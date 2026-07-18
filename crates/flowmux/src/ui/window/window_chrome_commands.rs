@@ -93,6 +93,9 @@ impl WindowController {
             GtkCommand::FileBrowserCloseAndRestoreFocus => {
                 self.close_file_browser_and_restore_focus();
             }
+            GtkCommand::OpenFileInEditor { path, source_pane } => {
+                self.open_file_in_editor(path, source_pane).await;
+            }
             GtkCommand::ToggleWorktreePanel { pane } => {
                 if self.worktrees.panel.widget().is_visible() {
                     self.close_worktree_panel_and_restore_focus();

@@ -832,6 +832,18 @@ impl WindowController {
                     .await;
             });
         });
+        let file_browser_bridge = bridge.clone();
+        let file_browser_source_for_open = file_browser_source_pane.clone();
+        file_browser.connect_open_file(move |path| {
+            let bridge = file_browser_bridge.clone();
+            let source_pane = file_browser_source_for_open.get();
+            glib::MainContext::default().spawn_local(async move {
+                let _ = bridge
+                    .tx
+                    .send(GtkCommand::OpenFileInEditor { path, source_pane })
+                    .await;
+            });
+        });
 
         file_browser.widget().set_vexpand(true);
 
@@ -1707,6 +1719,7 @@ impl WindowController {
             | GtkCommand::ShowCommandPalette
             | GtkCommand::FileBrowserFocusOut { .. }
             | GtkCommand::FileBrowserCloseAndRestoreFocus
+            | GtkCommand::OpenFileInEditor { .. }
             | GtkCommand::ToggleWorktreePanel { .. }
             | GtkCommand::RefreshWorktrees
             | GtkCommand::WorktreesLoaded { .. }

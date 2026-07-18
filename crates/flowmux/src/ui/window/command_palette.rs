@@ -627,6 +627,8 @@ impl WindowController {
             let entries = entries.clone();
             let no_results = no_results.clone();
             let palette_mru = self.palette_mru.clone();
+            let bridge = self.bridge.clone();
+            let source_pane = self.focused_pane.get();
             glib::MainContext::default().spawn_local(async move {
                 let worker_root = root.clone();
                 let quick_open =
@@ -649,9 +651,17 @@ impl WindowController {
                         button.set_visible(fuzzy_matches_prepared(&query, &label.to_lowercase()));
                         let dialog_for_click = dialog.clone();
                         let path = path.clone();
+                        let bridge = bridge.clone();
                         button.connect_clicked(move |_| {
                             dialog_for_click.close();
-                            crate::ui::file_browser::open_file(&path);
+                            let bridge = bridge.clone();
+                            let path = path.clone();
+                            glib::MainContext::default().spawn_local(async move {
+                                let _ = bridge
+                                    .tx
+                                    .send(GtkCommand::OpenFileInEditor { path, source_pane })
+                                    .await;
+                            });
                         });
                         let key = label.clone();
                         let mru = palette_mru.clone();

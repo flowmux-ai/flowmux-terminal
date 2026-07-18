@@ -328,6 +328,11 @@ pub enum GtkCommand {
     FileBrowserFocusOut { dir: FocusDir },
     /// Close the right-side FileBrowser and restore focus to the source pane.
     FileBrowserCloseAndRestoreFocus,
+    /// Open a file in an editor surface selected from the source workspace.
+    OpenFileInEditor {
+        path: PathBuf,
+        source_pane: Option<PaneId>,
+    },
     /// Open a Ctrl-clicked terminal URL in a new browser tab in the same
     /// pane. `pane` is the source terminal pane and `url` has already had
     /// trailing punctuation trimmed.

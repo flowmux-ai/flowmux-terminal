@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 type DeleteHandler = Arc<dyn Fn(&Path, &FileOperationControl) -> io::Result<()> + Send + Sync>;
+type OpenFileHandler = Rc<RefCell<Box<dyn Fn(PathBuf)>>>;
 const ROW_BATCH_SIZE: usize = 500;
 
 #[derive(Clone)]
@@ -35,6 +36,7 @@ pub struct FileBrowserPanel {
     model: Rc<RefCell<FileBrowserModel>>,
     delete_handler: Rc<RefCell<DeleteHandler>>,
     path_clipboard_writer: Rc<RefCell<Box<dyn Fn(&str)>>>,
+    on_open_file: OpenFileHandler,
     on_focus_out: Rc<RefCell<Option<Box<dyn Fn(FocusDir)>>>>,
     on_escape: Rc<RefCell<Option<Box<dyn Fn()>>>>,
     on_focus_changed: Rc<RefCell<Option<Box<dyn Fn(bool)>>>>,
@@ -305,6 +307,7 @@ impl FileBrowserPanel {
             path_clipboard_writer: Rc::new(RefCell::new(Box::new(move |path| {
                 clipboard_root.clipboard().set_text(path);
             }))),
+            on_open_file: Rc::new(RefCell::new(Box::new(|path| open_file(&path)))),
             on_focus_out: Rc::new(RefCell::new(None)),
             on_escape: Rc::new(RefCell::new(None)),
             on_focus_changed: Rc::new(RefCell::new(None)),
@@ -416,6 +419,10 @@ impl FileBrowserPanel {
     /// whether the browser actually holds focus, which disambiguates Alt+arrow.
     pub fn connect_focus_changed<F: Fn(bool) + 'static>(&self, f: F) {
         *self.on_focus_changed.borrow_mut() = Some(Box::new(f));
+    }
+
+    pub fn connect_open_file<F: Fn(PathBuf) + 'static>(&self, f: F) {
+        *self.on_open_file.borrow_mut() = Box::new(f);
     }
 
     #[cfg(all(test, not(target_os = "macos")))]
@@ -1048,7 +1055,7 @@ impl FileBrowserPanel {
         match activation {
             FileBrowserActivation::None => {}
             FileBrowserActivation::Refresh => self.refresh(),
-            FileBrowserActivation::Open(path) => open_file(&path),
+            FileBrowserActivation::Open(path) => (self.on_open_file.borrow())(path),
         }
     }
 
@@ -1538,7 +1545,7 @@ impl FileBrowserPanel {
                 }
                 gdk::BUTTON_SECONDARY => {
                     panel.focus_path(path.clone());
-                    show_context_menu(&row_for_menu, &path, x, y);
+                    show_context_menu(&row_for_menu, &path, x, y, panel.on_open_file.clone());
                 }
                 _ => {}
             },
@@ -2335,7 +2342,13 @@ fn is_cross_device_error(error: &io::Error) -> bool {
     error.raw_os_error() == Some(libc::EXDEV)
 }
 
-fn show_context_menu(parent: &impl IsA<gtk::Widget>, path: &Path, x: f64, y: f64) {
+fn show_context_menu(
+    parent: &impl IsA<gtk::Widget>,
+    path: &Path,
+    x: f64,
+    y: f64,
+    on_open_file: OpenFileHandler,
+) {
     let popover = gtk::Popover::new();
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     content.set_margin_top(4);
@@ -2348,10 +2361,22 @@ fn show_context_menu(parent: &impl IsA<gtk::Widget>, path: &Path, x: f64, y: f64
     let target = path.to_path_buf();
     let pop = popover.clone();
     open.connect_clicked(move |_| {
-        open_file(&target);
+        (on_open_file.borrow())(target.clone());
         pop.popdown();
     });
     content.append(&open);
+
+    let open_externally = gtk::Button::with_label("Open Externally");
+    open_externally.add_css_class("flat");
+    open_externally.set_halign(gtk::Align::Fill);
+    open_externally.set_hexpand(true);
+    let target = path.to_path_buf();
+    let pop = popover.clone();
+    open_externally.connect_clicked(move |_| {
+        open_file(&target);
+        pop.popdown();
+    });
+    content.append(&open_externally);
 
     let show = gtk::Button::with_label("Show in folder");
     show.add_css_class("flat");
@@ -2416,6 +2441,57 @@ pub(crate) fn open_file(path: &Path) {
     if let Err(err) = gio::AppInfo::launch_default_for_uri(&uri, None::<&gio::AppLaunchContext>) {
         tracing::warn!(path = %path.display(), error = %err, "failed to open file");
     }
+}
+
+pub(crate) fn should_open_in_editor(path: &Path) -> bool {
+    let Some(extension) = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+    else {
+        return true;
+    };
+
+    !matches!(
+        extension.as_str(),
+        "png"
+            | "jpg"
+            | "jpeg"
+            | "gif"
+            | "webp"
+            | "bmp"
+            | "ico"
+            | "svg"
+            | "pdf"
+            | "mp3"
+            | "wav"
+            | "flac"
+            | "ogg"
+            | "m4a"
+            | "mp4"
+            | "mov"
+            | "mkv"
+            | "webm"
+            | "avi"
+            | "zip"
+            | "gz"
+            | "bz2"
+            | "xz"
+            | "7z"
+            | "rar"
+            | "tar"
+            | "dmg"
+            | "iso"
+            | "exe"
+            | "dll"
+            | "so"
+            | "dylib"
+            | "a"
+            | "o"
+            | "class"
+            | "jar"
+            | "wasm"
+    )
 }
 
 fn is_markdown_file(path: &Path) -> bool {
@@ -2849,6 +2925,34 @@ mod tests {
         assert!(system_file_icon_name(&missing).is_none());
         assert_eq!(fallback_icon_name(false), "text-x-generic-symbolic");
         assert_eq!(fallback_icon_name(true), "folder-symbolic");
+    }
+
+    #[test]
+    fn editor_routing_keeps_text_and_markdown_but_excludes_viewer_formats() {
+        for path in ["main.rs", "README.md", "설정.json", "Dockerfile"] {
+            assert!(should_open_in_editor(Path::new(path)), "{path}");
+        }
+        for path in ["image.png", "manual.pdf", "movie.mp4", "archive.zip"] {
+            assert!(!should_open_in_editor(Path::new(path)), "{path}");
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[gtk::test]
+    fn panel_activation_uses_the_configured_open_handler() {
+        let tmp = TestDir::new("panel-open-handler");
+        let path = tmp.file("다국어.rs");
+        let opened = Rc::new(RefCell::new(None));
+        let panel = FileBrowserPanel::new();
+        {
+            let opened = opened.clone();
+            panel.connect_open_file(move |path| *opened.borrow_mut() = Some(path));
+        }
+        panel.show_for_root(tmp.path.clone());
+
+        panel.activate_focused();
+
+        assert_eq!(*opened.borrow(), Some(path));
     }
 
     #[cfg(not(target_os = "macos"))]

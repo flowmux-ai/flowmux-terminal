@@ -115,6 +115,22 @@ impl EditorHostState {
         }
     }
 
+    pub(super) fn contains_document(&self, path: &Path) -> bool {
+        match &*self.session.borrow() {
+            Ok(session) => session.contains_document(path),
+            Err(_) => false,
+        }
+    }
+
+    pub(super) fn open_document(&self, path: &Path) -> Result<HostMessage, String> {
+        match &mut *self.session.borrow_mut() {
+            Ok(session) => session
+                .open_document(path)
+                .map_err(|error| error.to_string()),
+            Err(error) => Err(error.clone()),
+        }
+    }
+
     fn handle(&self, message: EditorMessage) -> Vec<HostMessage> {
         let result = match &mut *self.session.borrow_mut() {
             Ok(session) => session.handle_editor_message(message),
