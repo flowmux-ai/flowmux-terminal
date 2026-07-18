@@ -4,7 +4,7 @@
 use crate::{
     DiskStatus, DocumentDiskStatus, DocumentError, DocumentId, DocumentPayload, DocumentService,
     DocumentSnapshot, EditorMessage, HostMessage, LineEnding, RecoveryChoice, RecoveryDiskState,
-    RecoveryOperation, RecoverySnapshot, RecoveryStore, TextDocumentEncoding,
+    RecoveryOperation, RecoverySnapshot, RecoveryStore, SearchDocument, TextDocumentEncoding,
     TextDocumentLineEnding, TextEncoding,
 };
 use std::collections::HashMap;
@@ -144,6 +144,39 @@ impl EditorSession {
             .filter(|snapshot| snapshot.is_dirty())
             .map(|snapshot| snapshot.display_path)
             .collect()
+    }
+
+    pub fn search_documents(&self) -> Vec<SearchDocument> {
+        self.open_order
+            .iter()
+            .filter_map(|id| self.documents.snapshot(*id).ok())
+            .map(|snapshot| SearchDocument {
+                path: snapshot.identity_path,
+                content: snapshot.text,
+            })
+            .collect()
+    }
+
+    pub fn open_search_result(
+        &mut self,
+        path: impl AsRef<Path>,
+        line: u32,
+        column: u32,
+        length: u32,
+    ) -> Result<Vec<HostMessage>, DocumentError> {
+        let mut messages = self.open_document(path)?;
+        let Some(active) = self.active else {
+            return Ok(messages);
+        };
+        let snapshot = self.documents.snapshot(active)?;
+        messages.push(HostMessage::RevealRange {
+            document_id: protocol_id(active),
+            document_version: snapshot.version,
+            line,
+            column,
+            length,
+        });
+        Ok(messages)
     }
 
     /// Save every dirty document before its editor surface is closed.
@@ -366,6 +399,10 @@ impl EditorSession {
                 );
                 Ok(Vec::new())
             }
+            EditorMessage::QuickOpenRequested { .. }
+            | EditorMessage::WorkspaceSearchRequested { .. }
+            | EditorMessage::SearchCancelled { .. }
+            | EditorMessage::SearchResultOpenRequested { .. } => Ok(Vec::new()),
         }
     }
 
@@ -673,6 +710,41 @@ mod tests {
         assert_eq!(snapshot.open_files[0].view.cursor_line, 12);
         assert_eq!(snapshot.open_files[0].view.cursor_column, 5);
         assert_eq!(snapshot.open_files[0].view.scroll_top, 144.0);
+    }
+
+    #[test]
+    fn search_documents_use_live_text_and_result_reveals_utf16_range() {
+        let workspace = tempdir().unwrap();
+        let path = workspace.path().join("검색🙂.txt");
+        fs::write(&path, "disk\n").unwrap();
+        let mut session = EditorSession::new(workspace.path()).unwrap();
+        let document = open_payload(session.open_document(&path).unwrap());
+        session
+            .handle_editor_message(EditorMessage::DocumentChanged {
+                document_id: document.id,
+                document_version: document.version,
+                change_sequence: 1,
+                content: "live 검색🙂\n".into(),
+            })
+            .unwrap();
+
+        assert_eq!(
+            session.search_documents(),
+            vec![SearchDocument {
+                path: fs::canonicalize(&path).unwrap(),
+                content: "live 검색🙂\n".into(),
+            }]
+        );
+        let messages = session.open_search_result(path, 7, 3, 4).unwrap();
+        assert!(matches!(
+            messages.last(),
+            Some(HostMessage::RevealRange {
+                line: 7,
+                column: 3,
+                length: 4,
+                ..
+            })
+        ));
     }
 
     #[test]

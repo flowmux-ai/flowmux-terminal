@@ -3,18 +3,46 @@
 
 use flowmux_core::{EditorFileState, EditorSessionState, SurfaceId};
 use flowmux_editor::{
-    javascript_for_host_message, parse_editor_message, EditorFileSessionState, EditorMessage,
-    EditorSession, EditorSessionSnapshot, EditorViewState, HostMessage, ProtocolError,
-    RecoveryOperation, RecoveryStore,
+    index_workspace_files, javascript_for_host_message, parse_editor_message, search_workspace,
+    EditorFileSessionState, EditorMessage, EditorSession, EditorSessionSnapshot, EditorViewState,
+    HostMessage, ProtocolError, RecoveryOperation, RecoveryStore, SearchCancellation,
+    SearchOptions, WorkspaceSearchResult,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::Duration;
 
 const RECOVERY_DEBOUNCE: Duration = Duration::from_millis(350);
+const QUICK_OPEN_LIMIT: usize = 2_000;
+
+enum SearchWorkerMessage {
+    QuickOpen {
+        request_id: String,
+        paths: Vec<String>,
+        truncated: bool,
+    },
+    WorkspaceSearch {
+        request_id: String,
+        result: WorkspaceSearchResult,
+        error: Option<String>,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum SearchWorkerKind {
+    QuickOpen,
+    WorkspaceSearch,
+}
+
+struct SearchWorker {
+    request_id: String,
+    kind: SearchWorkerKind,
+    cancellation: SearchCancellation,
+    receiver: Receiver<SearchWorkerMessage>,
+}
 
 #[derive(Default)]
 pub(super) struct EditorBridgeReceive {
@@ -96,11 +124,13 @@ impl EditorBridgeState {
 }
 
 pub(super) struct EditorHostState {
+    workspace_root: PathBuf,
     session: RefCell<Result<EditorSession, String>>,
     startup_messages: RefCell<Vec<HostMessage>>,
     recovery_sender: Option<Sender<RecoveryOperation>>,
     pending_recovery: RefCell<HashMap<PathBuf, RecoveryOperation>>,
     recovery_generation: Cell<u64>,
+    search_worker: RefCell<Option<SearchWorker>>,
 }
 
 impl EditorHostState {
@@ -150,11 +180,13 @@ impl EditorHostState {
         }
         let recovery_sender = recovery_store.and_then(start_recovery_worker);
         let host = Self {
+            workspace_root: workspace_root.to_path_buf(),
             session: RefCell::new(session),
             startup_messages: RefCell::new(startup_messages),
             recovery_sender,
             pending_recovery: RefCell::new(HashMap::new()),
             recovery_generation: Cell::new(0),
+            search_worker: RefCell::new(None),
         };
         host.stage_recovery_operations();
         host
@@ -220,6 +252,28 @@ impl EditorHostState {
     }
 
     fn handle(&self, message: EditorMessage) -> Vec<HostMessage> {
+        match message {
+            EditorMessage::QuickOpenRequested { request_id } => self.start_quick_open(request_id),
+            EditorMessage::WorkspaceSearchRequested {
+                request_id,
+                query,
+                options,
+            } => self.start_workspace_search(request_id, query, options),
+            EditorMessage::SearchCancelled { request_id } => {
+                self.cancel_search(&request_id);
+                Vec::new()
+            }
+            EditorMessage::SearchResultOpenRequested {
+                path,
+                line,
+                column,
+                length,
+            } => self.open_search_result(path, line, column, length),
+            message => self.handle_session_message(message),
+        }
+    }
+
+    fn handle_session_message(&self, message: EditorMessage) -> Vec<HostMessage> {
         let result = match &mut *self.session.borrow_mut() {
             Ok(session) => session.handle_editor_message(message),
             Err(error) => {
@@ -232,6 +286,200 @@ impl EditorHostState {
             Err(error) => {
                 tracing::warn!(%error, "editor document message was rejected");
                 Vec::new()
+            }
+        }
+    }
+
+    fn start_quick_open(&self, request_id: String) -> Vec<HostMessage> {
+        self.cancel_current_search();
+        let root = self.workspace_root.clone();
+        let cancellation = SearchCancellation::default();
+        let worker_cancellation = cancellation.clone();
+        let (sender, receiver) = mpsc::channel();
+        let worker_request_id = request_id.clone();
+        let spawned = std::thread::Builder::new()
+            .name("flowmux-editor-quick-open".into())
+            .spawn(move || {
+                let mut paths = index_workspace_files(
+                    &root,
+                    QUICK_OPEN_LIMIT.saturating_add(1),
+                    &worker_cancellation,
+                );
+                let truncated = paths.len() > QUICK_OPEN_LIMIT;
+                paths.truncate(QUICK_OPEN_LIMIT);
+                let paths = paths
+                    .into_iter()
+                    .filter_map(|path| path.strip_prefix(&root).ok()?.to_str().map(str::to_string))
+                    .collect();
+                let _ = sender.send(SearchWorkerMessage::QuickOpen {
+                    request_id: worker_request_id,
+                    paths,
+                    truncated,
+                });
+            });
+        if let Err(error) = spawned {
+            tracing::warn!(%error, "failed to start editor quick open worker");
+            return vec![HostMessage::QuickOpenCompleted {
+                request_id,
+                paths: Vec::new(),
+                truncated: false,
+            }];
+        }
+        *self.search_worker.borrow_mut() = Some(SearchWorker {
+            request_id,
+            kind: SearchWorkerKind::QuickOpen,
+            cancellation,
+            receiver,
+        });
+        Vec::new()
+    }
+
+    fn start_workspace_search(
+        &self,
+        request_id: String,
+        query: String,
+        options: SearchOptions,
+    ) -> Vec<HostMessage> {
+        self.cancel_current_search();
+        let documents = match &*self.session.borrow() {
+            Ok(session) => session.search_documents(),
+            Err(error) => {
+                return vec![HostMessage::WorkspaceSearchCompleted {
+                    request_id,
+                    result: WorkspaceSearchResult::default(),
+                    error: Some(error.clone()),
+                }];
+            }
+        };
+        let root = self.workspace_root.clone();
+        let cancellation = SearchCancellation::default();
+        let worker_cancellation = cancellation.clone();
+        let (sender, receiver) = mpsc::channel();
+        let worker_request_id = request_id.clone();
+        let spawned = std::thread::Builder::new()
+            .name("flowmux-editor-search".into())
+            .spawn(move || {
+                let (result, error) = match search_workspace(
+                    &root,
+                    &query,
+                    &options,
+                    &documents,
+                    &worker_cancellation,
+                ) {
+                    Ok(result) => (result, None),
+                    Err(error) => (WorkspaceSearchResult::default(), Some(error.to_string())),
+                };
+                let _ = sender.send(SearchWorkerMessage::WorkspaceSearch {
+                    request_id: worker_request_id,
+                    result,
+                    error,
+                });
+            });
+        if let Err(error) = spawned {
+            tracing::warn!(%error, "failed to start editor workspace search worker");
+            return vec![HostMessage::WorkspaceSearchCompleted {
+                request_id,
+                result: WorkspaceSearchResult::default(),
+                error: Some("Workspace search could not be started.".into()),
+            }];
+        }
+        *self.search_worker.borrow_mut() = Some(SearchWorker {
+            request_id,
+            kind: SearchWorkerKind::WorkspaceSearch,
+            cancellation,
+            receiver,
+        });
+        Vec::new()
+    }
+
+    fn cancel_search(&self, request_id: &str) {
+        let matches = self
+            .search_worker
+            .borrow()
+            .as_ref()
+            .is_some_and(|worker| worker.request_id == request_id);
+        if matches {
+            self.cancel_current_search();
+        }
+    }
+
+    fn cancel_current_search(&self) {
+        if let Some(worker) = self.search_worker.borrow_mut().take() {
+            worker.cancellation.cancel();
+        }
+    }
+
+    fn open_search_result(
+        &self,
+        relative_path: String,
+        line: u32,
+        column: u32,
+        length: u32,
+    ) -> Vec<HostMessage> {
+        let path = self.workspace_root.join(relative_path);
+        let result = match &mut *self.session.borrow_mut() {
+            Ok(session) => session.open_search_result(path, line, column, length),
+            Err(error) => {
+                tracing::warn!(%error, "editor document session is unavailable");
+                return Vec::new();
+            }
+        };
+        match result {
+            Ok(messages) => messages,
+            Err(error) => {
+                tracing::warn!(%error, "failed to open editor workspace search result");
+                Vec::new()
+            }
+        }
+    }
+
+    pub(super) fn poll_search_messages(&self) -> Vec<HostMessage> {
+        let received = {
+            let workers = self.search_worker.borrow();
+            let Some(worker) = workers.as_ref() else {
+                return Vec::new();
+            };
+            match worker.receiver.try_recv() {
+                Ok(message) => Ok(message),
+                Err(TryRecvError::Empty) => return Vec::new(),
+                Err(TryRecvError::Disconnected) => Err((worker.request_id.clone(), worker.kind)),
+            }
+        };
+        self.search_worker.borrow_mut().take();
+        match received {
+            Ok(SearchWorkerMessage::QuickOpen {
+                request_id,
+                paths,
+                truncated,
+            }) => vec![HostMessage::QuickOpenCompleted {
+                request_id,
+                paths,
+                truncated,
+            }],
+            Ok(SearchWorkerMessage::WorkspaceSearch {
+                request_id,
+                result,
+                error,
+            }) => vec![HostMessage::WorkspaceSearchCompleted {
+                request_id,
+                result,
+                error,
+            }],
+            Err((request_id, SearchWorkerKind::QuickOpen)) => {
+                tracing::warn!("editor quick open worker stopped unexpectedly");
+                vec![HostMessage::QuickOpenCompleted {
+                    request_id,
+                    paths: Vec::new(),
+                    truncated: false,
+                }]
+            }
+            Err((request_id, SearchWorkerKind::WorkspaceSearch)) => {
+                tracing::warn!("editor workspace search worker stopped unexpectedly");
+                vec![HostMessage::WorkspaceSearchCompleted {
+                    request_id,
+                    result: WorkspaceSearchResult::default(),
+                    error: Some("Workspace search stopped unexpectedly.".into()),
+                }]
             }
         }
     }
@@ -303,6 +551,14 @@ impl EditorHostState {
                 tracing::warn!(%error, "failed to inspect open editor documents");
                 Vec::new()
             }
+        }
+    }
+}
+
+impl Drop for EditorHostState {
+    fn drop(&mut self) {
+        if let Some(worker) = self.search_worker.get_mut().take() {
+            worker.cancellation.cancel();
         }
     }
 }
@@ -437,6 +693,18 @@ pub use imp::*;
 mod tests {
     use super::*;
     use flowmux_core::SurfaceId;
+    use std::fs;
+
+    fn wait_for_search(host: &EditorHostState) -> Vec<HostMessage> {
+        for _ in 0..100 {
+            let messages = host.poll_search_messages();
+            if !messages.is_empty() {
+                return messages;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("editor search worker did not complete");
+    }
 
     #[test]
     fn navigation_is_limited_to_exact_token_prefix() {
@@ -495,6 +763,58 @@ mod tests {
         ));
         assert!(!should_poll_editor_documents(
             gtk::gio::FileMonitorEvent::PreUnmount
+        ));
+    }
+
+    #[test]
+    fn latest_workspace_search_opens_multilingual_result_at_range() {
+        let workspace = tempfile::tempdir().unwrap();
+        let path = workspace.path().join("문서-日本語🙂.txt");
+        fs::write(&path, "첫 줄\n찾을 값🙂\n").unwrap();
+        let host = EditorHostState::new(workspace.path(), EditorSessionState::default());
+
+        host.handle(EditorMessage::WorkspaceSearchRequested {
+            request_id: "search-old".into(),
+            query: "missing".into(),
+            options: SearchOptions::default(),
+        });
+        host.handle(EditorMessage::WorkspaceSearchRequested {
+            request_id: "search-latest".into(),
+            query: "값🙂".into(),
+            options: SearchOptions::default(),
+        });
+
+        let completion = wait_for_search(&host);
+        let [HostMessage::WorkspaceSearchCompleted {
+            request_id,
+            result,
+            error,
+        }] = completion.as_slice()
+        else {
+            panic!("expected workspace search completion");
+        };
+        assert_eq!(request_id, "search-latest");
+        assert!(error.is_none());
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0].path, "문서-日本語🙂.txt");
+
+        let messages = host.handle(EditorMessage::SearchResultOpenRequested {
+            path: result.matches[0].path.clone(),
+            line: result.matches[0].line,
+            column: result.matches[0].column,
+            length: result.matches[0].length,
+        });
+        assert!(matches!(
+            messages.as_slice(),
+            [
+                HostMessage::OpenDocument { .. },
+                HostMessage::RevealRange {
+                    line: 1,
+                    column: 3,
+                    length: 3,
+                    ..
+                }
+            ]
         ));
     }
 }

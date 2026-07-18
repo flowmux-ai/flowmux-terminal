@@ -57,6 +57,8 @@ impl EditorPane {
         self.root.grab_focus();
     }
 
+    pub fn show_workspace_search(&self) {}
+
     pub fn open_file(&self, _path: &Path) -> Result<(), String> {
         Err("the embedded editor is unavailable on this platform".into())
     }

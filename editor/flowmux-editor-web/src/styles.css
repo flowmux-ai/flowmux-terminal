@@ -146,6 +146,143 @@ body {
   opacity: 0.5;
 }
 
+.search-dialog {
+  width: min(680px, calc(100% - 32px));
+  max-height: min(620px, calc(100% - 32px));
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--muted) 35%, transparent);
+  border-radius: 10px;
+  color: var(--text);
+  background: var(--panel);
+  box-shadow: 0 18px 48px rgb(0 0 0 / 45%);
+}
+
+.search-dialog::backdrop {
+  background: rgb(0 0 0 / 30%);
+}
+
+.search-dialog-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.search-dialog-header h2 {
+  flex: 1;
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.search-dialog input,
+.search-dialog button {
+  border: 1px solid color-mix(in srgb, var(--muted) 35%, transparent);
+  border-radius: 5px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--panel) 75%, var(--text) 8%);
+  font: inherit;
+}
+
+.search-dialog input:focus-visible,
+.search-dialog button:focus-visible {
+  outline: 2px solid #72b7a8;
+  outline-offset: 1px;
+}
+
+#search-query {
+  width: 100%;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.icon-button {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  font-size: 18px;
+}
+
+.search-options {
+  display: grid;
+  grid-template-columns: auto auto auto minmax(120px, 1fr) minmax(120px, 1fr);
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.search-options[hidden] {
+  display: none;
+}
+
+.search-options button {
+  min-width: 32px;
+  padding: 5px 7px;
+}
+
+.search-options button[aria-pressed="true"] {
+  border-color: #72b7a8;
+  background: #365c59;
+}
+
+.search-options input {
+  min-width: 0;
+  padding: 5px 7px;
+}
+
+.search-status {
+  min-height: 18px;
+  margin: 7px 2px 3px;
+  color: var(--muted);
+}
+
+.search-results {
+  max-height: 430px;
+  overflow: auto;
+}
+
+.search-result {
+  display: block;
+  width: 100%;
+  padding: 7px 9px;
+  border: 0 !important;
+  text-align: left;
+  background: transparent !important;
+}
+
+.search-result:hover,
+.search-result.is-selected {
+  background: color-mix(in srgb, #365c59 70%, transparent) !important;
+}
+
+.search-result-path,
+.search-result-preview {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.search-result-preview {
+  margin-top: 2px;
+  color: var(--muted);
+  font-family: "SFMono-Regular", "Noto Sans Mono CJK KR", monospace;
+}
+
+.search-result-preview mark {
+  color: var(--text);
+  background: #6b5a2f;
+}
+
+@media (max-width: 560px) {
+  .search-options {
+    grid-template-columns: auto auto auto;
+  }
+
+  .search-options input {
+    grid-column: 1 / -1;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

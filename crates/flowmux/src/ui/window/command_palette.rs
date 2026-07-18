@@ -92,38 +92,11 @@ fn record_palette_mru(mru: &mut std::collections::VecDeque<String>, key: &str) {
 }
 
 fn quick_open_files(root: &std::path::Path, limit: usize) -> Vec<std::path::PathBuf> {
-    let mut files = Vec::new();
-    let mut directories = std::collections::VecDeque::from([root.to_path_buf()]);
-    while let Some(directory) = directories.pop_front() {
-        let Ok(entries) = std::fs::read_dir(directory) else {
-            continue;
-        };
-        let mut entries = entries.flatten().collect::<Vec<_>>();
-        entries.sort_by_key(std::fs::DirEntry::file_name);
-        for entry in entries {
-            let path = entry.path();
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if file_type.is_symlink() {
-                continue;
-            }
-            if file_type.is_dir() {
-                let name = entry.file_name();
-                if !matches!(name.to_str(), Some(".git" | "target" | "node_modules")) {
-                    directories.push_back(path);
-                }
-            } else if file_type.is_file() {
-                files.push(path);
-                if files.len() >= limit {
-                    files.sort_by_key(|path| (path.components().count(), path.clone()));
-                    return files;
-                }
-            }
-        }
-    }
-    files.sort_by_key(|path| (path.components().count(), path.clone()));
-    files
+    flowmux_editor::index_workspace_files(
+        root,
+        limit,
+        &flowmux_editor::SearchCancellation::default(),
+    )
 }
 
 pub(super) fn development_workspace_template() -> WorkspaceTemplate {
@@ -1011,7 +984,9 @@ mod tests {
     #[test]
     fn quick_open_skips_build_trees_and_respects_limit() {
         let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join(".gitignore"), "ignored.rs\n").unwrap();
         std::fs::write(root.path().join("one.rs"), "one").unwrap();
+        std::fs::write(root.path().join("ignored.rs"), "ignored").unwrap();
         std::fs::create_dir(root.path().join("src")).unwrap();
         std::fs::write(root.path().join("src/two.rs"), "two").unwrap();
         std::fs::create_dir(root.path().join("target")).unwrap();
@@ -1029,6 +1004,7 @@ mod tests {
         assert!(files
             .iter()
             .all(|path| !path.starts_with(root.path().join("external-link"))));
+        assert!(!files.contains(&root.path().join("ignored.rs")));
     }
 
     #[test]

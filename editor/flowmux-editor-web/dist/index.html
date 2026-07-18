@@ -17,6 +17,24 @@
       </section>
       <div id="editor" class="editor" aria-label="Text editor"></div>
       <span id="document-state" class="document-state" aria-live="polite" hidden></span>
+      <dialog id="search-dialog" class="search-dialog" aria-labelledby="search-dialog-title">
+        <div class="search-dialog-header">
+          <h2 id="search-dialog-title">Open File</h2>
+          <button id="search-dialog-close" class="icon-button" type="button" aria-label="Close">
+            ×
+          </button>
+        </div>
+        <input id="search-query" type="search" autocomplete="off" spellcheck="false">
+        <div id="search-options" class="search-options" hidden>
+          <button id="search-case" type="button" aria-pressed="false" title="Match case">Aa</button>
+          <button id="search-word" type="button" aria-pressed="false" title="Match whole word">ab</button>
+          <button id="search-regex" type="button" aria-pressed="false" title="Use regular expression">.*</button>
+          <input id="search-include" type="text" placeholder="Include: src/**" aria-label="Files to include">
+          <input id="search-exclude" type="text" placeholder="Exclude: **/*.min.js" aria-label="Files to exclude">
+        </div>
+        <p id="search-status" class="search-status" aria-live="polite"></p>
+        <div id="search-results" class="search-results" role="listbox"></div>
+      </dialog>
       <dialog id="close-dialog" class="close-dialog" aria-labelledby="close-dialog-title">
         <h2 id="close-dialog-title">Save changes?</h2>
         <p><span id="close-dialog-document"></span> has unsaved changes.</p>

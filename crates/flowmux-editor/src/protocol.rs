@@ -1,13 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Versioned messages exchanged with the editor WebView.
 
-use crate::{RecoveryDiskState, DEFAULT_MAX_DOCUMENT_BYTES};
+use crate::{RecoveryDiskState, SearchOptions, WorkspaceSearchResult, DEFAULT_MAX_DOCUMENT_BYTES};
 use serde::{Deserialize, Serialize};
+use std::path::{Component, Path};
 use thiserror::Error;
 
 pub const PROTOCOL_VERSION: u16 = 1;
 pub const MAX_BRIDGE_MESSAGE_BYTES: usize = DEFAULT_MAX_DOCUMENT_BYTES as usize + 64 * 1024;
 const MAX_IDENTIFIER_BYTES: usize = 128;
+const MAX_SEARCH_QUERY_BYTES: usize = 4 * 1024;
+const MAX_SEARCH_PATH_BYTES: usize = 16 * 1024;
+const MAX_SEARCH_GLOBS: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TextDocumentEncoding {
@@ -101,6 +105,24 @@ pub enum HostMessage {
         document_version: u64,
         disk_state: RecoveryDiskState,
     },
+    ShowWorkspaceSearch,
+    QuickOpenCompleted {
+        request_id: String,
+        paths: Vec<String>,
+        truncated: bool,
+    },
+    WorkspaceSearchCompleted {
+        request_id: String,
+        result: WorkspaceSearchResult,
+        error: Option<String>,
+    },
+    RevealRange {
+        document_id: String,
+        document_version: u64,
+        line: u32,
+        column: u32,
+        length: u32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,6 +177,23 @@ pub enum EditorMessage {
         cursor_column: u32,
         scroll_top: f64,
     },
+    QuickOpenRequested {
+        request_id: String,
+    },
+    WorkspaceSearchRequested {
+        request_id: String,
+        query: String,
+        options: SearchOptions,
+    },
+    SearchCancelled {
+        request_id: String,
+    },
+    SearchResultOpenRequested {
+        path: String,
+        line: u32,
+        column: u32,
+        length: u32,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -189,6 +228,10 @@ pub enum ProtocolError {
     DocumentTooLarge { limit: usize },
     #[error("invalid editor document view state")]
     InvalidViewState,
+    #[error("invalid editor workspace search request")]
+    InvalidSearchRequest,
+    #[error("invalid editor workspace search path")]
+    InvalidSearchPath,
 }
 
 pub fn parse_editor_message(input: &str) -> Result<(String, EditorMessage), ProtocolError> {
@@ -271,6 +314,35 @@ fn validate_editor_message(message: &EditorMessage) -> Result<(), ProtocolError>
             validate_identifier("document ID", document_id)?;
             validate_document_size(content)
         }
+        EditorMessage::QuickOpenRequested { request_id }
+        | EditorMessage::SearchCancelled { request_id } => {
+            validate_identifier("search request ID", request_id)
+        }
+        EditorMessage::WorkspaceSearchRequested {
+            request_id,
+            query,
+            options,
+        } => {
+            validate_identifier("search request ID", request_id)?;
+            if query.is_empty()
+                || query.len() > MAX_SEARCH_QUERY_BYTES
+                || options.include.len() > MAX_SEARCH_GLOBS
+                || options.exclude.len() > MAX_SEARCH_GLOBS
+                || options.max_results == 0
+                || options.max_results > crate::DEFAULT_MAX_SEARCH_RESULTS
+                || options.max_file_bytes == 0
+                || options.max_file_bytes > crate::DEFAULT_MAX_SEARCH_FILE_BYTES
+                || options
+                    .include
+                    .iter()
+                    .chain(&options.exclude)
+                    .any(|pattern| pattern.is_empty() || pattern.len() > MAX_SEARCH_QUERY_BYTES)
+            {
+                return Err(ProtocolError::InvalidSearchRequest);
+            }
+            Ok(())
+        }
+        EditorMessage::SearchResultOpenRequested { path, .. } => validate_search_path(path),
     }
 }
 
@@ -299,8 +371,28 @@ fn validate_host_message(message: &HostMessage) -> Result<(), ProtocolError> {
         | HostMessage::DocumentDiskStatus { document_id, .. } => {
             validate_identifier("document ID", document_id)
         }
-        HostMessage::RecoveryAvailable { document_id, .. } => {
+        HostMessage::RecoveryAvailable { document_id, .. }
+        | HostMessage::RevealRange { document_id, .. } => {
             validate_identifier("document ID", document_id)
+        }
+        HostMessage::ShowWorkspaceSearch => Ok(()),
+        HostMessage::QuickOpenCompleted {
+            request_id, paths, ..
+        } => {
+            validate_identifier("search request ID", request_id)?;
+            for path in paths {
+                validate_search_path(path)?;
+            }
+            Ok(())
+        }
+        HostMessage::WorkspaceSearchCompleted {
+            request_id, result, ..
+        } => {
+            validate_identifier("search request ID", request_id)?;
+            for found in &result.matches {
+                validate_search_path(&found.path)?;
+            }
+            Ok(())
         }
     }
 }
@@ -333,6 +425,23 @@ fn validate_identifier(field: &'static str, value: &str) -> Result<(), ProtocolE
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
     {
         return Err(ProtocolError::InvalidIdentifier { field });
+    }
+    Ok(())
+}
+
+fn validate_search_path(value: &str) -> Result<(), ProtocolError> {
+    let path = Path::new(value);
+    if value.is_empty()
+        || value.len() > MAX_SEARCH_PATH_BYTES
+        || path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err(ProtocolError::InvalidSearchPath);
     }
     Ok(())
 }
@@ -567,5 +676,64 @@ mod tests {
             value["document"]["content"],
             "</script>\u{2028}다음 줄\u{2029}"
         );
+    }
+
+    #[test]
+    fn workspace_search_request_is_bounded_and_versioned() {
+        let request = serde_json::json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "surfaceId": "surface-1",
+            "type": "workspace_search_requested",
+            "requestId": "search-7",
+            "query": "안녕|hello",
+            "options": {
+                "caseSensitive": false,
+                "wholeWord": false,
+                "useRegex": true,
+                "include": ["src/**"],
+                "exclude": ["target/**"],
+                "maxResults": 100,
+                "maxFileBytes": 1024
+            }
+        })
+        .to_string();
+        assert!(matches!(
+            parse_editor_message(&request).unwrap().1,
+            EditorMessage::WorkspaceSearchRequested { request_id, query, .. }
+                if request_id == "search-7" && query == "안녕|hello"
+        ));
+
+        let invalid = request.replace("\"src/**\"", "\"../**\"");
+        assert!(parse_editor_message(&invalid).is_ok());
+        let invalid = request.replace("\"maxResults\":100", "\"maxResults\":501");
+        assert!(matches!(
+            parse_editor_message(&invalid),
+            Err(ProtocolError::InvalidSearchRequest)
+        ));
+    }
+
+    #[test]
+    fn search_result_open_rejects_workspace_escape() {
+        let valid = serde_json::json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "surfaceId": "surface-1",
+            "type": "search_result_open_requested",
+            "path": "src/문서.rs",
+            "line": 4,
+            "column": 2,
+            "length": 3
+        })
+        .to_string();
+        assert!(matches!(
+            parse_editor_message(&valid).unwrap().1,
+            EditorMessage::SearchResultOpenRequested { path, line: 4, .. }
+                if path == "src/문서.rs"
+        ));
+
+        let invalid = valid.replace("src/문서.rs", "../secret.txt");
+        assert!(matches!(
+            parse_editor_message(&invalid),
+            Err(ProtocolError::InvalidSearchPath)
+        ));
     }
 }

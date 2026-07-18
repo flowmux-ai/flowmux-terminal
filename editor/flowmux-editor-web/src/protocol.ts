@@ -23,6 +23,32 @@ export interface DocumentPayload {
 export type DocumentDiskStatus = "unchanged" | "modified" | "deleted";
 export type RecoveryDiskState = "unchanged" | "changed" | "deleted";
 
+export interface SearchOptions {
+  caseSensitive: boolean;
+  wholeWord: boolean;
+  useRegex: boolean;
+  include: string[];
+  exclude: string[];
+  maxResults: number;
+  maxFileBytes: number;
+}
+
+export interface WorkspaceSearchMatch {
+  path: string;
+  line: number;
+  column: number;
+  length: number;
+  preview: string;
+  previewColumn: number;
+  previewLength: number;
+}
+
+export interface WorkspaceSearchResult {
+  matches: WorkspaceSearchMatch[];
+  truncated: boolean;
+  cancelled: boolean;
+}
+
 interface HostMessageBase {
   protocolVersion: typeof PROTOCOL_VERSION;
   surfaceId: string;
@@ -67,6 +93,27 @@ export type HostMessage =
       documentId: string;
       documentVersion: number;
       diskState: RecoveryDiskState;
+    })
+  | (HostMessageBase & { type: "show_workspace_search" })
+  | (HostMessageBase & {
+      type: "quick_open_completed";
+      requestId: string;
+      paths: string[];
+      truncated: boolean;
+    })
+  | (HostMessageBase & {
+      type: "workspace_search_completed";
+      requestId: string;
+      result: WorkspaceSearchResult;
+      error: string | null;
+    })
+  | (HostMessageBase & {
+      type: "reveal_range";
+      documentId: string;
+      documentVersion: number;
+      line: number;
+      column: number;
+      length: number;
     });
 
 interface EditorMessageBase {
@@ -119,6 +166,21 @@ export type EditorMessage =
       cursorLine: number;
       cursorColumn: number;
       scrollTop: number;
+    })
+  | (EditorMessageBase & { type: "quick_open_requested"; requestId: string })
+  | (EditorMessageBase & {
+      type: "workspace_search_requested";
+      requestId: string;
+      query: string;
+      options: SearchOptions;
+    })
+  | (EditorMessageBase & { type: "search_cancelled"; requestId: string })
+  | (EditorMessageBase & {
+      type: "search_result_open_requested";
+      path: string;
+      line: number;
+      column: number;
+      length: number;
     });
 
 export interface DocumentEditAdvance {
@@ -191,9 +253,57 @@ export function isHostMessage(value: unknown): value is HostMessage {
           value.diskState === "changed" ||
           value.diskState === "deleted")
       );
+    case "show_workspace_search":
+      return true;
+    case "quick_open_completed":
+      return (
+        typeof value.requestId === "string" &&
+        Array.isArray(value.paths) &&
+        value.paths.every((path) => typeof path === "string") &&
+        typeof value.truncated === "boolean"
+      );
+    case "workspace_search_completed":
+      return (
+        typeof value.requestId === "string" &&
+        isWorkspaceSearchResult(value.result) &&
+        (value.error === null || typeof value.error === "string")
+      );
+    case "reveal_range":
+      return (
+        typeof value.documentId === "string" &&
+        isVersion(value.documentVersion) &&
+        isVersion(value.line) &&
+        isVersion(value.column) &&
+        isVersion(value.length)
+      );
     default:
       return false;
   }
+}
+
+function isWorkspaceSearchResult(value: unknown): value is WorkspaceSearchResult {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return (
+    Array.isArray(value.matches) &&
+    value.matches.every(isWorkspaceSearchMatch) &&
+    typeof value.truncated === "boolean" &&
+    typeof value.cancelled === "boolean"
+  );
+}
+
+function isWorkspaceSearchMatch(value: unknown): value is WorkspaceSearchMatch {
+  return (
+    isRecord(value) &&
+    typeof value.path === "string" &&
+    isVersion(value.line) &&
+    isVersion(value.column) &&
+    isVersion(value.length) &&
+    typeof value.preview === "string" &&
+    isVersion(value.previewColumn) &&
+    isVersion(value.previewLength)
+  );
 }
 
 function isDocumentPayload(value: unknown): value is DocumentPayload {

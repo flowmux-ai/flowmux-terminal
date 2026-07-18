@@ -131,3 +131,63 @@ test("advances the local version while sending the host's current base version",
     changeSequence: 5,
   });
 });
+
+test("accepts complete workspace search results with multilingual ranges", () => {
+  const message = {
+    protocolVersion: PROTOCOL_VERSION,
+    surfaceId: "surface-1",
+    type: "workspace_search_completed",
+    requestId: "search-1",
+    result: {
+      matches: [
+        {
+          path: "문서/검색🙂.rs",
+          line: 3,
+          column: 4,
+          length: 4,
+          preview: "앞🙂 검색🙂 뒤",
+          previewColumn: 4,
+          previewLength: 4,
+        },
+      ],
+      truncated: false,
+      cancelled: false,
+    },
+    error: null,
+  };
+  assert.equal(isHostMessage(message), true);
+  assert.equal(
+    isHostMessage({
+      ...message,
+      result: { ...message.result, matches: [{ ...message.result.matches[0], column: -1 }] },
+    }),
+    false,
+  );
+});
+
+test("accepts quick open completion and reveal range messages", () => {
+  assert.equal(
+    isHostMessage({
+      protocolVersion: 1,
+      surfaceId: "surface-1",
+      type: "quick_open_completed",
+      requestId: "search-2",
+      paths: ["src/main.rs", "문서/안내.md"],
+      truncated: false,
+    }),
+    true,
+  );
+  assert.equal(
+    isHostMessage({
+      protocolVersion: 1,
+      surfaceId: "surface-1",
+      type: "reveal_range",
+      documentId: "document-2",
+      documentVersion: 3,
+      line: 7,
+      column: 2,
+      length: 5,
+    }),
+    true,
+  );
+});

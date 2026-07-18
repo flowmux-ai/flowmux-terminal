@@ -65,11 +65,13 @@ impl Default for SearchOptions {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceSearchMatch {
-    pub path: PathBuf,
+    pub path: String,
     pub line: u32,
     pub column: u32,
     pub length: u32,
     pub preview: String,
+    pub preview_column: u32,
+    pub preview_length: u32,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,13 +130,15 @@ pub fn search_workspace(
     let exclude = build_globs(&options.exclude)?;
     let mut result = WorkspaceSearchResult::default();
     let mut overridden_paths = HashSet::new();
+    let root_identity = normalized_identity(root);
 
     for document in open_documents {
         if cancellation.is_cancelled() {
             result.cancelled = true;
             return Ok(result);
         }
-        let Some(relative) = relative_path(root, &document.path) else {
+        let document_identity = normalized_identity(&document.path);
+        let Some(relative) = relative_path(&root_identity, &document_identity) else {
             continue;
         };
         if document.content.len() as u64 > options.max_file_bytes {
@@ -143,7 +147,6 @@ pub fn search_workspace(
         if !path_is_included(relative, include.as_ref(), exclude.as_ref()) {
             continue;
         }
-        overridden_paths.insert(normalized_identity(&document.path));
         collect_matches(
             relative,
             &document.content,
@@ -152,6 +155,7 @@ pub fn search_workspace(
             &mut result,
             cancellation,
         );
+        overridden_paths.insert(document_identity);
         if result.truncated || result.cancelled {
             return Ok(result);
         }
@@ -291,6 +295,9 @@ fn collect_matches(
     result: &mut WorkspaceSearchResult,
     cancellation: &SearchCancellation,
 ) {
+    let Some(path) = path.to_str() else {
+        return;
+    };
     for (line_index, raw_line) in content.split('\n').enumerate() {
         if cancellation.is_cancelled() {
             result.cancelled = true;
@@ -302,15 +309,57 @@ fn collect_matches(
                 result.truncated = true;
                 return;
             }
+            let (preview, preview_column, preview_length) = match_preview(line, &found);
             result.matches.push(WorkspaceSearchMatch {
-                path: path.to_path_buf(),
+                path: path.to_string(),
                 line: u32::try_from(line_index).unwrap_or(u32::MAX),
                 column: utf16_len(&line[..found.start()]),
                 length: utf16_len(found.as_str()),
-                preview: line.to_string(),
+                preview,
+                preview_column,
+                preview_length,
             });
         }
     }
+}
+
+fn match_preview(line: &str, found: &regex::Match<'_>) -> (String, u32, u32) {
+    const BEFORE_CHARS: usize = 80;
+    const MATCH_CHARS: usize = 120;
+    const AFTER_CHARS: usize = 80;
+
+    let preview_start = line[..found.start()]
+        .char_indices()
+        .rev()
+        .nth(BEFORE_CHARS.saturating_sub(1))
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    let preview_match_end = line[found.start()..found.end()]
+        .char_indices()
+        .nth(MATCH_CHARS)
+        .map(|(index, _)| found.start() + index)
+        .unwrap_or(found.end());
+    let preview_end = line[preview_match_end..]
+        .char_indices()
+        .nth(AFTER_CHARS)
+        .map(|(index, _)| preview_match_end + index)
+        .unwrap_or(line.len());
+    let has_prefix = preview_start > 0;
+    let has_suffix = preview_end < line.len();
+    let mut preview = String::new();
+    if has_prefix {
+        preview.push('…');
+    }
+    preview.push_str(&line[preview_start..preview_end]);
+    if has_suffix {
+        preview.push('…');
+    }
+    let prefix_width = u32::from(has_prefix);
+    (
+        preview,
+        prefix_width + utf16_len(&line[preview_start..found.start()]),
+        utf16_len(&line[found.start()..preview_match_end]),
+    )
 }
 
 fn utf16_len(value: &str) -> u32 {
@@ -357,11 +406,13 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.matches.len(), 1);
-        assert_eq!(result.matches[0].path, PathBuf::from("다국어.txt"));
+        assert_eq!(result.matches[0].path, "다국어.txt");
         assert_eq!(result.matches[0].line, 0);
         assert_eq!(result.matches[0].column, 4);
         assert_eq!(result.matches[0].length, 4);
         assert_eq!(result.matches[0].preview, "앞🙂 검색🙂 뒤");
+        assert_eq!(result.matches[0].preview_column, 4);
+        assert_eq!(result.matches[0].preview_length, 4);
     }
 
     #[test]
@@ -390,7 +441,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.matches.len(), 1);
-        assert_eq!(result.matches[0].path, PathBuf::from("src/main.rs"));
+        assert_eq!(result.matches[0].path, "src/main.rs");
         assert_eq!(result.matches[0].column, 0);
     }
 
@@ -461,6 +512,7 @@ mod tests {
     fn dirty_override_outside_workspace_is_not_searched() {
         let workspace = tempdir().unwrap();
         let external = tempdir().unwrap();
+        fs::write(external.path().join("outside.txt"), "secret").unwrap();
         let result = search_workspace(
             workspace.path(),
             "secret",
@@ -474,5 +526,46 @@ mod tests {
         .unwrap();
 
         assert!(result.matches.is_empty());
+
+        let escaped = workspace.path().join("..").join(
+            external
+                .path()
+                .file_name()
+                .expect("temporary directory has a file name"),
+        );
+        let result = search_workspace(
+            workspace.path(),
+            "secret",
+            &SearchOptions::default(),
+            &[SearchDocument {
+                path: escaped.join("outside.txt"),
+                content: "secret".into(),
+            }],
+            &SearchCancellation::default(),
+        )
+        .unwrap();
+        assert!(result.matches.is_empty());
+    }
+
+    #[test]
+    fn very_long_lines_have_bounded_highlightable_previews() {
+        let workspace = tempdir().unwrap();
+        let content = format!("{}needle{}", "앞".repeat(500), "뒤".repeat(500));
+        fs::write(workspace.path().join("long.txt"), content).unwrap();
+        let result = search_workspace(
+            workspace.path(),
+            "needle",
+            &SearchOptions::default(),
+            &[],
+            &SearchCancellation::default(),
+        )
+        .unwrap();
+
+        let found = &result.matches[0];
+        assert!(found.preview.chars().count() <= 168);
+        assert!(found.preview.starts_with('…'));
+        assert!(found.preview.ends_with('…'));
+        assert_eq!(found.preview_column, 81);
+        assert_eq!(found.preview_length, 6);
     }
 }

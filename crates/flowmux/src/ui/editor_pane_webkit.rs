@@ -161,6 +161,31 @@ impl EditorPane {
                 tracing::warn!(%error, "failed to queue restored editor state");
             }
         }
+        {
+            let bridge = pane.bridge.clone();
+            let host = Rc::downgrade(&pane.host);
+            let web_view = pane.web_view.downgrade();
+            let tick = Rc::new(Cell::new(0_u8));
+            gtk::glib::timeout_add_local(Duration::from_millis(100), move || {
+                let Some(host) = host.upgrade() else {
+                    return gtk::glib::ControlFlow::Break;
+                };
+                let Some(web_view) = web_view.upgrade() else {
+                    return gtk::glib::ControlFlow::Break;
+                };
+                for script in queue_host_messages(&bridge, host.poll_search_messages()) {
+                    evaluate_script(&web_view, &script);
+                }
+                let next_tick = tick.get().wrapping_add(1);
+                tick.set(next_tick);
+                if next_tick.is_multiple_of(10) {
+                    for script in queue_host_messages(&bridge, host.poll_external_changes()) {
+                        evaluate_script(&web_view, &script);
+                    }
+                }
+                gtk::glib::ControlFlow::Continue
+            });
+        }
         pane
     }
 
@@ -186,6 +211,12 @@ impl EditorPane {
 
     pub fn grab_focus(&self) {
         self.web_view.grab_focus();
+    }
+
+    pub fn show_workspace_search(&self) {
+        if let Err(error) = self.send(HostMessage::ShowWorkspaceSearch) {
+            tracing::warn!(%error, "failed to show editor workspace search");
+        }
     }
 
     pub fn open_file(&self, path: &Path) -> Result<(), String> {

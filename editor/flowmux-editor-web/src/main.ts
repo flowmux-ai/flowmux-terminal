@@ -10,12 +10,14 @@ import "./styles.css";
 
 import { adjustedFontSize, visibleDocumentState } from "./editor_state";
 import { languageForPath } from "./language";
+import { commaSeparatedGlobs, rankQuickOpen } from "./search_state";
 import {
   advanceDocumentEdit,
   type DocumentDiskStatus,
   type DocumentPayload,
   type EditorMessage,
   type HostMessage,
+  type WorkspaceSearchMatch,
   isHostMessage,
   PROTOCOL_VERSION,
 } from "./protocol";
@@ -69,6 +71,18 @@ interface RecoveryProposal {
 const documentState = requiredElement("document-state");
 const emptyState = requiredElement("empty-state");
 const editorContainer = requiredElement("editor");
+const searchDialog = requiredDialog("search-dialog");
+const searchDialogTitle = requiredElement("search-dialog-title");
+const searchDialogClose = requiredButton("search-dialog-close");
+const searchQuery = requiredInput("search-query");
+const searchOptions = requiredElement("search-options");
+const searchCase = requiredButton("search-case");
+const searchWord = requiredButton("search-word");
+const searchRegex = requiredButton("search-regex");
+const searchInclude = requiredInput("search-include");
+const searchExclude = requiredInput("search-exclude");
+const searchStatus = requiredElement("search-status");
+const searchResults = requiredElement("search-results");
 const closeDialog = requiredDialog("close-dialog");
 const closeDialogDocument = requiredElement("close-dialog-document");
 const closeDialogCancel = requiredButton("close-dialog-cancel");
@@ -91,7 +105,23 @@ let recoveryDialogDocumentId: string | null = null;
 let recoveryDialogDocumentVersion = 0;
 const recoveryQueue: RecoveryProposal[] = [];
 let viewStateTimer: ReturnType<typeof setTimeout> | null = null;
+let searchTimer: ReturnType<typeof setTimeout> | null = null;
+let searchMode: "quick" | "workspace" = "quick";
+let searchRequestCounter = 0;
+let activeSearchRequestId: string | null = null;
+let quickOpenPaths: string[] = [];
+let quickOpenTruncated = false;
+let selectedSearchResult = 0;
+let renderedSearchResults: SearchSelection[] = [];
+const recentPaths: string[] = [];
 const documents = new Map<string, OpenDocument>();
+
+interface SearchSelection {
+  path: string;
+  line: number;
+  column: number;
+  length: number;
+}
 
 monaco.editor.defineTheme("flowmux-dark", {
   base: "vs-dark",
@@ -138,12 +168,42 @@ closeDialog.addEventListener("cancel", (event) => {
 recoveryDialogDiscard.addEventListener("click", () => resolveRecovery("discard"));
 recoveryDialogRestore.addEventListener("click", () => resolveRecovery("restore"));
 recoveryDialog.addEventListener("cancel", (event) => event.preventDefault());
+searchDialogClose.addEventListener("click", () => closeSearchDialog());
+searchDialog.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  closeSearchDialog();
+});
+searchQuery.addEventListener("input", () => searchInputChanged());
+searchQuery.addEventListener("keydown", (event) => searchKeyDown(event));
+for (const button of [searchCase, searchWord, searchRegex]) {
+  button.addEventListener("click", () => {
+    button.setAttribute("aria-pressed", String(button.getAttribute("aria-pressed") !== "true"));
+    scheduleWorkspaceSearch();
+  });
+}
+for (const input of [searchInclude, searchExclude]) {
+  input.addEventListener("input", () => scheduleWorkspaceSearch());
+}
 
 editor.addAction({
   id: "flowmux.save",
   label: "Save",
   keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS],
   run: () => requestSave(),
+});
+
+editor.addAction({
+  id: "flowmux.quickOpen",
+  label: "Quick Open",
+  keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyP],
+  run: () => showQuickOpen(),
+});
+
+editor.addAction({
+  id: "flowmux.workspaceSearch",
+  label: "Find in Workspace",
+  keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyF],
+  run: () => showWorkspaceSearch(),
 });
 
 editor.addAction({
@@ -283,6 +343,41 @@ function handleHostMessage(message: HostMessage): void {
     case "recovery_available":
       showRecoveryDialog(message.documentId, message.documentVersion, message.diskState);
       break;
+    case "show_workspace_search":
+      showWorkspaceSearch();
+      break;
+    case "quick_open_completed":
+      if (message.requestId === activeSearchRequestId && searchMode === "quick") {
+        activeSearchRequestId = null;
+        quickOpenPaths = message.paths;
+        quickOpenTruncated = message.truncated;
+        renderQuickOpen();
+      }
+      break;
+    case "workspace_search_completed":
+      if (message.requestId === activeSearchRequestId && searchMode === "workspace") {
+        activeSearchRequestId = null;
+        renderWorkspaceSearch(message.result.matches, message.result.truncated, message.error);
+      }
+      break;
+    case "reveal_range": {
+      const document = documents.get(message.documentId);
+      if (document !== undefined && document.payload.version === message.documentVersion) {
+        activateDocument(message.documentId);
+        const lineNumber = message.line + 1;
+        const startColumn = message.column + 1;
+        const range = new monaco.Range(
+          lineNumber,
+          startColumn,
+          lineNumber,
+          startColumn + message.length,
+        );
+        editor.setSelection(range);
+        editor.revealRangeInCenter(range);
+        editor.focus();
+      }
+      break;
+    }
   }
 }
 
@@ -539,6 +634,275 @@ function resetRecoveryDialog(clearQueue = false): void {
   editor.focus();
 }
 
+function showQuickOpen(): void {
+  if (!canShowSearchDialog()) {
+    return;
+  }
+  searchMode = "quick";
+  searchDialogTitle.textContent = "Open File";
+  searchQuery.placeholder = "Type a file name…";
+  searchOptions.hidden = true;
+  searchQuery.value = "";
+  quickOpenPaths = [];
+  quickOpenTruncated = false;
+  clearSearchResults("Loading files…");
+  openSearchDialog();
+  const requestId = nextSearchRequestId();
+  activeSearchRequestId = requestId;
+  postToHost({
+    protocolVersion: PROTOCOL_VERSION,
+    surfaceId,
+    type: "quick_open_requested",
+    requestId,
+  });
+}
+
+function showWorkspaceSearch(): void {
+  if (!canShowSearchDialog()) {
+    return;
+  }
+  searchMode = "workspace";
+  searchDialogTitle.textContent = "Find in Workspace";
+  searchQuery.placeholder = "Search files…";
+  searchOptions.hidden = false;
+  searchQuery.value = "";
+  clearSearchResults("Type to search the workspace.");
+  openSearchDialog();
+}
+
+function canShowSearchDialog(): boolean {
+  return !closeDialog.open && !recoveryDialog.open;
+}
+
+function openSearchDialog(): void {
+  cancelActiveSearch();
+  if (!searchDialog.open) {
+    searchDialog.showModal();
+  }
+  searchQuery.focus();
+  searchQuery.select();
+}
+
+function closeSearchDialog(): void {
+  cancelActiveSearch();
+  clearSearchTimer();
+  if (searchDialog.open) {
+    searchDialog.close();
+  }
+  editor.focus();
+}
+
+function searchInputChanged(): void {
+  if (searchMode === "quick") {
+    renderQuickOpen();
+  } else {
+    scheduleWorkspaceSearch();
+  }
+}
+
+function scheduleWorkspaceSearch(): void {
+  if (searchMode !== "workspace" || !searchDialog.open) {
+    return;
+  }
+  clearSearchTimer();
+  searchTimer = setTimeout(() => requestWorkspaceSearch(), 180);
+}
+
+function requestWorkspaceSearch(): void {
+  clearSearchTimer();
+  cancelActiveSearch();
+  const query = searchQuery.value;
+  if (query.length === 0) {
+    clearSearchResults("Type to search the workspace.");
+    return;
+  }
+  const requestId = nextSearchRequestId();
+  activeSearchRequestId = requestId;
+  clearSearchResults("Searching…");
+  postToHost({
+    protocolVersion: PROTOCOL_VERSION,
+    surfaceId,
+    type: "workspace_search_requested",
+    requestId,
+    query,
+    options: {
+      caseSensitive: searchCase.getAttribute("aria-pressed") === "true",
+      wholeWord: searchWord.getAttribute("aria-pressed") === "true",
+      useRegex: searchRegex.getAttribute("aria-pressed") === "true",
+      include: commaSeparatedGlobs(searchInclude.value),
+      exclude: commaSeparatedGlobs(searchExclude.value),
+      maxResults: 500,
+      maxFileBytes: 2 * 1024 * 1024,
+    },
+  });
+}
+
+function cancelActiveSearch(): void {
+  if (activeSearchRequestId === null) {
+    return;
+  }
+  postToHost({
+    protocolVersion: PROTOCOL_VERSION,
+    surfaceId,
+    type: "search_cancelled",
+    requestId: activeSearchRequestId,
+  });
+  activeSearchRequestId = null;
+}
+
+function nextSearchRequestId(): string {
+  searchRequestCounter += 1;
+  return `search-${searchRequestCounter}`;
+}
+
+function clearSearchTimer(): void {
+  if (searchTimer !== null) {
+    clearTimeout(searchTimer);
+    searchTimer = null;
+  }
+}
+
+function renderQuickOpen(): void {
+  const paths = rankQuickOpen(quickOpenPaths, searchQuery.value, recentPaths);
+  clearSearchResultNodes();
+  for (const path of paths) {
+    appendSearchResult(
+      { path, line: 0, column: 0, length: 0 },
+      path,
+      null,
+      0,
+      0,
+    );
+  }
+  const suffix = quickOpenTruncated ? " (first 2,000 indexed files)" : "";
+  searchStatus.textContent = `${paths.length} matching files${suffix}`;
+  selectSearchResult(0);
+}
+
+function renderWorkspaceSearch(
+  matches: WorkspaceSearchMatch[],
+  truncated: boolean,
+  error: string | null,
+): void {
+  clearSearchResultNodes();
+  if (error !== null) {
+    searchStatus.textContent = error;
+    return;
+  }
+  let previousPath: string | null = null;
+  for (const found of matches) {
+    const label = previousPath === found.path ? `Line ${found.line + 1}` : `${found.path}:${found.line + 1}`;
+    appendSearchResult(
+      found,
+      label,
+      found.preview,
+      found.previewColumn,
+      found.previewLength,
+    );
+    previousPath = found.path;
+  }
+  const suffix = truncated ? " — result limit reached" : "";
+  searchStatus.textContent = `${matches.length} matches${suffix}`;
+  selectSearchResult(0);
+}
+
+function clearSearchResults(status: string): void {
+  clearSearchResultNodes();
+  searchStatus.textContent = status;
+}
+
+function clearSearchResultNodes(): void {
+  searchResults.replaceChildren();
+  renderedSearchResults = [];
+  selectedSearchResult = 0;
+}
+
+function appendSearchResult(
+  selection: SearchSelection,
+  label: string,
+  preview: string | null,
+  previewColumn: number,
+  previewLength: number,
+): void {
+  const index = renderedSearchResults.length;
+  renderedSearchResults.push(selection);
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "search-result";
+  button.setAttribute("role", "option");
+  button.dataset.index = String(index);
+  const pathLabel = document.createElement("span");
+  pathLabel.className = "search-result-path";
+  pathLabel.textContent = label;
+  button.append(pathLabel);
+  if (preview !== null) {
+    const previewLabel = document.createElement("span");
+    previewLabel.className = "search-result-preview";
+    const before = preview.slice(0, previewColumn);
+    const match = preview.slice(previewColumn, previewColumn + previewLength);
+    const after = preview.slice(previewColumn + previewLength);
+    previewLabel.append(document.createTextNode(before));
+    const mark = document.createElement("mark");
+    mark.textContent = match;
+    previewLabel.append(mark, document.createTextNode(after));
+    button.append(previewLabel);
+  }
+  button.addEventListener("click", () => openSearchResult(index));
+  button.addEventListener("mousemove", () => selectSearchResult(index));
+  searchResults.append(button);
+}
+
+function searchKeyDown(event: KeyboardEvent): void {
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    selectSearchResult(selectedSearchResult + 1);
+  } else if (event.key === "ArrowUp") {
+    event.preventDefault();
+    selectSearchResult(selectedSearchResult - 1);
+  } else if (event.key === "Enter") {
+    event.preventDefault();
+    openSearchResult(selectedSearchResult);
+  }
+}
+
+function selectSearchResult(index: number): void {
+  if (renderedSearchResults.length === 0) {
+    return;
+  }
+  selectedSearchResult = Math.max(0, Math.min(index, renderedSearchResults.length - 1));
+  searchResults.querySelectorAll<HTMLButtonElement>(".search-result").forEach((element) => {
+    const selected = Number(element.dataset.index) === selectedSearchResult;
+    element.classList.toggle("is-selected", selected);
+    element.setAttribute("aria-selected", String(selected));
+    if (selected) {
+      element.scrollIntoView({ block: "nearest" });
+    }
+  });
+}
+
+function openSearchResult(index: number): void {
+  const selection = renderedSearchResults[index];
+  if (selection === undefined) {
+    return;
+  }
+  const recentIndex = recentPaths.indexOf(selection.path);
+  if (recentIndex >= 0) {
+    recentPaths.splice(recentIndex, 1);
+  }
+  recentPaths.unshift(selection.path);
+  recentPaths.splice(20);
+  closeSearchDialog();
+  postToHost({
+    protocolVersion: PROTOCOL_VERSION,
+    surfaceId,
+    type: "search_result_open_requested",
+    path: selection.path,
+    line: selection.line,
+    column: selection.column,
+    length: selection.length,
+  });
+}
+
 function scheduleViewStateReport(): void {
   if (activeDocumentId === null) {
     return;
@@ -655,6 +1019,14 @@ function requiredButton(id: string): HTMLButtonElement {
   const element = requiredElement(id);
   if (!(element instanceof HTMLButtonElement)) {
     throw new Error(`Editor element is not a button: ${id}`);
+  }
+  return element;
+}
+
+function requiredInput(id: string): HTMLInputElement {
+  const element = requiredElement(id);
+  if (!(element instanceof HTMLInputElement)) {
+    throw new Error(`Editor element is not an input: ${id}`);
   }
   return element;
 }

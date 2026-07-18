@@ -217,6 +217,8 @@ pub fn install_actions(
                     term.show_search();
                 } else if let Some(browser) = registry.active_browser(pane) {
                     browser.show_search();
+                } else if let Some(editor) = registry.active_editor(pane) {
+                    editor.show_workspace_search();
                 }
             })
             .build()
