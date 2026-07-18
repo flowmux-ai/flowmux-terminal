@@ -13,7 +13,7 @@ use flowmux_core::{
     SplitDirection, Surface, SurfaceId, SurfaceKind, Workspace, WorkspaceAgentBlock, WorkspaceId,
 };
 use flowmux_state::{State, WindowLayout, WindowOwner};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -370,9 +370,14 @@ impl StateStore {
     /// directly would expose creation order after a drag reorder.
     pub async fn ordered_workspaces(&self) -> Vec<Workspace> {
         let s = self.inner.lock().await;
+        let by_id = s
+            .workspaces
+            .iter()
+            .map(|workspace| (workspace.id, workspace))
+            .collect::<HashMap<_, _>>();
         workspace_ids_in_display_order(&s)
             .into_iter()
-            .filter_map(|id| s.workspaces.iter().find(|ws| ws.id == id).cloned())
+            .filter_map(|id| by_id.get(&id).map(|workspace| (*workspace).clone()))
             .collect()
     }
 
