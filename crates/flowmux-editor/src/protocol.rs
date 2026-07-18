@@ -105,6 +105,27 @@ pub enum HostMessage {
         document_version: u64,
         disk_state: RecoveryDiskState,
     },
+    SaveAsCompleted {
+        document: DocumentPayload,
+        change_sequence: u64,
+    },
+    SaveAsFailed {
+        document_id: String,
+        document_version: u64,
+        change_sequence: u64,
+        reason: String,
+        target_exists: bool,
+    },
+    ShowDiff {
+        document_id: String,
+        document_version: u64,
+        disk_content: String,
+    },
+    ConflictActionFailed {
+        document_id: String,
+        document_version: u64,
+        reason: String,
+    },
     ShowWorkspaceSearch,
     QuickOpenCompleted {
         request_id: String,
@@ -132,6 +153,14 @@ pub enum RecoveryChoice {
     Discard,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictAction {
+    Compare,
+    KeepMine,
+    ReloadFromDisk,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
@@ -155,6 +184,14 @@ pub enum EditorMessage {
         document_version: u64,
         change_sequence: u64,
         content: String,
+    },
+    SaveAsRequested {
+        document_id: String,
+        document_version: u64,
+        change_sequence: u64,
+        content: String,
+        path: String,
+        overwrite: bool,
     },
     CloseRequested {
         document_id: String,
@@ -193,6 +230,11 @@ pub enum EditorMessage {
         line: u32,
         column: u32,
         length: u32,
+    },
+    ConflictActionRequested {
+        document_id: String,
+        document_version: u64,
+        action: ConflictAction,
     },
 }
 
@@ -287,7 +329,8 @@ fn validate_editor_message(message: &EditorMessage) -> Result<(), ProtocolError>
         EditorMessage::ActiveDocumentChanged { document_id, .. }
         | EditorMessage::CloseRequested { document_id, .. }
         | EditorMessage::DiscardCloseRequested { document_id, .. }
-        | EditorMessage::RecoveryDecision { document_id, .. } => {
+        | EditorMessage::RecoveryDecision { document_id, .. }
+        | EditorMessage::ConflictActionRequested { document_id, .. } => {
             validate_identifier("document ID", document_id)
         }
         EditorMessage::ViewStateChanged {
@@ -313,6 +356,16 @@ fn validate_editor_message(message: &EditorMessage) -> Result<(), ProtocolError>
         } => {
             validate_identifier("document ID", document_id)?;
             validate_document_size(content)
+        }
+        EditorMessage::SaveAsRequested {
+            document_id,
+            content,
+            path,
+            ..
+        } => {
+            validate_identifier("document ID", document_id)?;
+            validate_document_size(content)?;
+            validate_search_path(path)
         }
         EditorMessage::QuickOpenRequested { request_id }
         | EditorMessage::SearchCancelled { request_id } => {
@@ -361,19 +414,29 @@ fn validate_host_message(message: &HostMessage) -> Result<(), ProtocolError> {
             }
             Ok(())
         }
-        HostMessage::OpenDocument { document } | HostMessage::ReplaceDocument { document } => {
-            validate_document(document)
-        }
+        HostMessage::OpenDocument { document }
+        | HostMessage::ReplaceDocument { document }
+        | HostMessage::SaveAsCompleted { document, .. } => validate_document(document),
         HostMessage::CloseDocument { document_id, .. }
         | HostMessage::SetActiveDocument { document_id, .. }
         | HostMessage::SaveCompleted { document_id, .. }
         | HostMessage::SaveFailed { document_id, .. }
+        | HostMessage::SaveAsFailed { document_id, .. }
         | HostMessage::DocumentDiskStatus { document_id, .. } => {
             validate_identifier("document ID", document_id)
         }
         HostMessage::RecoveryAvailable { document_id, .. }
-        | HostMessage::RevealRange { document_id, .. } => {
+        | HostMessage::RevealRange { document_id, .. }
+        | HostMessage::ConflictActionFailed { document_id, .. } => {
             validate_identifier("document ID", document_id)
+        }
+        HostMessage::ShowDiff {
+            document_id,
+            disk_content,
+            ..
+        } => {
+            validate_identifier("document ID", document_id)?;
+            validate_document_size(disk_content)
         }
         HostMessage::ShowWorkspaceSearch => Ok(()),
         HostMessage::QuickOpenCompleted {
@@ -734,6 +797,49 @@ mod tests {
         assert!(matches!(
             parse_editor_message(&invalid),
             Err(ProtocolError::InvalidSearchPath)
+        ));
+    }
+
+    #[test]
+    fn save_as_and_conflict_actions_require_safe_versioned_messages() {
+        let save_as = serde_json::json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "surfaceId": "surface-1",
+            "type": "save_as_requested",
+            "documentId": "document-1",
+            "documentVersion": 4,
+            "changeSequence": 2,
+            "content": "저장🙂\n",
+            "path": "문서/저장🙂.txt",
+            "overwrite": false
+        })
+        .to_string();
+        assert!(matches!(
+            parse_editor_message(&save_as).unwrap().1,
+            EditorMessage::SaveAsRequested { path, overwrite: false, .. }
+                if path == "문서/저장🙂.txt"
+        ));
+        let escaped = save_as.replace("문서/저장🙂.txt", "../outside.txt");
+        assert!(matches!(
+            parse_editor_message(&escaped),
+            Err(ProtocolError::InvalidSearchPath)
+        ));
+
+        let action = serde_json::json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "surfaceId": "surface-1",
+            "type": "conflict_action_requested",
+            "documentId": "document-1",
+            "documentVersion": 4,
+            "action": "reload_from_disk"
+        })
+        .to_string();
+        assert!(matches!(
+            parse_editor_message(&action).unwrap().1,
+            EditorMessage::ConflictActionRequested {
+                action: ConflictAction::ReloadFromDisk,
+                ..
+            }
         ));
     }
 }

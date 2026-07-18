@@ -2,10 +2,10 @@
 //! Headless document session behind one editor surface.
 
 use crate::{
-    DiskStatus, DocumentDiskStatus, DocumentError, DocumentId, DocumentPayload, DocumentService,
-    DocumentSnapshot, EditorMessage, HostMessage, LineEnding, RecoveryChoice, RecoveryDiskState,
-    RecoveryOperation, RecoverySnapshot, RecoveryStore, SearchDocument, TextDocumentEncoding,
-    TextDocumentLineEnding, TextEncoding,
+    ConflictAction, DiskStatus, DocumentDiskStatus, DocumentError, DocumentId, DocumentPayload,
+    DocumentService, DocumentSnapshot, EditorMessage, HostMessage, LineEnding, RecoveryChoice,
+    RecoveryDiskState, RecoveryOperation, RecoverySnapshot, RecoveryStore, SearchDocument,
+    TextDocumentEncoding, TextDocumentLineEnding, TextEncoding,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -367,6 +367,21 @@ impl EditorSession {
                 change_sequence,
                 content,
             )]),
+            EditorMessage::SaveAsRequested {
+                document_id,
+                document_version,
+                change_sequence,
+                content,
+                path,
+                overwrite,
+            } => Ok(vec![self.save_as_requested(
+                document_id,
+                document_version,
+                change_sequence,
+                content,
+                path,
+                overwrite,
+            )]),
             EditorMessage::CloseRequested {
                 document_id,
                 document_version,
@@ -403,6 +418,15 @@ impl EditorSession {
             | EditorMessage::WorkspaceSearchRequested { .. }
             | EditorMessage::SearchCancelled { .. }
             | EditorMessage::SearchResultOpenRequested { .. } => Ok(Vec::new()),
+            EditorMessage::ConflictActionRequested {
+                document_id,
+                document_version,
+                action,
+            } => Ok(vec![self.conflict_action_requested(
+                document_id,
+                document_version,
+                action,
+            )]),
         }
     }
 
@@ -474,6 +498,93 @@ impl EditorSession {
                 reason: error.to_string(),
             },
         }
+    }
+
+    fn save_as_requested(
+        &mut self,
+        document_id: String,
+        document_version: u64,
+        change_sequence: u64,
+        content: String,
+        relative_path: String,
+        overwrite: bool,
+    ) -> HostMessage {
+        let result: Result<DocumentSnapshot, EditorSessionError> = (|| {
+            let id = self.checked_document(&document_id, document_version)?;
+            let snapshot = self.documents.snapshot(id)?;
+            let version = if snapshot.text == content {
+                snapshot.version
+            } else {
+                self.documents
+                    .update_text(id, document_version, content)?
+                    .version
+            };
+            let old_identity = snapshot.identity_path;
+            let target = self.documents.workspace_root().join(relative_path);
+            let saved = self.documents.save_as(id, version, target, overwrite)?;
+            self.reported_disk_status.insert(id, DiskStatus::Unchanged);
+            self.queue_recovery_removal(id, &old_identity);
+            Ok(saved)
+        })();
+
+        match result {
+            Ok(snapshot) => HostMessage::SaveAsCompleted {
+                document: self.payload(snapshot),
+                change_sequence,
+            },
+            Err(error) => HostMessage::SaveAsFailed {
+                document_id,
+                document_version,
+                change_sequence,
+                target_exists: matches!(
+                    &error,
+                    EditorSessionError::Document(DocumentError::TargetExists { .. })
+                ),
+                reason: error.to_string(),
+            },
+        }
+    }
+
+    fn conflict_action_requested(
+        &mut self,
+        document_id: String,
+        document_version: u64,
+        action: ConflictAction,
+    ) -> HostMessage {
+        let result: Result<HostMessage, EditorSessionError> = (|| {
+            let id = self.checked_document(&document_id, document_version)?;
+            match action {
+                ConflictAction::Compare => Ok(HostMessage::ShowDiff {
+                    document_id: document_id.clone(),
+                    document_version,
+                    disk_content: self.documents.disk_text(id)?,
+                }),
+                ConflictAction::KeepMine => {
+                    self.documents.accept_external_as_base(id)?;
+                    self.recovery_base_hashes.remove(&id);
+                    self.reported_disk_status.insert(id, DiskStatus::Unchanged);
+                    self.queue_recovery_write(id)?;
+                    Ok(HostMessage::ReplaceDocument {
+                        document: self.payload(self.documents.snapshot(id)?),
+                    })
+                }
+                ConflictAction::ReloadFromDisk => {
+                    let identity_path = self.documents.snapshot(id)?.identity_path;
+                    let reloaded = self.documents.reload_discarding_changes(id)?;
+                    self.reported_disk_status.insert(id, DiskStatus::Unchanged);
+                    self.queue_recovery_removal(id, &identity_path);
+                    Ok(HostMessage::ReplaceDocument {
+                        document: self.payload(reloaded),
+                    })
+                }
+            }
+        })();
+
+        result.unwrap_or_else(|error| HostMessage::ConflictActionFailed {
+            document_id,
+            document_version,
+            reason: error.to_string(),
+        })
     }
 
     fn recovery_decision(
@@ -789,6 +900,145 @@ mod tests {
             }]
         ));
         assert_eq!(fs::read_to_string(path).unwrap(), "저장됨 日本語 🙂\n");
+    }
+
+    #[test]
+    fn save_as_requires_overwrite_and_updates_multilingual_session_path() {
+        let workspace = tempdir().unwrap();
+        let source = workspace.path().join("source.txt");
+        let target = workspace.path().join("저장-日本語🙂.txt");
+        fs::write(&source, "source\n").unwrap();
+        fs::write(&target, "existing\n").unwrap();
+        let mut session = EditorSession::new(workspace.path()).unwrap();
+        let document = open_payload(session.open_document(&source).unwrap());
+
+        let failed = session
+            .handle_editor_message(EditorMessage::SaveAsRequested {
+                document_id: document.id.clone(),
+                document_version: document.version,
+                change_sequence: 0,
+                content: "새 내용🙂\n".into(),
+                path: "저장-日本語🙂.txt".into(),
+                overwrite: false,
+            })
+            .unwrap();
+        assert!(matches!(
+            failed.as_slice(),
+            [HostMessage::SaveAsFailed {
+                target_exists: true,
+                ..
+            }]
+        ));
+        assert_eq!(fs::read_to_string(&target).unwrap(), "existing\n");
+
+        let current = session.documents.snapshot(DocumentId(1)).unwrap();
+        let saved = session
+            .handle_editor_message(EditorMessage::SaveAsRequested {
+                document_id: document.id,
+                document_version: current.version,
+                change_sequence: 1,
+                content: "새 내용🙂\n".into(),
+                path: "저장-日本語🙂.txt".into(),
+                overwrite: true,
+            })
+            .unwrap();
+        assert!(matches!(
+            saved.as_slice(),
+            [HostMessage::SaveAsCompleted { document, .. }]
+                if document.relative_path == "저장-日本語🙂.txt" && !document.dirty
+        ));
+        assert_eq!(fs::read_to_string(&target).unwrap(), "새 내용🙂\n");
+        let canonical_target = fs::canonicalize(target).unwrap();
+        assert_eq!(
+            session.session_snapshot().active_file.as_deref(),
+            Some(canonical_target.as_path())
+        );
+    }
+
+    #[test]
+    fn conflict_compare_keep_mine_and_reload_are_explicit_session_actions() {
+        let workspace = tempdir().unwrap();
+        let path = workspace.path().join("충돌.txt");
+        fs::write(&path, "base\n").unwrap();
+        let mut session = EditorSession::new(workspace.path()).unwrap();
+        let document = open_payload(session.open_document(&path).unwrap());
+        session
+            .handle_editor_message(EditorMessage::DocumentChanged {
+                document_id: document.id.clone(),
+                document_version: document.version,
+                change_sequence: 1,
+                content: "내 변경🙂\n".into(),
+            })
+            .unwrap();
+        fs::write(&path, "외부 변경 日本語\n").unwrap();
+        let current = session.documents.snapshot(DocumentId(1)).unwrap();
+
+        let compared = session
+            .handle_editor_message(EditorMessage::ConflictActionRequested {
+                document_id: document.id.clone(),
+                document_version: current.version,
+                action: ConflictAction::Compare,
+            })
+            .unwrap();
+        assert!(matches!(
+            compared.as_slice(),
+            [HostMessage::ShowDiff { disk_content, .. }]
+                if disk_content == "외부 변경 日本語\n"
+        ));
+        assert_eq!(
+            session.documents.snapshot(DocumentId(1)).unwrap().text,
+            "내 변경🙂\n"
+        );
+
+        let kept = session
+            .handle_editor_message(EditorMessage::ConflictActionRequested {
+                document_id: document.id.clone(),
+                document_version: current.version,
+                action: ConflictAction::KeepMine,
+            })
+            .unwrap();
+        assert!(matches!(
+            kept.as_slice(),
+            [HostMessage::ReplaceDocument { document }]
+                if document.dirty && !document.external_change
+        ));
+        let saved = session
+            .handle_editor_message(EditorMessage::SaveRequested {
+                document_id: document.id.clone(),
+                document_version: current.version,
+                change_sequence: 1,
+                content: "내 변경🙂\n".into(),
+            })
+            .unwrap();
+        assert!(matches!(
+            saved.as_slice(),
+            [HostMessage::SaveCompleted { .. }]
+        ));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "내 변경🙂\n");
+
+        let current = session.documents.snapshot(DocumentId(1)).unwrap();
+        session
+            .handle_editor_message(EditorMessage::DocumentChanged {
+                document_id: document.id.clone(),
+                document_version: current.version,
+                change_sequence: 2,
+                content: "버릴 변경\n".into(),
+            })
+            .unwrap();
+        fs::write(&path, "디스크 선택\n").unwrap();
+        let current = session.documents.snapshot(DocumentId(1)).unwrap();
+        let reloaded = session
+            .handle_editor_message(EditorMessage::ConflictActionRequested {
+                document_id: document.id,
+                document_version: current.version,
+                action: ConflictAction::ReloadFromDisk,
+            })
+            .unwrap();
+        assert!(matches!(
+            reloaded.as_slice(),
+            [HostMessage::ReplaceDocument { document }]
+                if document.content == "디스크 선택\n" && !document.dirty
+        ));
     }
 
     #[test]
