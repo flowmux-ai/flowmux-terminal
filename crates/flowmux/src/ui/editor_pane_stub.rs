@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use flowmux_core::{PaneId, SurfaceId};
+use flowmux_core::{EditorSessionState, PaneId, SurfaceId};
 use flowmux_editor::{HostMessage, ProtocolError};
 use gtk::prelude::*;
 use std::cell::Cell;
@@ -15,7 +15,12 @@ pub struct EditorPane {
 }
 
 impl EditorPane {
-    pub fn new(pane_id: PaneId, _surface_id: SurfaceId, workspace_root: PathBuf) -> Self {
+    pub fn new(
+        pane_id: PaneId,
+        _surface_id: SurfaceId,
+        workspace_root: PathBuf,
+        _restored: EditorSessionState,
+    ) -> Self {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.set_hexpand(true);
         root.set_vexpand(true);
@@ -38,6 +43,10 @@ impl EditorPane {
 
     pub fn workspace_root(&self) -> &Path {
         &self.workspace_root
+    }
+
+    pub fn session_state(&self) -> EditorSessionState {
+        EditorSessionState::default()
     }
 
     pub fn focus_widget(&self) -> gtk::Widget {

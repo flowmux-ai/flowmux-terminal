@@ -57,6 +57,13 @@ interface OpenDocument {
   changeSequence: number;
   suppressChanges: boolean;
   diskStatus: DocumentDiskStatus;
+  restoreViewPending: boolean;
+}
+
+interface RecoveryProposal {
+  documentId: string;
+  documentVersion: number;
+  diskState: "unchanged" | "changed" | "deleted";
 }
 
 const documentState = requiredElement("document-state");
@@ -82,6 +89,8 @@ let closeDialogDocumentId: string | null = null;
 let closeAfterSaveDocumentId: string | null = null;
 let recoveryDialogDocumentId: string | null = null;
 let recoveryDialogDocumentVersion = 0;
+const recoveryQueue: RecoveryProposal[] = [];
+let viewStateTimer: ReturnType<typeof setTimeout> | null = null;
 const documents = new Map<string, OpenDocument>();
 
 monaco.editor.defineTheme("flowmux-dark", {
@@ -115,6 +124,9 @@ const editor = monaco.editor.create(editorContainer, {
   smoothScrolling: false,
   wordWrap: "off",
 });
+
+editor.onDidChangeCursorPosition(() => scheduleViewStateReport());
+editor.onDidScrollChange(() => scheduleViewStateReport());
 
 closeDialogCancel.addEventListener("click", () => hideCloseDialog());
 closeDialogDiscard.addEventListener("click", () => discardCloseDialogDocument());
@@ -207,8 +219,9 @@ function handleHostMessage(message: HostMessage): void {
 
   switch (message.type) {
     case "initialize_editor":
+      clearViewStateTimer();
       resetCloseDialog();
-      resetRecoveryDialog();
+      resetRecoveryDialog(true);
       for (const document of [...documents.values()]) {
         document.model.dispose();
       }
@@ -301,6 +314,7 @@ function addOrReplaceDocument(payload: DocumentPayload): void {
     changeSequence: 0,
     suppressChanges: false,
     diskStatus: payload.externalChange ? "modified" : "unchanged",
+    restoreViewPending: true,
   };
   model.onDidChangeContent(() => {
     if (document.suppressChanges) {
@@ -329,12 +343,33 @@ function addOrReplaceDocument(payload: DocumentPayload): void {
 }
 
 function activateDocument(documentId: string | null): void {
+  const previousDocumentId = activeDocumentId;
+  if (previousDocumentId !== documentId) {
+    reportActiveViewState();
+  }
   const document = documentId === null ? undefined : documents.get(documentId);
   activeDocumentId = document?.payload.id ?? null;
   editor.setModel(document?.model ?? null);
   editor.updateOptions({ readOnly: document?.payload.readOnly ?? false });
   renderState();
   if (document !== undefined) {
+    if (document.restoreViewPending) {
+      editor.setPosition({
+        lineNumber: document.payload.cursorLine + 1,
+        column: document.payload.cursorColumn + 1,
+      });
+      editor.setScrollTop(document.payload.scrollTop);
+      document.restoreViewPending = false;
+    }
+    if (previousDocumentId !== document.payload.id) {
+      postToHost({
+        protocolVersion: PROTOCOL_VERSION,
+        surfaceId,
+        type: "active_document_changed",
+        documentId: document.payload.id,
+        documentVersion: document.payload.version,
+      });
+    }
     editor.focus();
   }
 }
@@ -351,6 +386,11 @@ function closeDocument(documentId: string): void {
   }
   if (recoveryDialogDocumentId === documentId) {
     resetRecoveryDialog();
+  }
+  for (let index = recoveryQueue.length - 1; index >= 0; index -= 1) {
+    if (recoveryQueue[index]?.documentId === documentId) {
+      recoveryQueue.splice(index, 1);
+    }
   }
   document.model.dispose();
   documents.delete(documentId);
@@ -444,6 +484,13 @@ function showRecoveryDialog(
   if (document === undefined || document.payload.version !== documentVersion) {
     return;
   }
+  if (recoveryDialogDocumentId !== null) {
+    const duplicate = recoveryQueue.some((proposal) => proposal.documentId === documentId);
+    if (recoveryDialogDocumentId !== documentId && !duplicate) {
+      recoveryQueue.push({ documentId, documentVersion, diskState });
+    }
+    return;
+  }
   recoveryDialogDocumentId = documentId;
   recoveryDialogDocumentVersion = documentVersion;
   recoveryDialogDocument.textContent = `“${document.payload.name}”`;
@@ -474,13 +521,59 @@ function resolveRecovery(choice: "restore" | "discard"): void {
   });
 }
 
-function resetRecoveryDialog(): void {
+function resetRecoveryDialog(clearQueue = false): void {
   recoveryDialogDocumentId = null;
   recoveryDialogDocumentVersion = 0;
   if (recoveryDialog.open) {
     recoveryDialog.close();
   }
+  if (clearQueue) {
+    recoveryQueue.length = 0;
+  } else {
+    const next = recoveryQueue.shift();
+    if (next !== undefined) {
+      showRecoveryDialog(next.documentId, next.documentVersion, next.diskState);
+      return;
+    }
+  }
   editor.focus();
+}
+
+function scheduleViewStateReport(): void {
+  if (activeDocumentId === null) {
+    return;
+  }
+  clearViewStateTimer();
+  viewStateTimer = setTimeout(() => reportActiveViewState(), 300);
+}
+
+function clearViewStateTimer(): void {
+  if (viewStateTimer !== null) {
+    clearTimeout(viewStateTimer);
+    viewStateTimer = null;
+  }
+}
+
+function reportActiveViewState(): void {
+  clearViewStateTimer();
+  const document = activeDocumentId === null ? undefined : documents.get(activeDocumentId);
+  const position = editor.getPosition();
+  if (document === undefined || position === null) {
+    return;
+  }
+  document.payload.cursorLine = Math.max(0, position.lineNumber - 1);
+  document.payload.cursorColumn = Math.max(0, position.column - 1);
+  document.payload.scrollTop = Math.max(0, editor.getScrollTop());
+  postToHost({
+    protocolVersion: PROTOCOL_VERSION,
+    surfaceId,
+    type: "view_state_changed",
+    documentId: document.payload.id,
+    documentVersion: document.payload.version,
+    cursorLine: document.payload.cursorLine,
+    cursorColumn: document.payload.cursorColumn,
+    scrollTop: document.payload.scrollTop,
+  });
 }
 
 function requestSave(documentId: string | null = activeDocumentId): void {

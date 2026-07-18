@@ -2963,6 +2963,46 @@ fn editor_surface_without_session_defaults_to_empty() {
 }
 
 #[test]
+fn editor_session_update_persists_view_and_tracks_active_title() {
+    let pane_id = PaneId::new();
+    let mut editor = PaneSurface::editor("Editor", "/tmp/project".into());
+    let editor_id = editor.id;
+    editor.title_locked = false;
+    let mut pane = Pane::Leaf {
+        id: pane_id,
+        content: PaneContent::Tabs {
+            surfaces: vec![editor],
+            active: editor_id,
+        },
+    };
+    let state = EditorSessionState {
+        open_files: vec![EditorFileState {
+            path: "/tmp/project/문서-日本語.rs".into(),
+            cursor_line: 8,
+            cursor_column: 3,
+            scroll_top: 44.5,
+        }],
+        active_file: Some("/tmp/project/문서-日本語.rs".into()),
+    };
+
+    assert!(pane.set_surface_editor_session(pane_id, editor_id, state.clone()));
+    assert!(!pane.set_surface_editor_session(pane_id, editor_id, state));
+    let surface = pane.find_surface(pane_id, editor_id).unwrap();
+    assert_eq!(surface.title, "문서-日本語.rs");
+    let SurfaceKind::Editor { session, .. } = &surface.kind else {
+        panic!("expected editor surface");
+    };
+    assert_eq!(session.open_files[0].cursor_line, 8);
+
+    let empty = EditorSessionState::default();
+    assert!(pane.set_surface_editor_session(pane_id, editor_id, empty));
+    assert_eq!(
+        pane.find_surface(pane_id, editor_id).unwrap().title,
+        "Editor"
+    );
+}
+
+#[test]
 fn cwd_for_new_terminal_uses_prior_terminal_when_editor_is_active() {
     let terminal = PaneSurface::terminal("shell", Some("/tmp/work".into()));
     let editor = PaneSurface::editor("Editor", "/tmp/project".into());

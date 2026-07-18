@@ -21,6 +21,9 @@ const koreanDocument = {
   dirty: false,
   readOnly: false,
   externalChange: false,
+  cursorLine: 0,
+  cursorColumn: 0,
+  scrollTop: 0,
 };
 
 test("accepts a complete multilingual initialization message", () => {
@@ -58,6 +61,15 @@ test("rejects unsupported versions, unknown types, and incomplete documents", ()
       surfaceId: "surface-1",
       type: "open_document",
       document: { ...koreanDocument, content: undefined },
+    }),
+    false,
+  );
+  assert.equal(
+    isHostMessage({
+      protocolVersion: 1,
+      surfaceId: "surface-1",
+      type: "open_document",
+      document: { ...koreanDocument, scrollTop: Number.NaN },
     }),
     false,
   );

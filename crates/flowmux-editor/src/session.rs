@@ -25,6 +25,25 @@ pub enum EditorSessionError {
     },
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EditorViewState {
+    pub cursor_line: u32,
+    pub cursor_column: u32,
+    pub scroll_top: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EditorFileSessionState {
+    pub path: PathBuf,
+    pub view: EditorViewState,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EditorSessionSnapshot {
+    pub open_files: Vec<EditorFileSessionState>,
+    pub active_file: Option<PathBuf>,
+}
+
 /// Runtime state for the documents displayed by one editor WebView.
 pub struct EditorSession {
     documents: DocumentService,
@@ -32,6 +51,7 @@ pub struct EditorSession {
     open_order: Vec<DocumentId>,
     active: Option<DocumentId>,
     reported_disk_status: HashMap<DocumentId, DiskStatus>,
+    view_states: HashMap<DocumentId, EditorViewState>,
     recovery_store: Option<RecoveryStore>,
     pending_recoveries: HashMap<DocumentId, (RecoverySnapshot, RecoveryDiskState)>,
     recovery_base_hashes: HashMap<DocumentId, String>,
@@ -46,6 +66,7 @@ impl EditorSession {
             open_order: Vec::new(),
             active: None,
             reported_disk_status: HashMap::new(),
+            view_states: HashMap::new(),
             recovery_store: None,
             pending_recoveries: HashMap::new(),
             recovery_base_hashes: HashMap::new(),
@@ -64,6 +85,38 @@ impl EditorSession {
 
     pub fn take_recovery_operations(&mut self) -> Vec<RecoveryOperation> {
         std::mem::take(&mut self.recovery_operations)
+    }
+
+    pub fn session_snapshot(&self) -> EditorSessionSnapshot {
+        EditorSessionSnapshot {
+            open_files: self
+                .open_order
+                .iter()
+                .filter_map(|id| {
+                    let document = self.documents.snapshot(*id).ok()?;
+                    Some(EditorFileSessionState {
+                        path: document.display_path,
+                        view: self.view_states.get(id).cloned().unwrap_or_default(),
+                    })
+                })
+                .collect(),
+            active_file: self
+                .active
+                .and_then(|id| self.documents.snapshot(id).ok())
+                .map(|document| document.display_path),
+        }
+    }
+
+    pub fn activate_path(&mut self, path: impl AsRef<Path>) {
+        let path = path.as_ref();
+        let active = self.open_order.iter().copied().find(|id| {
+            self.documents.snapshot(*id).is_ok_and(|document| {
+                document.display_path == path || document.identity_path == path
+            })
+        });
+        if active.is_some() {
+            self.active = active;
+        }
     }
 
     pub fn initialize_message(&self, workspace_name: String) -> HostMessage {
@@ -142,6 +195,7 @@ impl EditorSession {
             self.protocol_ids.retain(|_, mapped| *mapped != id);
             self.open_order.retain(|candidate| *candidate != id);
             self.reported_disk_status.remove(&id);
+            self.view_states.remove(&id);
             self.queue_recovery_removal(id, &snapshot.identity_path);
         }
         if self.active.is_some_and(|id| !self.open_order.contains(&id)) {
@@ -153,6 +207,22 @@ impl EditorSession {
         &mut self,
         path: impl AsRef<Path>,
     ) -> Result<Vec<HostMessage>, DocumentError> {
+        self.open_document_with_view(path, EditorViewState::default())
+    }
+
+    pub fn restore_document(
+        &mut self,
+        path: impl AsRef<Path>,
+        view: EditorViewState,
+    ) -> Result<Vec<HostMessage>, DocumentError> {
+        self.open_document_with_view(path, view)
+    }
+
+    fn open_document_with_view(
+        &mut self,
+        path: impl AsRef<Path>,
+        view: EditorViewState,
+    ) -> Result<Vec<HostMessage>, DocumentError> {
         let opened = self.documents.open(path)?;
         let id = opened.document.id;
         let document_id = protocol_id(id);
@@ -162,6 +232,7 @@ impl EditorSession {
         }
         if !opened.already_open {
             self.reported_disk_status.insert(id, DiskStatus::Unchanged);
+            self.view_states.insert(id, view);
         }
         self.active = Some(id);
 
@@ -277,6 +348,24 @@ impl EditorSession {
                 document_version,
                 choice,
             } => self.recovery_decision(document_id, document_version, choice),
+            EditorMessage::ViewStateChanged {
+                document_id,
+                document_version,
+                cursor_line,
+                cursor_column,
+                scroll_top,
+            } => {
+                let id = self.checked_document(&document_id, document_version)?;
+                self.view_states.insert(
+                    id,
+                    EditorViewState {
+                        cursor_line,
+                        cursor_column,
+                        scroll_top,
+                    },
+                );
+                Ok(Vec::new())
+            }
         }
     }
 
@@ -296,6 +385,7 @@ impl EditorSession {
         self.protocol_ids.remove(&document_id);
         self.open_order.retain(|candidate| *candidate != id);
         self.reported_disk_status.remove(&id);
+        self.view_states.remove(&id);
         self.queue_recovery_removal(id, &identity_path);
         if self.active == Some(id) {
             self.active = self.open_order.last().copied();
@@ -454,6 +544,11 @@ impl EditorSession {
             LineEnding::Lf => TextDocumentLineEnding::Lf,
             LineEnding::CrLf => TextDocumentLineEnding::CrLf,
         };
+        let view = self
+            .view_states
+            .get(&snapshot.id)
+            .cloned()
+            .unwrap_or_default();
 
         DocumentPayload {
             id: protocol_id(snapshot.id),
@@ -468,6 +563,9 @@ impl EditorSession {
             dirty,
             read_only: snapshot.read_only,
             external_change,
+            cursor_line: view.cursor_line,
+            cursor_column: view.cursor_column,
+            scroll_top: view.scroll_top,
         }
     }
 }
@@ -522,6 +620,59 @@ mod tests {
         ));
         assert!(session.contains_document(&path));
         assert!(!session.contains_document(workspace.path().join("missing.rs")));
+    }
+
+    #[test]
+    fn restored_files_active_document_and_view_state_round_trip() {
+        let workspace = tempdir().unwrap();
+        let first_path = workspace.path().join("첫째.rs");
+        let second_path = workspace.path().join("第二.rs");
+        fs::write(&first_path, "first\n").unwrap();
+        fs::write(&second_path, "second\n").unwrap();
+        let mut session = EditorSession::new(workspace.path()).unwrap();
+        let first = open_payload(
+            session
+                .restore_document(
+                    &first_path,
+                    EditorViewState {
+                        cursor_line: 7,
+                        cursor_column: 3,
+                        scroll_top: 88.5,
+                    },
+                )
+                .unwrap(),
+        );
+        session.open_document(&second_path).unwrap();
+        session.activate_path(&first_path);
+
+        let HostMessage::InitializeEditor {
+            documents,
+            active_document_id,
+            ..
+        } = session.initialize_message("workspace".into())
+        else {
+            panic!("expected editor initialization");
+        };
+        assert_eq!(active_document_id.as_deref(), Some(first.id.as_str()));
+        assert_eq!(documents[0].cursor_line, 7);
+        assert_eq!(documents[0].cursor_column, 3);
+        assert_eq!(documents[0].scroll_top, 88.5);
+
+        session
+            .handle_editor_message(EditorMessage::ViewStateChanged {
+                document_id: first.id,
+                document_version: first.version,
+                cursor_line: 12,
+                cursor_column: 5,
+                scroll_top: 144.0,
+            })
+            .unwrap();
+        let snapshot = session.session_snapshot();
+        assert_eq!(snapshot.active_file.as_deref(), Some(first_path.as_path()));
+        assert_eq!(snapshot.open_files.len(), 2);
+        assert_eq!(snapshot.open_files[0].view.cursor_line, 12);
+        assert_eq!(snapshot.open_files[0].view.cursor_column, 5);
+        assert_eq!(snapshot.open_files[0].view.scroll_top, 144.0);
     }
 
     #[test]

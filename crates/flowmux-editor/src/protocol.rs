@@ -33,7 +33,7 @@ pub enum DocumentDiskStatus {
     Deleted,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DocumentPayload {
     pub id: String,
@@ -49,9 +49,12 @@ pub struct DocumentPayload {
     pub dirty: bool,
     pub read_only: bool,
     pub external_change: bool,
+    pub cursor_line: u32,
+    pub cursor_column: u32,
+    pub scroll_top: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
     rename_all = "snake_case",
@@ -107,7 +110,7 @@ pub enum RecoveryChoice {
     Discard,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
     rename_all = "snake_case",
@@ -145,6 +148,13 @@ pub enum EditorMessage {
         document_version: u64,
         choice: RecoveryChoice,
     },
+    ViewStateChanged {
+        document_id: String,
+        document_version: u64,
+        cursor_line: u32,
+        cursor_column: u32,
+        scroll_top: f64,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -177,6 +187,8 @@ pub enum ProtocolError {
     InvalidIdentifier { field: &'static str },
     #[error("editor document content exceeds the {limit} byte limit")]
     DocumentTooLarge { limit: usize },
+    #[error("invalid editor document view state")]
+    InvalidViewState,
 }
 
 pub fn parse_editor_message(input: &str) -> Result<(String, EditorMessage), ProtocolError> {
@@ -235,6 +247,17 @@ fn validate_editor_message(message: &EditorMessage) -> Result<(), ProtocolError>
         | EditorMessage::RecoveryDecision { document_id, .. } => {
             validate_identifier("document ID", document_id)
         }
+        EditorMessage::ViewStateChanged {
+            document_id,
+            scroll_top,
+            ..
+        } => {
+            validate_identifier("document ID", document_id)?;
+            if !scroll_top.is_finite() || *scroll_top < 0.0 {
+                return Err(ProtocolError::InvalidViewState);
+            }
+            Ok(())
+        }
         EditorMessage::DocumentChanged {
             document_id,
             content,
@@ -287,6 +310,9 @@ fn validate_document(document: &DocumentPayload) -> Result<(), ProtocolError> {
     if document.uri.is_empty() {
         return Err(ProtocolError::InvalidIdentifier { field: "URI" });
     }
+    if !document.scroll_top.is_finite() || document.scroll_top < 0.0 {
+        return Err(ProtocolError::InvalidViewState);
+    }
     validate_document_size(&document.content)
 }
 
@@ -329,6 +355,9 @@ mod tests {
             dirty: true,
             read_only: false,
             external_change: false,
+            cursor_line: 12,
+            cursor_column: 4,
+            scroll_top: 96.5,
         }
     }
 
@@ -451,6 +480,37 @@ mod tests {
                 choice: RecoveryChoice::Restore,
             }
         );
+    }
+
+    #[test]
+    fn view_state_message_accepts_multilingual_document_and_rejects_negative_scroll() {
+        let message = serde_json::json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "surfaceId": "surface-1",
+            "type": "view_state_changed",
+            "documentId": "document-1",
+            "documentVersion": 3,
+            "cursorLine": 14,
+            "cursorColumn": 6,
+            "scrollTop": 128.5
+        })
+        .to_string();
+        assert_eq!(
+            parse_editor_message(&message).unwrap().1,
+            EditorMessage::ViewStateChanged {
+                document_id: "document-1".into(),
+                document_version: 3,
+                cursor_line: 14,
+                cursor_column: 6,
+                scroll_top: 128.5,
+            }
+        );
+
+        let invalid = message.replace("128.5", "-1");
+        assert!(matches!(
+            parse_editor_message(&invalid),
+            Err(ProtocolError::InvalidViewState)
+        ));
     }
 
     #[test]

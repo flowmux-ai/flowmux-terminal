@@ -1025,6 +1025,36 @@ impl Pane {
         true
     }
 
+    pub fn set_surface_editor_session(
+        &mut self,
+        target: PaneId,
+        surface_id: SurfaceId,
+        new_session: EditorSessionState,
+    ) -> bool {
+        let Some(surface) = self.find_surface_mut(target, surface_id) else {
+            return false;
+        };
+        let SurfaceKind::Editor { session, .. } = &mut surface.kind else {
+            return false;
+        };
+        let mut changed = *session != new_session;
+        *session = new_session;
+        if !surface.title_locked {
+            let title = session
+                .active_file
+                .as_deref()
+                .and_then(Path::file_name)
+                .map(|name| name.to_string_lossy().into_owned())
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or_else(|| "Editor".into());
+            if surface.title != title {
+                surface.title = title;
+                changed = true;
+            }
+        }
+        changed
+    }
+
     /// Auto-rename a surface from an external signal (browser page title,
     /// terminal OSC, etc. Surfaces with title_locked = true were user-renamed and
     /// are skipped. Empty or identical titles return false.

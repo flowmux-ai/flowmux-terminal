@@ -362,6 +362,15 @@ impl PaneRegistry {
             .collect()
     }
 
+    pub fn editor_session_snapshots(
+        &self,
+    ) -> Vec<(PaneId, SurfaceId, flowmux_core::EditorSessionState)> {
+        self.editors
+            .iter()
+            .map(|(surface, editor)| (editor.pane_id(), *surface, editor.session_state()))
+            .collect()
+    }
+
     pub fn terminal_cwd_poll_inputs(
         &self,
     ) -> Vec<(PaneId, SurfaceId, Option<std::path::PathBuf>, Option<i32>)> {
@@ -773,11 +782,12 @@ impl PaneRegistry {
                 None,
             )
         } else if let Some(editor) = self.editors.remove(&surface) {
+            let session = editor.session_state();
             (
                 editor.focus_widget(),
                 SurfaceKind::Editor {
                     workspace_root: editor.workspace_root().to_path_buf(),
-                    session: flowmux_core::EditorSessionState::default(),
+                    session,
                 },
                 Some(editor),
             )
@@ -2807,8 +2817,12 @@ fn build_panel(
             r.surface_workspace.insert(surface.id, workspace);
             widget
         }
-        SurfaceKind::Editor { workspace_root, .. } => {
-            let editor = EditorPane::new(pane_id, surface.id, workspace_root.clone());
+        SurfaceKind::Editor {
+            workspace_root,
+            session,
+        } => {
+            let editor =
+                EditorPane::new(pane_id, surface.id, workspace_root.clone(), session.clone());
 
             let frame_in = frame.clone();
             let frame_out = frame.clone();

@@ -1129,6 +1129,7 @@ impl WindowController {
         };
         controller.install_state_flush_on_close();
         controller.install_cwd_polling_fallback();
+        controller.install_editor_session_persistence();
         controller.install_scrollback_persistence();
         controller.install_agent_process_polling();
         controller
@@ -1317,6 +1318,7 @@ impl WindowController {
             }
             controller.flush_terminal_cwds_blocking();
             controller.flush_terminal_scrollback_blocking();
+            controller.flush_editor_sessions_blocking();
             controller.flush_layout_blocking();
             if let Err(e) = controller.store.save_now_blocking() {
                 tracing::warn!(error = %e, "state save on close failed");

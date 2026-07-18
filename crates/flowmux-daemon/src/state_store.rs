@@ -9,8 +9,9 @@
 use flowmux_core::{
     detect_agent_idle_name_from_signals, detect_agent_name_from_signals,
     detect_agent_status_from_signals, terminal_tab_title_for_cwd, AgentPresence, AgentStatus,
-    AgentStatusReport, CloseSurfaceOutcome, Pane, PaneContent, PaneId, PaneSurface, RemoveOutcome,
-    SplitDirection, Surface, SurfaceId, SurfaceKind, Workspace, WorkspaceAgentBlock, WorkspaceId,
+    AgentStatusReport, CloseSurfaceOutcome, EditorSessionState, Pane, PaneContent, PaneId,
+    PaneSurface, RemoveOutcome, SplitDirection, Surface, SurfaceId, SurfaceKind, Workspace,
+    WorkspaceAgentBlock, WorkspaceId,
 };
 use flowmux_state::{State, WindowLayout, WindowOwner};
 use std::collections::{HashMap, HashSet};
@@ -1422,6 +1423,36 @@ impl StateStore {
         updated
     }
 
+    pub async fn update_editor_session(
+        &self,
+        pane: PaneId,
+        surface_id: SurfaceId,
+        session: EditorSessionState,
+    ) -> Option<WorkspaceId> {
+        let mut state = self.inner.lock().await;
+        let updated = update_editor_session_in_state(&mut state, pane, surface_id, session);
+        drop(state);
+        if updated.is_some() {
+            self.mark_dirty();
+        }
+        updated
+    }
+
+    pub fn update_editor_session_blocking(
+        &self,
+        pane: PaneId,
+        surface_id: SurfaceId,
+        session: EditorSessionState,
+    ) -> Option<WorkspaceId> {
+        let mut state = self.inner.blocking_lock();
+        let updated = update_editor_session_in_state(&mut state, pane, surface_id, session);
+        drop(state);
+        if updated.is_some() {
+            self.mark_dirty();
+        }
+        updated
+    }
+
     /// Called when reordering terminal/browser tabs inside a pane by drag and
     /// drop. Moves `surface_id` within the same pane to `target_index`. The index
     /// is the final position after applying the move and clamps to the end when
@@ -2100,6 +2131,25 @@ fn update_surface_scrollback_in_state(
                 .set_surface_scrollback(pane, surface_id, text.clone())
             {
                 return Some(ws.id);
+            }
+        }
+    }
+    None
+}
+
+fn update_editor_session_in_state(
+    state: &mut State,
+    pane: PaneId,
+    surface_id: SurfaceId,
+    session: EditorSessionState,
+) -> Option<WorkspaceId> {
+    for workspace in &mut state.workspaces {
+        for surface in &mut workspace.surfaces {
+            if surface
+                .root_pane
+                .set_surface_editor_session(pane, surface_id, session.clone())
+            {
+                return Some(workspace.id);
             }
         }
     }
@@ -3608,6 +3658,50 @@ Do you want to continue?";
             .unwrap();
         assert!(saved.len() <= flowmux_core::TERMINAL_SCROLLBACK_MAX_BYTES);
         assert!(saved.ends_with("latest"));
+    }
+
+    #[tokio::test]
+    async fn update_editor_session_persists_view_and_active_title() {
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("project".into()), "/tmp/project".into())
+            .await;
+        let pane = first_pane(&store.get_workspace(ws_id).await.unwrap());
+        let (_, editor) = store.add_editor_surface_to_pane(pane).await.unwrap();
+        let session = EditorSessionState {
+            open_files: vec![flowmux_core::EditorFileState {
+                path: "/tmp/project/문서-日本語.rs".into(),
+                cursor_line: 11,
+                cursor_column: 5,
+                scroll_top: 72.0,
+            }],
+            active_file: Some("/tmp/project/문서-日本語.rs".into()),
+        };
+
+        assert_eq!(
+            store
+                .update_editor_session(pane, editor, session.clone())
+                .await,
+            Some(ws_id)
+        );
+        assert_eq!(
+            store.update_editor_session(pane, editor, session).await,
+            None
+        );
+        assert_eq!(
+            store.surface_title(pane, editor).await.as_deref(),
+            Some("문서-日本語.rs")
+        );
+        let workspace = store.get_workspace(ws_id).await.unwrap();
+        let surface = workspace.surfaces[0]
+            .root_pane
+            .find_surface(pane, editor)
+            .unwrap();
+        let SurfaceKind::Editor { session, .. } = &surface.kind else {
+            panic!("expected editor surface");
+        };
+        assert_eq!(session.open_files[0].cursor_line, 11);
+        assert_eq!(session.open_files[0].scroll_top, 72.0);
     }
 
     #[tokio::test]

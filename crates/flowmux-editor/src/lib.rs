@@ -19,7 +19,10 @@ pub use recovery::{
     RecoveryDiskState, RecoveryError, RecoveryOperation, RecoverySnapshot, RecoveryStore,
     RECOVERY_FORMAT_VERSION,
 };
-pub use session::{EditorSession, EditorSessionError};
+pub use session::{
+    EditorFileSessionState, EditorSession, EditorSessionError, EditorSessionSnapshot,
+    EditorViewState,
+};
 pub use web_assets::{EditorAssetServer, EditorAssetServerError};
 
 use serde::{Deserialize, Serialize};

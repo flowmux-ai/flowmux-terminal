@@ -40,7 +40,11 @@ if (
 }
 
 const main = await readFile(resolve(root, "dist", "main.js"), "utf8");
-if (!main.includes("discard_close_requested") || !main.includes("recovery_decision")) {
+if (
+  !main.includes("discard_close_requested") ||
+  !main.includes("recovery_decision") ||
+  !main.includes("view_state_changed")
+) {
   throw new Error("Editor bundle is missing an explicit document safety message");
 }
 

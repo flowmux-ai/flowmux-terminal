@@ -57,6 +57,46 @@ impl WindowController {
         }
     }
 
+    pub(super) fn flush_editor_sessions_blocking(&self) {
+        let snapshots = self.pane_registry.borrow().editor_session_snapshots();
+        for (pane, surface, session) in snapshots {
+            let _ = self
+                .store
+                .update_editor_session_blocking(pane, surface, session);
+        }
+    }
+
+    pub(super) fn install_editor_session_persistence(&self) {
+        let controller = self.clone();
+        glib::timeout_add_local(Duration::from_secs(1), move || {
+            let snapshots = controller.pane_registry.borrow().editor_session_snapshots();
+            let controller = controller.clone();
+            glib::MainContext::default().spawn_local(async move {
+                let mut updated = false;
+                for (pane, surface, session) in snapshots {
+                    if controller
+                        .store
+                        .update_editor_session(pane, surface, session)
+                        .await
+                        .is_some()
+                    {
+                        updated = true;
+                        if let Some(title) = controller.store.surface_title(pane, surface).await {
+                            controller
+                                .pane_registry
+                                .borrow()
+                                .set_surface_title(surface, &title);
+                        }
+                    }
+                }
+                if updated {
+                    controller.refresh_window_title().await;
+                }
+            });
+            glib::ControlFlow::Continue
+        });
+    }
+
     /// Capture terminal history periodically so a crash or power loss loses at
     /// most one short interval. StateStore de-duplicates identical snapshots
     /// and debounces disk writes.

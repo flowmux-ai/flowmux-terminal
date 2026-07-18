@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Platform editor WebView and its versioned bridge state.
 
-use flowmux_core::SurfaceId;
+use flowmux_core::{EditorFileState, EditorSessionState, SurfaceId};
 use flowmux_editor::{
-    javascript_for_host_message, parse_editor_message, EditorMessage, EditorSession, HostMessage,
-    ProtocolError, RecoveryOperation, RecoveryStore,
+    javascript_for_host_message, parse_editor_message, EditorFileSessionState, EditorMessage,
+    EditorSession, EditorSessionSnapshot, EditorViewState, HostMessage, ProtocolError,
+    RecoveryOperation, RecoveryStore,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -96,13 +97,14 @@ impl EditorBridgeState {
 
 pub(super) struct EditorHostState {
     session: RefCell<Result<EditorSession, String>>,
+    startup_messages: RefCell<Vec<HostMessage>>,
     recovery_sender: Option<Sender<RecoveryOperation>>,
     pending_recovery: RefCell<HashMap<PathBuf, RecoveryOperation>>,
     recovery_generation: Cell<u64>,
 }
 
 impl EditorHostState {
-    pub(super) fn new(workspace_root: &Path) -> Self {
+    pub(super) fn new(workspace_root: &Path, restored: EditorSessionState) -> Self {
         let recovery_store = flowmux_config::paths::state_dir().and_then(|state_root| {
             match RecoveryStore::new(state_root, workspace_root) {
                 Ok(store) => Some(store),
@@ -112,7 +114,7 @@ impl EditorHostState {
                 }
             }
         });
-        let session = match &recovery_store {
+        let mut session = match &recovery_store {
             Some(store) => EditorSession::with_recovery_store(workspace_root, store.clone()),
             None => EditorSession::new(workspace_root),
         }
@@ -121,13 +123,41 @@ impl EditorHostState {
             tracing::error!(%error, "failed to initialize editor document session");
             error
         });
+        let mut startup_messages = Vec::new();
+        if let Ok(session) = &mut session {
+            for file in restored.open_files {
+                match session.restore_document(
+                    &file.path,
+                    EditorViewState {
+                        cursor_line: file.cursor_line,
+                        cursor_column: file.cursor_column,
+                        scroll_top: file.scroll_top,
+                    },
+                ) {
+                    Ok(messages) => {
+                        startup_messages.extend(messages.into_iter().filter(|message| {
+                            matches!(message, HostMessage::RecoveryAvailable { .. })
+                        }))
+                    }
+                    Err(error) => {
+                        tracing::warn!(path = %file.path.display(), %error, "skipping unavailable restored editor document");
+                    }
+                }
+            }
+            if let Some(active_file) = restored.active_file {
+                session.activate_path(active_file);
+            }
+        }
         let recovery_sender = recovery_store.and_then(start_recovery_worker);
-        Self {
+        let host = Self {
             session: RefCell::new(session),
+            startup_messages: RefCell::new(startup_messages),
             recovery_sender,
             pending_recovery: RefCell::new(HashMap::new()),
             recovery_generation: Cell::new(0),
-        }
+        };
+        host.stage_recovery_operations();
+        host
     }
 
     pub(super) fn initialize_message(&self, workspace_name: String) -> HostMessage {
@@ -138,6 +168,17 @@ impl EditorHostState {
                 documents: Vec::new(),
                 active_document_id: None,
             },
+        }
+    }
+
+    pub(super) fn take_startup_messages(&self) -> Vec<HostMessage> {
+        std::mem::take(&mut *self.startup_messages.borrow_mut())
+    }
+
+    pub(super) fn session_state(&self) -> EditorSessionState {
+        match &*self.session.borrow() {
+            Ok(session) => core_session_state(session.session_snapshot()),
+            Err(_) => EditorSessionState::default(),
         }
     }
 
@@ -330,6 +371,32 @@ fn start_recovery_worker(store: RecoveryStore) -> Option<Sender<RecoveryOperatio
             tracing::warn!(%error, "failed to start editor recovery worker");
             None
         }
+    }
+}
+
+fn core_session_state(snapshot: EditorSessionSnapshot) -> EditorSessionState {
+    EditorSessionState {
+        open_files: snapshot
+            .open_files
+            .into_iter()
+            .map(
+                |EditorFileSessionState {
+                     path,
+                     view:
+                         EditorViewState {
+                             cursor_line,
+                             cursor_column,
+                             scroll_top,
+                         },
+                 }| EditorFileState {
+                    path,
+                    cursor_line,
+                    cursor_column,
+                    scroll_top,
+                },
+            )
+            .collect(),
+        active_file: snapshot.active_file,
     }
 }
 

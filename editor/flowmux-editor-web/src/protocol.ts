@@ -15,6 +15,9 @@ export interface DocumentPayload {
   dirty: boolean;
   readOnly: boolean;
   externalChange: boolean;
+  cursorLine: number;
+  cursorColumn: number;
+  scrollTop: number;
 }
 
 export type DocumentDiskStatus = "unchanged" | "modified" | "deleted";
@@ -108,6 +111,14 @@ export type EditorMessage =
       documentId: string;
       documentVersion: number;
       choice: "restore" | "discard";
+    })
+  | (EditorMessageBase & {
+      type: "view_state_changed";
+      documentId: string;
+      documentVersion: number;
+      cursorLine: number;
+      cursorColumn: number;
+      scrollTop: number;
     });
 
 export interface DocumentEditAdvance {
@@ -201,7 +212,12 @@ function isDocumentPayload(value: unknown): value is DocumentPayload {
     (value.eol === "LF" || value.eol === "CRLF") &&
     typeof value.dirty === "boolean" &&
     typeof value.readOnly === "boolean" &&
-    typeof value.externalChange === "boolean"
+    typeof value.externalChange === "boolean" &&
+    isVersion(value.cursorLine) &&
+    isVersion(value.cursorColumn) &&
+    typeof value.scrollTop === "number" &&
+    Number.isFinite(value.scrollTop) &&
+    value.scrollTop >= 0
   );
 }
 

@@ -5,7 +5,7 @@ use super::{
     handle_bridge_message, is_allowed_editor_navigation, queue_host_messages,
     should_poll_editor_documents, EditorBridgeState, EditorHostState,
 };
-use flowmux_core::{PaneId, SurfaceId};
+use flowmux_core::{EditorSessionState, PaneId, SurfaceId};
 use flowmux_editor::{EditorAssetServer, HostMessage, ProtocolError};
 use gtk::gio;
 use gtk::glib::{self, translate::ToGlibPtr};
@@ -194,7 +194,12 @@ impl Drop for NativeEditorView {
 }
 
 impl EditorPane {
-    pub fn new(pane_id: PaneId, surface_id: SurfaceId, workspace_root: PathBuf) -> Self {
+    pub fn new(
+        pane_id: PaneId,
+        surface_id: SurfaceId,
+        workspace_root: PathBuf,
+        restored: EditorSessionState,
+    ) -> Self {
         let asset_server = Rc::new(
             EditorAssetServer::start()
                 .expect("the editor asset server must bind to the IPv4 loopback interface"),
@@ -207,7 +212,7 @@ impl EditorPane {
             .expect("editor URLs end with the generated entry point")
             .to_string();
         let bridge = Rc::new(EditorBridgeState::new(surface_id));
-        let host = Rc::new(EditorHostState::new(&workspace_root));
+        let host = Rc::new(EditorHostState::new(&workspace_root, restored));
         let mtm = MainThreadMarker::new().expect("WKWebView must be created on the main thread");
         let native = Rc::new(create_native_editor_view(
             mtm,
@@ -273,6 +278,11 @@ impl EditorPane {
         ) {
             tracing::error!(%error, "failed to queue editor initialization");
         }
+        for message in pane.host.take_startup_messages() {
+            if let Err(error) = pane.send(message) {
+                tracing::warn!(%error, "failed to queue restored editor state");
+            }
+        }
         pane
     }
 
@@ -286,6 +296,10 @@ impl EditorPane {
 
     pub fn workspace_root(&self) -> &Path {
         &self.workspace_root
+    }
+
+    pub fn session_state(&self) -> EditorSessionState {
+        self.host.session_state()
     }
 
     pub fn focus_widget(&self) -> gtk::Widget {
