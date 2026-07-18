@@ -5,16 +5,27 @@
 
 use super::*;
 
-fn fuzzy_matches(query: &str, candidate: &str) -> bool {
-    let query = query.trim().to_lowercase();
+fn fuzzy_matches_prepared(query: &str, candidate: &str) -> bool {
+    let query = query.trim();
     if query.is_empty() {
         return true;
     }
-    let candidate = candidate.to_lowercase();
     query.split_whitespace().all(|token| {
         let mut chars = candidate.chars();
         token.chars().all(|needle| chars.any(|ch| ch == needle))
     })
+}
+
+#[cfg(test)]
+fn fuzzy_matches(query: &str, candidate: &str) -> bool {
+    fuzzy_matches_prepared(&query.to_lowercase(), &candidate.to_lowercase())
+}
+
+type PaletteEntry = (String, String, gtk::Button);
+
+fn palette_entry(search_text: String, button: gtk::Button) -> PaletteEntry {
+    let normalized = search_text.to_lowercase();
+    (search_text, normalized, button)
 }
 
 fn palette_button(label: &str, shortcut: Option<&str>) -> gtk::Button {
@@ -336,20 +347,12 @@ impl WindowController {
     /// message-tray entry and the badge stuck.
     pub(super) async fn show_command_palette(&self) {
         let workspaces = self.store.ordered_workspaces().await;
-        let state = self.store.snapshot().await;
-        let quick_open_root = state.active_workspace.and_then(|active| {
+        let quick_open_root = self.store.active_or_first().await.and_then(|active| {
             workspaces
                 .iter()
                 .find(|workspace| workspace.id == active)
                 .map(|workspace| workspace.root_dir.clone())
         });
-        let quick_open = if let Some(root) = quick_open_root.clone() {
-            gtk::gio::spawn_blocking(move || quick_open_files(&root, 2_000))
-                .await
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
         let project_config = self.command_palette_project_config();
         let dialog = gtk::Window::builder()
             .transient_for(&self.window)
@@ -404,7 +407,7 @@ impl WindowController {
                 });
             });
             list.append(&button);
-            entries.push((label.to_string(), button));
+            entries.push(palette_entry(label.to_string(), button));
         }
 
         let builtin_template = development_workspace_template();
@@ -430,22 +433,12 @@ impl WindowController {
             });
         });
         list.append(&button);
-        entries.push((label, button));
-
-        if let Some(root) = quick_open_root {
-            for path in quick_open {
-                let relative = path.strip_prefix(&root).unwrap_or(&path);
-                let label = format!("File: {}", relative.display());
-                let button = palette_button(&label, None);
-                let dialog_for_click = dialog.clone();
-                button.connect_clicked(move |_| {
-                    dialog_for_click.close();
-                    crate::ui::file_browser::open_file(&path);
-                });
-                list.append(&button);
-                entries.push((label, button));
-            }
-        }
+        entries.push(palette_entry(label, button));
+        // Keep the asynchronous file section at its original position even if
+        // MRU ordering moves the template button before the scan completes.
+        let quick_open_anchor = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        quick_open_anchor.set_visible(false);
+        list.append(&quick_open_anchor);
 
         for workspace in &workspaces {
             let workspace_name = workspace.custom_title.as_deref().unwrap_or(&workspace.name);
@@ -462,7 +455,7 @@ impl WindowController {
                 });
             });
             list.append(&button);
-            entries.push((label, button));
+            entries.push(palette_entry(label, button));
 
             let mut pane_ids = Vec::new();
             for surface_root in &workspace.surfaces {
@@ -499,7 +492,7 @@ impl WindowController {
                     });
                 });
                 list.append(&button);
-                entries.push((label, button));
+                entries.push(palette_entry(label, button));
 
                 for root in &workspace.surfaces {
                     let Some(PaneContent::Tabs { surfaces, .. }) =
@@ -528,7 +521,7 @@ impl WindowController {
                             });
                         });
                         list.append(&button);
-                        entries.push((label, button));
+                        entries.push(palette_entry(label, button));
                     }
                 }
             }
@@ -555,7 +548,10 @@ impl WindowController {
                 });
             });
             list.append(&button);
-            entries.push((format!("{} {}", label, action.as_str()), button));
+            entries.push(palette_entry(
+                format!("{} {}", label, action.as_str()),
+                button,
+            ));
         }
 
         if let Some((base_dir, config)) = project_config {
@@ -577,29 +573,32 @@ impl WindowController {
                     });
                 });
                 list.append(&button);
-                entries.push((search_text, button));
+                entries.push(palette_entry(search_text, button));
             }
         }
 
-        for (search_text, button) in &entries {
+        for (search_text, _, button) in &entries {
             let key = search_text.clone();
             let mru = self.palette_mru.clone();
             button.connect_clicked(move |_| record_palette_mru(&mut mru.borrow_mut(), &key));
         }
         for key in self.palette_mru.borrow().iter().rev() {
-            if let Some((_, button)) = entries.iter().find(|(search_text, _)| search_text == key) {
+            if let Some((_, _, button)) = entries
+                .iter()
+                .find(|(search_text, _, _)| search_text == key)
+            {
                 list.reorder_child_after(button, None::<&gtk::Widget>);
             }
         }
 
-        let entries = Rc::new(entries);
+        let entries = Rc::new(RefCell::new(entries));
         let entries_for_search = entries.clone();
         let no_results_for_search = no_results.clone();
         search.connect_search_changed(move |entry| {
-            let query = entry.text();
+            let query = entry.text().to_lowercase();
             let mut any_visible = false;
-            for (search_text, button) in entries_for_search.iter() {
-                let visible = fuzzy_matches(&query, search_text);
+            for (_, normalized, button) in entries_for_search.borrow().iter() {
+                let visible = fuzzy_matches_prepared(&query, normalized);
                 button.set_visible(visible);
                 any_visible |= visible;
             }
@@ -607,9 +606,10 @@ impl WindowController {
         });
         let entries_for_activate = entries.clone();
         search.connect_activate(move |_| {
-            if let Some((_, button)) = entries_for_activate
+            if let Some((_, _, button)) = entries_for_activate
+                .borrow()
                 .iter()
-                .find(|(_, button)| button.is_visible())
+                .find(|(_, _, button)| button.is_visible())
             {
                 button.emit_clicked();
             }
@@ -619,6 +619,70 @@ impl WindowController {
 
         dialog.present();
         search.grab_focus();
+
+        if let Some(root) = quick_open_root {
+            let dialog = dialog.clone();
+            let list = list.clone();
+            let search = search.clone();
+            let entries = entries.clone();
+            let no_results = no_results.clone();
+            let palette_mru = self.palette_mru.clone();
+            glib::MainContext::default().spawn_local(async move {
+                let worker_root = root.clone();
+                let quick_open =
+                    gtk::gio::spawn_blocking(move || quick_open_files(&worker_root, 2_000))
+                        .await
+                        .unwrap_or_default();
+                let mut anchor = quick_open_anchor.upcast::<gtk::Widget>();
+                let mut completed = true;
+
+                for batch in quick_open.chunks(100) {
+                    if !dialog.is_visible() {
+                        completed = false;
+                        break;
+                    }
+                    let query = search.text().to_lowercase();
+                    for path in batch {
+                        let relative = path.strip_prefix(&root).unwrap_or(path);
+                        let label = format!("File: {}", relative.display());
+                        let button = palette_button(&label, None);
+                        button.set_visible(fuzzy_matches_prepared(&query, &label.to_lowercase()));
+                        let dialog_for_click = dialog.clone();
+                        let path = path.clone();
+                        button.connect_clicked(move |_| {
+                            dialog_for_click.close();
+                            crate::ui::file_browser::open_file(&path);
+                        });
+                        let key = label.clone();
+                        let mru = palette_mru.clone();
+                        button.connect_clicked(move |_| {
+                            record_palette_mru(&mut mru.borrow_mut(), &key)
+                        });
+                        list.insert_child_after(&button, Some(&anchor));
+                        anchor = button.clone().upcast();
+                        entries.borrow_mut().push(palette_entry(label, button));
+                    }
+                    let any_visible = entries
+                        .borrow()
+                        .iter()
+                        .any(|(_, _, button)| button.is_visible());
+                    no_results.set_visible(!any_visible);
+                    glib::timeout_future(std::time::Duration::from_millis(1)).await;
+                }
+
+                if completed && dialog.is_visible() {
+                    for key in palette_mru.borrow().iter().rev() {
+                        if let Some((_, _, button)) = entries
+                            .borrow()
+                            .iter()
+                            .find(|(search_text, _, _)| search_text == key)
+                        {
+                            list.reorder_child_after(button, None::<&gtk::Widget>);
+                        }
+                    }
+                }
+            });
+        }
     }
     async fn run_workspace_template(
         &self,
