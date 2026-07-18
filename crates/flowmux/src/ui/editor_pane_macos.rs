@@ -302,6 +302,20 @@ impl EditorPane {
         self.send(message).map_err(|error| error.to_string())
     }
 
+    pub fn dirty_document_paths(&self) -> Vec<PathBuf> {
+        self.host.dirty_document_paths()
+    }
+
+    pub fn save_all_dirty(&self) -> Result<(), String> {
+        let (messages, result) = self.host.save_all_dirty();
+        for message in messages {
+            if let Err(error) = self.send(message) {
+                tracing::warn!(%error, "failed to resynchronize editor after close-guard save");
+            }
+        }
+        result
+    }
+
     fn install_file_monitor(&self, path: &Path) {
         let Some(parent) = path.parent() else {
             return;

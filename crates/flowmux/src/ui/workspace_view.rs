@@ -151,6 +151,7 @@ pub struct TornOffSurface {
     pub kind: SurfaceKind,
     pub content: gtk::Widget,
     pub focus: gtk::Widget,
+    pub editor: Option<EditorPane>,
 }
 
 impl PaneRegistry {
@@ -756,18 +757,20 @@ impl PaneRegistry {
         }
         stack.remove(&content);
 
-        let (focus, kind) = if let Some(terminal) = self.terminals.remove(&surface) {
+        let (focus, kind, editor) = if let Some(terminal) = self.terminals.remove(&surface) {
             (
                 terminal.root_widget(),
                 SurfaceKind::Terminal {
                     shell: None,
                     cwd: terminal.current_dir(),
                 },
+                None,
             )
         } else if let Some(browser) = self.browsers.remove(&surface) {
             (
                 browser.focus_widget(),
                 SurfaceKind::Browser { initial_url: None },
+                None,
             )
         } else if let Some(editor) = self.editors.remove(&surface) {
             (
@@ -776,6 +779,7 @@ impl PaneRegistry {
                     workspace_root: editor.workspace_root().to_path_buf(),
                     session: flowmux_core::EditorSessionState::default(),
                 },
+                Some(editor),
             )
         } else {
             (
@@ -784,6 +788,7 @@ impl PaneRegistry {
                     shell: None,
                     cwd: None,
                 },
+                None,
             )
         };
         self.surface_tab_labels.remove(&surface);
@@ -806,6 +811,7 @@ impl PaneRegistry {
             kind,
             content,
             focus,
+            editor,
         })
     }
 

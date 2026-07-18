@@ -7,7 +7,7 @@ use crate::{
     TextDocumentLineEnding, TextEncoding,
 };
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -60,6 +60,42 @@ impl EditorSession {
 
     pub fn contains_document(&self, path: impl AsRef<Path>) -> bool {
         self.documents.contains_path(path)
+    }
+
+    pub fn dirty_document_paths(&self) -> Vec<PathBuf> {
+        self.open_order
+            .iter()
+            .filter_map(|id| self.documents.snapshot(*id).ok())
+            .filter(|snapshot| snapshot.is_dirty())
+            .map(|snapshot| snapshot.display_path)
+            .collect()
+    }
+
+    /// Save every dirty document before its editor surface is closed.
+    ///
+    /// Successful saves are returned as replacement messages so a surface that
+    /// remains open after a later save failure is resynchronized with the host.
+    pub fn save_all_dirty(&mut self) -> (Vec<HostMessage>, Result<(), EditorSessionError>) {
+        let mut messages = Vec::new();
+        for id in self.open_order.clone() {
+            let snapshot = match self.documents.snapshot(id) {
+                Ok(snapshot) => snapshot,
+                Err(error) => return (messages, Err(error.into())),
+            };
+            if !snapshot.is_dirty() {
+                continue;
+            }
+            match self.documents.save(id, snapshot.version) {
+                Ok(saved) => {
+                    self.reported_disk_status.insert(id, DiskStatus::Unchanged);
+                    messages.push(HostMessage::ReplaceDocument {
+                        document: self.payload(saved),
+                    });
+                }
+                Err(error) => return (messages, Err(error.into())),
+            }
+        }
+        (messages, Ok(()))
     }
 
     pub fn open_document(&mut self, path: impl AsRef<Path>) -> Result<HostMessage, DocumentError> {
@@ -368,6 +404,87 @@ mod tests {
             }]
         ));
         assert_eq!(fs::read_to_string(path).unwrap(), "저장됨 日本語 🙂\n");
+    }
+
+    #[test]
+    fn close_guard_saves_all_dirty_multilingual_documents() {
+        let workspace = tempdir().unwrap();
+        let first = workspace.path().join("한국어.txt");
+        let second = workspace.path().join("日本語🙂.txt");
+        fs::write(&first, "처음\n").unwrap();
+        fs::write(&second, "最初\n").unwrap();
+        let mut session = EditorSession::new(workspace.path()).unwrap();
+        let first_document = open_payload(session.open_document(&first).unwrap());
+        let second_document = open_payload(session.open_document(&second).unwrap());
+
+        session
+            .handle_editor_message(EditorMessage::DocumentChanged {
+                document_id: first_document.id,
+                document_version: first_document.version,
+                change_sequence: 1,
+                content: "저장됨🙂\n".into(),
+            })
+            .unwrap();
+        session
+            .handle_editor_message(EditorMessage::DocumentChanged {
+                document_id: second_document.id,
+                document_version: second_document.version,
+                change_sequence: 1,
+                content: "保存済み🙂\n".into(),
+            })
+            .unwrap();
+
+        assert_eq!(
+            session.dirty_document_paths(),
+            vec![first.clone(), second.clone()]
+        );
+        let (messages, result) = session.save_all_dirty();
+
+        result.unwrap();
+        assert_eq!(messages.len(), 2);
+        assert!(messages
+            .iter()
+            .all(|message| matches!(message, HostMessage::ReplaceDocument { document } if !document.dirty)));
+        assert!(session.dirty_document_paths().is_empty());
+        assert_eq!(fs::read_to_string(first).unwrap(), "저장됨🙂\n");
+        assert_eq!(fs::read_to_string(second).unwrap(), "保存済み🙂\n");
+    }
+
+    #[test]
+    fn close_guard_stops_at_external_conflict_without_overwriting_it() {
+        let workspace = tempdir().unwrap();
+        let first = workspace.path().join("first.txt");
+        let conflict = workspace.path().join("충돌.txt");
+        fs::write(&first, "base one\n").unwrap();
+        fs::write(&conflict, "base two\n").unwrap();
+        let mut session = EditorSession::new(workspace.path()).unwrap();
+        let first_document = open_payload(session.open_document(&first).unwrap());
+        let conflict_document = open_payload(session.open_document(&conflict).unwrap());
+
+        for document in [&first_document, &conflict_document] {
+            session
+                .handle_editor_message(EditorMessage::DocumentChanged {
+                    document_id: document.id.clone(),
+                    document_version: document.version,
+                    change_sequence: 1,
+                    content: format!("editor {}\n", document.name),
+                })
+                .unwrap();
+        }
+        fs::write(&conflict, "external 日本語\n").unwrap();
+
+        let (messages, result) = session.save_all_dirty();
+
+        assert_eq!(messages.len(), 1);
+        assert!(matches!(
+            result,
+            Err(EditorSessionError::Document(
+                DocumentError::ExternalChange { .. }
+            ))
+        ));
+        assert_eq!(fs::read_to_string(&first).unwrap(), "editor first.txt\n");
+        assert_eq!(fs::read_to_string(&conflict).unwrap(), "external 日本語\n");
+        assert_eq!(session.dirty_document_paths(), vec![conflict]);
     }
 
     #[test]

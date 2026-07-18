@@ -53,6 +53,10 @@ impl WindowController {
                     return;
                 }
                 let closing_surfaces = self.pane_registry.borrow().surface_ids_in_workspace(id);
+                if !self.confirm_dirty_surfaces(&closing_surfaces).await {
+                    let _ = ack.send(());
+                    return;
+                }
                 if self.store.remove_workspace(id).await {
                     forget_saved_agent_sessions(&closing_surfaces);
                     self.drop_workspace(id);
@@ -63,6 +67,17 @@ impl WindowController {
             GtkCommand::RemoveAllWorkspaces { ack } => {
                 flowmux_config::notify_debug!("gui/dispatch", "RemoveAllWorkspaces");
                 if !self.confirm_close_all_workspaces().await {
+                    let _ = ack.send(());
+                    return;
+                }
+                let closing_surfaces = self
+                    .pane_registry
+                    .borrow()
+                    .editors
+                    .keys()
+                    .copied()
+                    .collect::<Vec<_>>();
+                if !self.confirm_dirty_surfaces(&closing_surfaces).await {
                     let _ = ack.send(());
                     return;
                 }

@@ -527,6 +527,7 @@ impl WindowController {
         let focus = torn.focus.clone();
         let pane_id = torn.pane;
         let surface_id = torn.surface;
+        let editor = torn.editor.clone();
         let pane = Self::build_torn_off_pane(torn, &title, window_ref.clone());
         stack.add_named(&pane, Some(&workspace_id.to_string()));
         stack.set_visible_child_name(&workspace_id.to_string());
@@ -549,6 +550,41 @@ impl WindowController {
             .build();
         set_window_content(&window, &content_overlay);
         *window_ref.borrow_mut() = Some(window.downgrade());
+        if let Some(editor) = editor {
+            let approved = Rc::new(Cell::new(false));
+            let prompting = Rc::new(Cell::new(false));
+            let editor_for_close = editor.clone();
+            let approved_for_close = approved.clone();
+            let prompting_for_close = prompting.clone();
+            window.connect_close_request(move |window| {
+                if approved_for_close.get() {
+                    editor_for_close.prepare_for_close();
+                    return glib::Propagation::Proceed;
+                }
+                if prompting_for_close.get() {
+                    return glib::Propagation::Stop;
+                }
+                if editor_for_close.dirty_document_paths().is_empty() {
+                    editor_for_close.prepare_for_close();
+                    return glib::Propagation::Proceed;
+                }
+
+                prompting_for_close.set(true);
+                let window = window.clone();
+                let editor = editor_for_close.clone();
+                let approved = approved_for_close.clone();
+                let prompting = prompting_for_close.clone();
+                glib::spawn_future_local(async move {
+                    let should_close = confirm_dirty_editor_close(&window, vec![editor]).await;
+                    prompting.set(false);
+                    if should_close {
+                        approved.set(true);
+                        window.close();
+                    }
+                });
+                glib::Propagation::Stop
+            });
+        }
         window.present();
 
         glib::idle_add_local_once(move || {

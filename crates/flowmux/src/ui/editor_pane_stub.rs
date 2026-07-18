@@ -52,6 +52,14 @@ impl EditorPane {
         Err("the embedded editor is unavailable on this platform".into())
     }
 
+    pub fn dirty_document_paths(&self) -> Vec<PathBuf> {
+        Vec::new()
+    }
+
+    pub fn save_all_dirty(&self) -> Result<(), String> {
+        Ok(())
+    }
+
     pub fn send(&self, message: HostMessage) -> Result<(), ProtocolError> {
         flowmux_editor::serialize_host_message("unavailable", &message).map(|_| ())
     }

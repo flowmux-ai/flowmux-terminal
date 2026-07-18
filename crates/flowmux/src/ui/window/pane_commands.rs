@@ -85,6 +85,10 @@ impl WindowController {
                     .get(&pane)
                     .map(|tabs| tabs.iter().map(|(surface, _)| *surface).collect::<Vec<_>>())
                     .unwrap_or_default();
+                if !self.confirm_dirty_surfaces(&closing_surfaces).await {
+                    let _ = ack.send(Ok(()));
+                    return;
+                }
                 let outcome = self.store.close_pane(pane).await;
                 if outcome.is_some() {
                     forget_saved_agent_sessions(&closing_surfaces);
@@ -266,6 +270,10 @@ impl WindowController {
                             return;
                         }
                     }
+                }
+                if !self.confirm_dirty_surfaces(&[surface]).await {
+                    let _ = ack.send(Ok(()));
+                    return;
                 }
                 let outcome = self.store.close_surface(pane, surface).await;
                 if outcome.is_some() {

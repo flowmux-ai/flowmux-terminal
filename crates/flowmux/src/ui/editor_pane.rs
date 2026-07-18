@@ -7,7 +7,7 @@ use flowmux_editor::{
     ProtocolError,
 };
 use std::cell::{Cell, RefCell};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Default)]
 pub(super) struct EditorBridgeReceive {
@@ -121,6 +121,23 @@ impl EditorHostState {
                 .open_document(path)
                 .map_err(|error| error.to_string()),
             Err(error) => Err(error.clone()),
+        }
+    }
+
+    pub(super) fn dirty_document_paths(&self) -> Vec<PathBuf> {
+        match &*self.session.borrow() {
+            Ok(session) => session.dirty_document_paths(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    pub(super) fn save_all_dirty(&self) -> (Vec<HostMessage>, Result<(), String>) {
+        match &mut *self.session.borrow_mut() {
+            Ok(session) => {
+                let (messages, result) = session.save_all_dirty();
+                (messages, result.map_err(|error| error.to_string()))
+            }
+            Err(error) => (Vec::new(), Err(error.clone())),
         }
     }
 

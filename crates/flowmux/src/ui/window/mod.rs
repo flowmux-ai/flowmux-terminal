@@ -12,6 +12,7 @@ use crate::notifications::{
 };
 use crate::theme::ResolvedTheme;
 use crate::ui::agent_bar::AgentBar;
+use crate::ui::editor_pane::EditorPane;
 use crate::ui::file_browser::{FileBrowserPaneState, FileBrowserPanel};
 use crate::ui::pane_terminal::PaneCallbacks;
 use crate::ui::sidebar::{Sidebar, WorkspaceRowAgentBlock, WorkspaceRowDetails};
@@ -310,6 +311,117 @@ struct PaneZoomState {
     active: Rc<RefCell<Option<ActivePaneZoom>>>,
 }
 
+#[derive(Clone, Default)]
+struct WindowCloseState {
+    approved: Rc<Cell<bool>>,
+    prompting: Rc<Cell<bool>>,
+}
+
+fn dirty_editor_labels(editors: &[EditorPane]) -> Vec<String> {
+    let mut labels = Vec::new();
+    let mut seen = HashSet::new();
+    for editor in editors {
+        for path in editor.dirty_document_paths() {
+            let label = path
+                .strip_prefix(editor.workspace_root())
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .into_owned();
+            if seen.insert(label.clone()) {
+                labels.push(label);
+            }
+        }
+    }
+    labels
+}
+
+fn dirty_editor_dialog_body(labels: &[String]) -> String {
+    if labels.len() == 1 {
+        return format!("“{}” has unsaved changes.", labels[0]);
+    }
+    let mut body = format!("{} files have unsaved changes.\n\n", labels.len());
+    for label in labels.iter().take(8) {
+        body.push_str(&format!("• {label}\n"));
+    }
+    if labels.len() > 8 {
+        body.push_str(&format!("• … and {} more\n", labels.len() - 8));
+    }
+    body.pop();
+    body
+}
+
+async fn show_editor_save_error(parent: &adw::ApplicationWindow, error: &str) {
+    let dialog = adw::AlertDialog::new(Some("Could not save changes"), Some(error));
+    dialog.add_response("ok", "OK");
+    dialog.set_default_response(Some("ok"));
+    dialog.set_close_response("ok");
+
+    let (tx, rx) = oneshot::channel::<()>();
+    let tx_cell: Rc<Cell<Option<oneshot::Sender<()>>>> = Rc::new(Cell::new(Some(tx)));
+    dialog.connect_response(None, move |dialog, _| {
+        if let Some(tx) = tx_cell.take() {
+            let _ = tx.send(());
+        }
+        dialog.close();
+    });
+    let _native_view_suspend =
+        crate::ui::browser_pane::suspend_native_browser_views_for_window(parent.upcast_ref());
+    dialog.present(Some(parent));
+    let _ = rx.await;
+}
+
+fn build_dirty_editor_dialog(labels: &[String]) -> (adw::AlertDialog, oneshot::Receiver<String>) {
+    let dialog = adw::AlertDialog::new(
+        Some("Save changes before closing?"),
+        Some(&dirty_editor_dialog_body(labels)),
+    );
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("discard", "Discard");
+    dialog.add_response("save", "Save");
+    dialog.set_default_response(Some("save"));
+    dialog.set_close_response("cancel");
+    dialog.set_response_appearance("discard", adw::ResponseAppearance::Destructive);
+
+    let (tx, rx) = oneshot::channel::<String>();
+    let tx_cell: Rc<Cell<Option<oneshot::Sender<String>>>> = Rc::new(Cell::new(Some(tx)));
+    dialog.connect_response(None, move |dialog, response| {
+        if let Some(tx) = tx_cell.take() {
+            let _ = tx.send(response.to_string());
+        }
+        dialog.close();
+    });
+    (dialog, rx)
+}
+
+async fn confirm_dirty_editor_close(
+    parent: &adw::ApplicationWindow,
+    editors: Vec<EditorPane>,
+) -> bool {
+    let labels = dirty_editor_labels(&editors);
+    if labels.is_empty() {
+        return true;
+    }
+
+    let (dialog, rx) = build_dirty_editor_dialog(&labels);
+    let _native_view_suspend =
+        crate::ui::browser_pane::suspend_native_browser_views_for_window(parent.upcast_ref());
+    dialog.present(Some(parent));
+
+    match rx.await.as_deref() {
+        Ok("discard") => true,
+        Ok("save") => {
+            for editor in editors {
+                if let Err(error) = editor.save_all_dirty() {
+                    show_editor_save_error(parent, &error).await;
+                    return false;
+                }
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
 #[derive(Clone)]
 pub struct WindowController {
     pub window: adw::ApplicationWindow,
@@ -348,6 +460,7 @@ pub struct WindowController {
     /// discarded instead of overwriting a newer agent observation.
     agent_poll_generation: Rc<Cell<u64>>,
     cwd_poll_generation: Rc<Cell<u64>>,
+    window_close: WindowCloseState,
 }
 
 fn wsl_resize_handles_enabled() -> bool {
@@ -1007,6 +1120,7 @@ impl WindowController {
             palette_mru: Rc::new(RefCell::new(std::collections::VecDeque::new())),
             agent_poll_generation: Rc::new(Cell::new(0)),
             cwd_poll_generation: Rc::new(Cell::new(0)),
+            window_close: WindowCloseState::default(),
         };
         controller.install_state_flush_on_close();
         controller.install_cwd_polling_fallback();
@@ -1155,9 +1269,47 @@ impl WindowController {
         self.sidebar.usage_button()
     }
 
+    fn editors_for_surfaces(&self, surfaces: &[SurfaceId]) -> Vec<EditorPane> {
+        let registry = self.pane_registry.borrow();
+        surfaces
+            .iter()
+            .filter_map(|surface| registry.editors.get(surface).cloned())
+            .collect()
+    }
+
+    async fn confirm_dirty_surfaces(&self, surfaces: &[SurfaceId]) -> bool {
+        confirm_dirty_editor_close(&self.window, self.editors_for_surfaces(surfaces)).await
+    }
+
     fn install_state_flush_on_close(&self) {
         let controller = self.clone();
         self.window.connect_close_request(move |_| {
+            if !controller.window_close.approved.get() {
+                if controller.window_close.prompting.get() {
+                    return glib::Propagation::Stop;
+                }
+                let editors = controller
+                    .pane_registry
+                    .borrow()
+                    .editors
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if !dirty_editor_labels(&editors).is_empty() {
+                    controller.window_close.prompting.set(true);
+                    let pending = controller.clone();
+                    glib::spawn_future_local(async move {
+                        let approved = confirm_dirty_editor_close(&pending.window, editors).await;
+                        pending.window_close.prompting.set(false);
+                        if approved {
+                            pending.window_close.approved.set(true);
+                            pending.window.close();
+                        }
+                    });
+                    return glib::Propagation::Stop;
+                }
+                controller.window_close.approved.set(true);
+            }
             controller.flush_terminal_cwds_blocking();
             controller.flush_terminal_scrollback_blocking();
             controller.flush_layout_blocking();
@@ -2643,6 +2795,64 @@ mod tests {
 
     fn agent_bar_visible(controller: &WindowController) -> bool {
         controller.agent_bar.bar.root.property::<bool>("visible")
+    }
+
+    #[test]
+    fn dirty_editor_dialog_lists_multilingual_paths_and_limits_long_lists() {
+        let labels = vec![
+            "문서/한국어.txt".to_string(),
+            "資料/日本語.txt".to_string(),
+            "emoji/🙂.txt".to_string(),
+            "four.txt".to_string(),
+            "five.txt".to_string(),
+            "six.txt".to_string(),
+            "seven.txt".to_string(),
+            "eight.txt".to_string(),
+            "nine.txt".to_string(),
+        ];
+
+        let body = dirty_editor_dialog_body(&labels);
+
+        assert!(body.starts_with("9 files have unsaved changes."));
+        assert!(body.contains("• 문서/한국어.txt"));
+        assert!(body.contains("• 資料/日本語.txt"));
+        assert!(body.contains("• emoji/🙂.txt"));
+        assert!(body.contains("• … and 1 more"));
+        assert!(!body.contains("nine.txt"));
+        assert_eq!(
+            dirty_editor_dialog_body(&["한글.txt".into()]),
+            "“한글.txt” has unsaved changes."
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[gtk::test]
+    async fn dirty_editor_dialog_exposes_save_discard_and_cancel_responses() {
+        adw::init().expect("libadwaita should initialize in GTK test");
+        let labels = vec!["다국어/日本語🙂.txt".to_string()];
+        let (dialog, _rx) = build_dirty_editor_dialog(&labels);
+
+        assert_eq!(dialog.default_response().as_deref(), Some("save"));
+        assert_eq!(dialog.close_response(), "cancel");
+        assert_eq!(
+            dialog.response_appearance("discard"),
+            adw::ResponseAppearance::Destructive
+        );
+        assert!(dialog.is_response_enabled("save"));
+        assert!(dialog.is_response_enabled("discard"));
+        assert!(dialog.is_response_enabled("cancel"));
+
+        let (save_dialog, save_rx) = build_dirty_editor_dialog(&labels);
+        save_dialog.emit_by_name::<()>("response", &[&"save"]);
+        assert_eq!(save_rx.await.unwrap(), "save");
+
+        let (discard_dialog, discard_rx) = build_dirty_editor_dialog(&labels);
+        discard_dialog.emit_by_name::<()>("response", &[&"discard"]);
+        assert_eq!(discard_rx.await.unwrap(), "discard");
+
+        let (cancel_dialog, cancel_rx) = build_dirty_editor_dialog(&labels);
+        cancel_dialog.emit_by_name::<()>("response", &[&"cancel"]);
+        assert_eq!(cancel_rx.await.unwrap(), "cancel");
     }
 
     #[cfg(not(target_os = "macos"))]
