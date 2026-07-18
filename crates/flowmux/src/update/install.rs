@@ -136,12 +136,14 @@ async fn run_install_inner(
     let path = check::install_path_env(
         home.as_deref(),
         &std::env::var_os("PATH").unwrap_or_default(),
+        std::env::consts::OS,
     );
     let prerequisite_path = path.clone();
-    let prerequisites =
-        tokio::task::spawn_blocking(move || check_prerequisites(prerequisite_path.as_deref()))
-            .await
-            .context("join prerequisite check")?;
+    let prerequisites = tokio::task::spawn_blocking(move || {
+        check_prerequisites(std::env::consts::OS, prerequisite_path.as_deref())
+    })
+    .await
+    .context("join prerequisite check")?;
     if let Err(message) = prerequisites {
         writeln!(log, "prerequisites=missing detail={message}")
             .context("write prerequisite failure")?;
@@ -174,7 +176,15 @@ async fn run_install_inner(
     .await
 }
 
-fn check_prerequisites(path: Option<&std::ffi::OsStr>) -> Result<(), String> {
+fn prerequisite_packages(os: &str) -> &'static [&'static str] {
+    if os == "macos" {
+        &["gtk4", "libadwaita-1", "vte-2.91-gtk4"]
+    } else {
+        &["gtk4", "libadwaita-1", "vte-2.91-gtk4", "webkitgtk-6.0"]
+    }
+}
+
+fn check_prerequisites(os: &str, path: Option<&std::ffi::OsStr>) -> Result<(), String> {
     let mut missing_tools = Vec::new();
     for tool in ["cargo", "rustc"] {
         if !command_succeeds(tool, &["--version"], path) {
@@ -186,7 +196,7 @@ fn check_prerequisites(path: Option<&std::ffi::OsStr>) -> Result<(), String> {
     if !command_succeeds("pkg-config", &["--version"], path) {
         missing_tools.push("pkg-config");
     } else {
-        for package in ["gtk4", "libadwaita-1", "vte-2.91-gtk4", "webkitgtk-6.0"] {
+        for &package in prerequisite_packages(os) {
             if !command_succeeds("pkg-config", &["--exists", package], path) {
                 missing_packages.push(package);
             }
@@ -273,8 +283,9 @@ async fn run_logged(
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{check_prerequisites, prerequisite_error};
+    use super::{check_prerequisites, prerequisite_error, prerequisite_packages};
     use std::ffi::OsStr;
+    use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
     use std::thread;
     use std::time::Duration;
@@ -289,10 +300,44 @@ mod tests {
 
     #[test]
     fn empty_path_reports_missing_build_tools_before_any_clone() {
-        let message = check_prerequisites(Some(OsStr::new(""))).unwrap_err();
+        let message = check_prerequisites("linux", Some(OsStr::new(""))).unwrap_err();
         assert!(message.contains("cargo"), "{message}");
         assert!(message.contains("rustc"), "{message}");
         assert!(message.contains("pkg-config"), "{message}");
+    }
+
+    #[test]
+    fn macos_prerequisites_use_native_webkit() {
+        let packages = prerequisite_packages("macos");
+        assert!(packages.contains(&"gtk4"));
+        assert!(packages.contains(&"libadwaita-1"));
+        assert!(packages.contains(&"vte-2.91-gtk4"));
+        assert!(!packages.contains(&"webkitgtk-6.0"));
+    }
+
+    #[test]
+    fn linux_prerequisites_require_webkitgtk() {
+        assert!(prerequisite_packages("linux").contains(&"webkitgtk-6.0"));
+    }
+
+    #[test]
+    fn adjusted_path_finds_macos_prerequisite_tools() {
+        let temp = tempfile::tempdir().unwrap();
+        let tool_dir = temp.path().join(".cargo/bin");
+        std::fs::create_dir_all(&tool_dir).unwrap();
+        for tool in ["cargo", "rustc", "pkg-config"] {
+            let path = tool_dir.join(tool);
+            std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let path = crate::update::check::install_path_env(
+            Some(temp.path()),
+            OsStr::new("/usr/bin:/bin"),
+            "macos",
+        )
+        .unwrap();
+        assert_eq!(check_prerequisites("macos", Some(&path)), Ok(()));
     }
 
     #[test]

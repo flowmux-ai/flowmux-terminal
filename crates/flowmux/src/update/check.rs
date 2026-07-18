@@ -72,22 +72,32 @@ pub fn install_script(os: &str) -> &'static str {
 }
 
 /// PATH for the spawned install script. Launcher-started GUIs inherit
-/// a session PATH without `~/.cargo/bin`, so a bare `cargo` in the
-/// script can resolve to an outdated distro toolchain that cannot even
-/// parse the lock file. Returns the PATH to override with: `home`'s
-/// `.cargo/bin` prepended when it is absent from `path`, or `None`
-/// when `path` already contains it (a shell resolving cargo through
-/// that PATH is the behavior to reproduce, not to reorder) or `home`
-/// is unknown.
-pub fn install_path_env(home: Option<&Path>, path: &std::ffi::OsStr) -> Option<std::ffi::OsString> {
-    let cargo_bin = home?.join(".cargo").join("bin");
-    if std::env::split_paths(path).any(|entry| entry == cargo_bin) {
+/// a minimal session PATH without Cargo or Homebrew, so add the standard
+/// tool locations used by the platform installer. Returns `None` when
+/// every location is already present or `home` is unknown.
+pub fn install_path_env(
+    home: Option<&Path>,
+    path: &std::ffi::OsStr,
+    os: &str,
+) -> Option<std::ffi::OsString> {
+    let home = home?;
+    let existing: Vec<_> = std::env::split_paths(path)
+        .filter(|entry| !entry.as_os_str().is_empty())
+        .collect();
+    let mut prefixes = vec![home.join(".cargo").join("bin")];
+    if os == "macos" {
+        prefixes.extend([
+            Path::new("/opt/homebrew/bin").to_path_buf(),
+            Path::new("/opt/homebrew/sbin").to_path_buf(),
+            Path::new("/usr/local/bin").to_path_buf(),
+            Path::new("/usr/local/sbin").to_path_buf(),
+        ]);
+    }
+    prefixes.retain(|entry| !existing.contains(entry));
+    if prefixes.is_empty() {
         return None;
     }
-    if path.is_empty() {
-        return Some(cargo_bin.into());
-    }
-    std::env::join_paths(std::iter::once(cargo_bin).chain(std::env::split_paths(path))).ok()
+    std::env::join_paths(prefixes.into_iter().chain(existing)).ok()
 }
 
 /// Ordered argv lists that bring the managed clone at `dir` to `tag`.
@@ -228,7 +238,7 @@ ffffeeeeddddccccbbbbaaaa9999888877776666\trefs/heads/main
         let home = PathBuf::from("/home/u");
         let path = OsString::from("/usr/local/bin:/usr/bin:/bin");
         assert_eq!(
-            install_path_env(Some(&home), &path),
+            install_path_env(Some(&home), &path, "linux"),
             Some(OsString::from(
                 "/home/u/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
             ))
@@ -241,21 +251,45 @@ ffffeeeeddddccccbbbbaaaa9999888877776666\trefs/heads/main
         // Position must not matter: a shell that resolves cargo through
         // this PATH is the behavior to reproduce, not to reorder.
         let path = OsString::from("/usr/bin:/home/u/.cargo/bin:/bin");
-        assert_eq!(install_path_env(Some(&home), &path), None);
+        assert_eq!(install_path_env(Some(&home), &path, "linux"), None);
     }
 
     #[test]
     fn install_path_env_without_home_is_noop() {
-        assert_eq!(install_path_env(None, OsStr::new("/usr/bin")), None);
+        assert_eq!(
+            install_path_env(None, OsStr::new("/usr/bin"), "linux"),
+            None
+        );
     }
 
     #[test]
     fn install_path_env_handles_empty_path() {
         let home = PathBuf::from("/home/u");
         assert_eq!(
-            install_path_env(Some(&home), OsStr::new("")),
+            install_path_env(Some(&home), OsStr::new(""), "linux"),
             Some(OsString::from("/home/u/.cargo/bin"))
         );
+    }
+
+    #[test]
+    fn install_path_env_adds_macos_gui_tool_paths() {
+        let home = PathBuf::from("/Users/u");
+        let path = OsString::from("/usr/bin:/bin:/usr/sbin:/sbin");
+        assert_eq!(
+            install_path_env(Some(&home), &path, "macos"),
+            Some(OsString::from(
+                "/Users/u/.cargo/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
+            ))
+        );
+    }
+
+    #[test]
+    fn install_path_env_deduplicates_macos_tool_paths() {
+        let home = PathBuf::from("/Users/u");
+        let path = OsString::from(
+            "/Users/u/.cargo/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin",
+        );
+        assert_eq!(install_path_env(Some(&home), &path, "macos"), None);
     }
 
     #[test]
