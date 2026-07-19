@@ -47,6 +47,16 @@ const INSERT_NEWLINE_FULL_ACTION: &str = "win.insert-newline";
 const INSERT_NEWLINE_ACCELS: &[&str] = &["<Shift>Return", "<Shift>KP_Enter", "<Shift>ISO_Enter"];
 const TOGGLE_USAGE_POPOVER_FULL_ACTION: &str = "win.toggle-usage-popover";
 
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MacEditorControlAction {
+    Copy,
+    Paste,
+    Find,
+    Undo,
+    Redo,
+}
+
 /// Build the namespaced action name (`win.<bare>`) GTK uses for accel
 /// registration.
 fn full_action_name(action: ActionId) -> String {
@@ -138,6 +148,9 @@ pub fn install_actions(
     clipboard_toast: ClipboardToast,
     usage_button: gtk::MenuButton,
 ) {
+    #[cfg(target_os = "macos")]
+    install_macos_editor_control_capture(window, focused.clone(), registry.clone());
+
     let split_right = make_pane_action(
         "split-right",
         focused.clone(),
@@ -426,6 +439,65 @@ pub fn install_actions(
         toggle_file_browser,
         toggle_usage_popover,
     ]);
+}
+
+#[cfg(target_os = "macos")]
+fn install_macos_editor_control_capture(
+    window: &adw::ApplicationWindow,
+    focused: FocusedPane,
+    registry: TerminalRegistry,
+) {
+    let controller = gtk::EventControllerKey::new();
+    controller.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let window_for_key = window.clone();
+    controller.connect_key_pressed(move |_, keyval, _, state| {
+        let Some(action) = macos_editor_control_action(keyval, state) else {
+            return glib::Propagation::Proceed;
+        };
+        let Some(pane) = focused.get() else {
+            return glib::Propagation::Proceed;
+        };
+        let registry = registry.borrow();
+        let Some(editor) = registry.active_editor(pane) else {
+            return glib::Propagation::Proceed;
+        };
+        if !window_focus_is_widget(&window_for_key, &editor.root.clone().upcast()) {
+            return glib::Propagation::Proceed;
+        }
+        match action {
+            MacEditorControlAction::Copy => editor.copy_selection(),
+            MacEditorControlAction::Paste => editor.paste_clipboard(),
+            MacEditorControlAction::Find => editor.show_find(),
+            MacEditorControlAction::Undo => editor.undo(),
+            MacEditorControlAction::Redo => editor.redo(),
+        }
+        glib::Propagation::Stop
+    });
+    window.add_controller(controller);
+}
+
+#[cfg(target_os = "macos")]
+fn macos_editor_control_action(
+    keyval: gtk::gdk::Key,
+    state: gtk::gdk::ModifierType,
+) -> Option<MacEditorControlAction> {
+    use gtk::gdk::ModifierType;
+
+    let modifiers = state & accelerator_mod_mask();
+    let key = keyval.to_unicode()?.to_ascii_lowercase();
+    if modifiers == ModifierType::CONTROL_MASK {
+        return match key {
+            'c' => Some(MacEditorControlAction::Copy),
+            'v' => Some(MacEditorControlAction::Paste),
+            'f' => Some(MacEditorControlAction::Find),
+            'z' => Some(MacEditorControlAction::Undo),
+            _ => None,
+        };
+    }
+    if modifiers == (ModifierType::CONTROL_MASK | ModifierType::SHIFT_MASK) && key == 'z' {
+        return Some(MacEditorControlAction::Redo);
+    }
+    None
 }
 
 fn make_open_tig_action(
@@ -879,6 +951,43 @@ fn make_paste_action(
 mod tests {
     use super::*;
     use flowmux_config::keybindings::default_accels;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_editor_control_chords_are_exact_and_leave_other_modifiers_alone() {
+        use gtk::gdk::ModifierType;
+
+        assert_eq!(
+            macos_editor_control_action(gtk::gdk::Key::c, ModifierType::CONTROL_MASK),
+            Some(MacEditorControlAction::Copy)
+        );
+        assert_eq!(
+            macos_editor_control_action(gtk::gdk::Key::v, ModifierType::CONTROL_MASK),
+            Some(MacEditorControlAction::Paste)
+        );
+        assert_eq!(
+            macos_editor_control_action(gtk::gdk::Key::f, ModifierType::CONTROL_MASK),
+            Some(MacEditorControlAction::Find)
+        );
+        assert_eq!(
+            macos_editor_control_action(gtk::gdk::Key::z, ModifierType::CONTROL_MASK),
+            Some(MacEditorControlAction::Undo)
+        );
+        assert_eq!(
+            macos_editor_control_action(
+                gtk::gdk::Key::z,
+                ModifierType::CONTROL_MASK | ModifierType::SHIFT_MASK,
+            ),
+            Some(MacEditorControlAction::Redo)
+        );
+        assert_eq!(
+            macos_editor_control_action(
+                gtk::gdk::Key::c,
+                ModifierType::CONTROL_MASK | ModifierType::ALT_MASK,
+            ),
+            None
+        );
+    }
 
     fn default_for(action: ActionId) -> Vec<&'static str> {
         default_accels(action).to_vec()

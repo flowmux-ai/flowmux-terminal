@@ -16,7 +16,7 @@ use gtk::prelude::*;
 use objc2::rc::Retained;
 use objc2::runtime::{NSObject, ProtocolObject};
 use objc2::{define_class, msg_send, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly};
-use objc2_app_kit::{NSResponder, NSView, NSWindow};
+use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString, NSResponder, NSView, NSWindow};
 use objc2_foundation::{
     NSError, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSURLRequest, NSURL,
 };
@@ -438,6 +438,27 @@ impl EditorPane {
         perform_native_edit(&self.native.web_view, EditorNativeEditAction::Paste, None);
     }
 
+    pub fn show_find(&self) {
+        evaluate_script(
+            &self.native.web_view,
+            "window.flowmuxEditorKeyboard?.('find')",
+        );
+    }
+
+    pub fn undo(&self) {
+        evaluate_script(
+            &self.native.web_view,
+            "window.flowmuxEditorKeyboard?.('undo')",
+        );
+    }
+
+    pub fn redo(&self) {
+        evaluate_script(
+            &self.native.web_view,
+            "window.flowmuxEditorKeyboard?.('redo')",
+        );
+    }
+
     pub fn show_workspace_search(&self) {
         if let Err(error) = self.send(HostMessage::ShowWorkspaceSearch) {
             tracing::warn!(%error, "failed to show editor workspace search");
@@ -808,9 +829,12 @@ fn perform_native_edit(
 ) {
     if action == EditorNativeEditAction::Copy {
         if let Some(text) = copy_text {
-            if let Some(display) = gtk::gdk::Display::default() {
-                display.clipboard().set_text(text);
-            }
+            let pasteboard = NSPasteboard::generalPasteboard();
+            pasteboard.clearContents();
+            // SAFETY: AppKit exports this immutable type identifier for use on
+            // the main thread, where editor bridge messages are dispatched.
+            let string_type = unsafe { NSPasteboardTypeString };
+            pasteboard.setString_forType(&NSString::from_str(text), string_type);
             return;
         }
     }
