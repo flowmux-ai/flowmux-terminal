@@ -17,7 +17,9 @@ use gtk::prelude::*;
 use objc2::rc::Retained;
 use objc2::runtime::{NSObject, ProtocolObject};
 use objc2::{define_class, msg_send, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly};
-use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString, NSResponder, NSView, NSWindow};
+use objc2_app_kit::{
+    NSPasteboard, NSPasteboardTypeString, NSResponder, NSView, NSWindow, NSWindowOrderingMode,
+};
 use objc2_foundation::{
     NSError, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSURLRequest, NSURL,
 };
@@ -732,6 +734,8 @@ fn sync_native_view_frame(native: &NativeEditorView, placeholder: &gtk::Widget) 
             tracing::debug!(width, height, "editor WKWebView attached to native window");
         }
     }
+    // GTK can reorder native siblings while restoring the pane tree.
+    content_view.addSubview_positioned_relativeTo(view, NSWindowOrderingMode::Above, None);
     if crate::ui::browser_pane::native_browser_views_are_suspended() {
         view.setHidden(true);
         return;
