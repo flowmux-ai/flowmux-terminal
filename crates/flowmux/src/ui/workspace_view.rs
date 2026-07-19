@@ -1885,6 +1885,12 @@ mod tab_dnd_tests {
         ));
     }
 
+    #[test]
+    fn canceled_tab_drag_restores_full_visibility() {
+        assert_eq!(tab_drag_visual_state(true), (1.0, true));
+        assert_eq!(tab_drag_visual_state(false), (1.0, false));
+    }
+
     #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn take_surface_for_tearoff_moves_widget_out_of_source_pane() {
@@ -2048,6 +2054,22 @@ mod tab_dnd_tests {
 ///   MIME payload.
 /// - `DropTargetAsync`: dropping on another tab uses x position to choose
 ///   before/after, reordering within a pane or moving between panes.
+fn set_tab_drag_visual_state(tab: &gtk::Box, dragging: bool) {
+    // Keep opacity in CSS so a canceled gesture cannot leave the widget-level
+    // opacity stacked with the drag class and make the tab nearly invisible.
+    let (widget_opacity, has_drag_class) = tab_drag_visual_state(dragging);
+    tab.set_opacity(widget_opacity);
+    if has_drag_class {
+        tab.add_css_class("flowmux-pane-tab-dragging");
+    } else {
+        tab.remove_css_class("flowmux-pane-tab-dragging");
+    }
+}
+
+fn tab_drag_visual_state(dragging: bool) -> (f64, bool) {
+    (1.0, dragging)
+}
+
 fn attach_tab_dnd_handlers(
     tab: &gtk::Box,
     pane_id: PaneId,
@@ -2097,8 +2119,7 @@ fn attach_tab_dnd_handlers(
             *native_views_suspend_for_begin.borrow_mut() =
                 Some(crate::ui::browser_pane::suspend_native_browser_views_for_window(&window));
         }
-        tab_for_begin.set_opacity(0.4);
-        tab_for_begin.add_css_class("flowmux-pane-tab-dragging");
+        set_tab_drag_visual_state(&tab_for_begin, true);
     });
     let tab_for_end = tab.clone();
     let saw_target_for_end = saw_tab_drop_target.clone();
@@ -2162,8 +2183,7 @@ fn attach_tab_dnd_handlers(
         }
         split_candidate_for_end.borrow_mut().take();
         saw_target_for_end.set(false);
-        tab_for_end.set_opacity(1.0);
-        tab_for_end.remove_css_class("flowmux-pane-tab-dragging");
+        set_tab_drag_visual_state(&tab_for_end, false);
         native_views_suspend_for_end.borrow_mut().take();
     });
     let tab_for_cancel = tab.clone();
@@ -2178,8 +2198,7 @@ fn attach_tab_dnd_handlers(
     drag_source.connect_drag_cancel(move |_, drag, reason| {
         let selected_action = drag.selected_action();
         let pointer_inside_origin = drag_pointer_is_inside_origin_surface(drag);
-        tab_for_cancel.set_opacity(1.0);
-        tab_for_cancel.remove_css_class("flowmux-pane-tab-dragging");
+        set_tab_drag_visual_state(&tab_for_cancel, false);
         tracing::debug!(
             %pane_id,
             %surface_id,
@@ -2462,8 +2481,7 @@ fn install_macos_tab_drag_fallback(
             *native_views_for_begin.borrow_mut() =
                 Some(crate::ui::browser_pane::suspend_native_browser_views_for_window(&window));
         }
-        tab_for_begin.set_opacity(0.4);
-        tab_for_begin.add_css_class("flowmux-pane-tab-dragging");
+        set_tab_drag_visual_state(&tab_for_begin, true);
     });
 
     let tab_for_end = tab.clone();
@@ -2476,10 +2494,12 @@ fn install_macos_tab_drag_fallback(
     let surface_id = surface.id;
     let origin_for_end = drag_origin.clone();
     let native_views_for_end = native_views_suspend.clone();
+    let saw_target_for_end = saw_tab_drop_target.clone();
+    let committed_for_end = committed_tab_drop.clone();
+    let opened_for_end = opened_new_window.clone();
     gesture.connect_drag_end(move |_, dx, dy| {
-        tab_for_end.set_opacity(1.0);
-        tab_for_end.remove_css_class("flowmux-pane-tab-dragging");
-        if committed_tab_drop.get() || opened_new_window.get() {
+        set_tab_drag_visual_state(&tab_for_end, false);
+        if committed_for_end.get() || opened_for_end.get() {
             origin_for_end.take();
             native_views_for_end.borrow_mut().take();
             return;
@@ -2543,14 +2563,14 @@ fn install_macos_tab_drag_fallback(
                 || root_x >= f64::from(root.width())
                 || root_y >= f64::from(root.height())
             {
-                opened_new_window.set(true);
+                opened_for_end.set(true);
                 (open_new_window.borrow_mut())(pane_id, surface_id);
             }
             native_views_for_end.borrow_mut().take();
             return;
         };
-        saw_tab_drop_target.set(true);
-        committed_tab_drop.set(true);
+        saw_target_for_end.set(true);
+        committed_for_end.set(true);
         tracing::info!(
             %pane_id,
             %surface_id,
@@ -2570,6 +2590,18 @@ fn install_macos_tab_drag_fallback(
             tracing::warn!("macOS tab drop command bridge is unavailable");
         }
         native_views_for_end.borrow_mut().take();
+    });
+
+    let tab_for_cancel = tab.clone();
+    let origin_for_cancel = drag_origin.clone();
+    let native_views_for_cancel = native_views_suspend.clone();
+    gesture.connect_cancel(move |_, _| {
+        set_tab_drag_visual_state(&tab_for_cancel, false);
+        origin_for_cancel.take();
+        saw_tab_drop_target.set(false);
+        committed_tab_drop.set(false);
+        opened_new_window.set(false);
+        native_views_for_cancel.borrow_mut().take();
     });
 
     drag_widget.add_controller(gesture);
