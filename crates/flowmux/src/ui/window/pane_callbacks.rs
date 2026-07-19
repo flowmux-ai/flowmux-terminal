@@ -371,7 +371,8 @@ impl PaneCallbackRouter {
 mod tests {
     use super::*;
 
-    #[test]
+    #[cfg_attr(target_os = "macos", test)]
+    #[cfg_attr(not(target_os = "macos"), gtk::test)]
     fn editor_focus_direction_routes_to_existing_pane_command() {
         let (bridge, command_rx) = Bridge::new();
         let pane = PaneId::new();

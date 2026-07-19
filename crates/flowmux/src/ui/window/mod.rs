@@ -4883,6 +4883,9 @@ mod tests {
         );
         controller.render_workspace(&ws);
         controller.focused_pane.set(Some(pane));
+        controller.window.set_default_size(900, 600);
+        controller.window.present();
+        glib::timeout_future(std::time::Duration::from_millis(50)).await;
 
         controller.open_file_in_editor(first_file, Some(pane)).await;
         let first_surface = store.get_workspace(ws_id).await.unwrap().surfaces[0]
