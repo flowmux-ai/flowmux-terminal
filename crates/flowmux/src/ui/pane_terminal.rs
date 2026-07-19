@@ -134,6 +134,14 @@ pub struct PaneCallbacks {
     /// uses PaneRegistry::surface_tabs to compute final_index from the source
     /// and target relative positions.
     pub position_of_surface_in_pane: Rc<dyn Fn(PaneId, SurfaceId) -> Option<usize>>,
+    /// Resolve a point in the window root to the rendered pane under it and
+    /// normalized coordinates inside that pane. macOS uses this when native
+    /// WebViews prevent GDK from delivering a normal drop event.
+    pub pane_at_root_point: Rc<dyn Fn(&gtk::Widget, f64, f64) -> Option<(PaneId, f64, f64)>>,
+    /// Resolve a point in the window root to a surface tab, including its
+    /// current index and whether the point is on the tab's trailing half.
+    pub tab_at_root_point:
+        Rc<dyn Fn(&gtk::Widget, f64, f64) -> Option<(PaneId, SurfaceId, usize, bool)>>,
     /// Called when Ctrl+click selects a URL inside the terminal. The caller
     /// opens that URL in a new browser tab in the same pane
     /// (GtkCommand::OpenUrlInBrowserTab). The URL arrives with trailing
@@ -180,6 +188,8 @@ impl PaneCallbacks {
             on_terminal_title_changed: Rc::new(RefCell::new(|_, _, _| {})),
             read_options: Rc::new(flowmux_config::options::Options::default),
             position_of_surface_in_pane: Rc::new(|_, _| None),
+            pane_at_root_point: Rc::new(|_, _, _| None),
+            tab_at_root_point: Rc::new(|_, _, _| None),
             on_open_url: Rc::new(RefCell::new(|_, _| {})),
             on_open_image: Rc::new(RefCell::new(|_, _| {})),
             on_open_markdown: Rc::new(RefCell::new(|_, _| {})),

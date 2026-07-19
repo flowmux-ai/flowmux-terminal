@@ -337,6 +337,14 @@ impl PaneCallbackRouter {
                         .position(|(id, _)| *id == surface)
                 })
             },
+            pane_at_root_point: {
+                let registry = pane_registry.clone();
+                Rc::new(move |root, x, y| registry.borrow().pane_at_root_point(root, x, y))
+            },
+            tab_at_root_point: {
+                let registry = pane_registry.clone();
+                Rc::new(move |root, x, y| registry.borrow().tab_at_root_point(root, x, y))
+            },
             on_open_url: {
                 let bridge = bridge.clone();
                 Rc::new(RefCell::new(move |pane, url| {

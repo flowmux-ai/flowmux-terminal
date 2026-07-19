@@ -732,8 +732,9 @@ impl WindowController {
                 target_index,
             )
             .await;
-        if !mounted {
-            return Err("failed to mount moved surface".to_string());
+        if let Err(moving) = mounted {
+            self.rerender_with_moving_editor(outcome.dst_workspace, *moving)
+                .await;
         }
 
         if outcome.src_workspace_removed {
@@ -796,7 +797,7 @@ impl WindowController {
         surface: SurfaceId,
         moving: MovingSurface,
         target_index: usize,
-    ) -> bool {
+    ) -> Result<(), Box<MovingSurface>> {
         let surface_model = self
             .store
             .get_workspace(dst_workspace)
@@ -807,23 +808,35 @@ impl WindowController {
                     .find_map(|s| s.root_pane.find_surface(dst_pane, surface))
             });
         let Some(surface_model) = surface_model else {
-            return false;
+            return Err(Box::new(moving));
         };
         let (tab, label) =
             build_surface_tab_widget(dst_pane, &surface_model, true, &self.callbacks);
-        let ok = self.pane_registry.borrow_mut().attach_moved_surface(
+        let mounted = self.pane_registry.borrow_mut().attach_moved_surface(
             dst_pane,
             dst_workspace,
             moving,
             tab.upcast(),
             label,
         );
-        if ok {
+        if mounted.is_ok() {
             self.pane_registry
                 .borrow_mut()
                 .reorder_surface_widget(dst_pane, surface, target_index);
         }
-        ok
+        mounted
+    }
+
+    /// Rebuild a workspace after an incremental DnD mount failed. A detached
+    /// editor is stashed first so dirty buffers and its live WebView survive;
+    /// terminals and browsers fall back to their persisted model state.
+    async fn rerender_with_moving_editor(&self, workspace: WorkspaceId, moving: MovingSurface) {
+        self.pane_registry
+            .borrow_mut()
+            .stash_moving_editor_for_rerender(moving);
+        if let Some(ws) = self.store.get_workspace(workspace).await {
+            self.rerender_workspace(&ws);
+        }
     }
     /// Best-effort restore of a detached surface back into its source pane when
     /// a move is rejected by the store.
@@ -836,9 +849,12 @@ impl WindowController {
         let Some(ws_id) = self.store.workspace_of_pane(src_pane).await else {
             return;
         };
-        let _ = self
+        let mounted = self
             .mount_moved_surface(src_pane, ws_id, surface, moving, usize::MAX)
             .await;
+        if let Err(moving) = mounted {
+            self.rerender_with_moving_editor(ws_id, *moving).await;
+        }
     }
     pub(super) async fn sync_pane_active_from_store(&self, workspace: WorkspaceId, pane: PaneId) {
         let Some(ws) = self.store.get_workspace(workspace).await else {
@@ -999,8 +1015,7 @@ impl WindowController {
         let Some(new_split_id) = new_split_id else {
             // Could not locate the split node; fall back to a plain tab move so
             // the live widget is not lost.
-            self.mount_moved_surface(dst_pane, dst_ws, surface, moving, usize::MAX)
-                .await;
+            self.rerender_with_moving_editor(dst_ws, moving).await;
             return Err("could not locate the new split node".to_string());
         };
 
@@ -1030,9 +1045,9 @@ impl WindowController {
             }
             IncrementalSplitOutcome::SucceededNested => {}
             IncrementalSplitOutcome::Failed => {
-                // Sibling not built; keep the tab by re-homing it into dst.
-                self.mount_moved_surface(dst_pane, dst_ws, surface, moving, usize::MAX)
-                    .await;
+                // The model already contains the new split. Rebuild from that
+                // canonical state while retaining a live editor handle.
+                self.rerender_with_moving_editor(dst_ws, moving).await;
                 return Err("incremental split failed".to_string());
             }
         }
@@ -1040,8 +1055,8 @@ impl WindowController {
         let mounted = self
             .mount_moved_surface(new_pane, dst_ws, surface, moving, 0)
             .await;
-        if !mounted {
-            return Err("failed to mount moved surface".to_string());
+        if let Err(moving) = mounted {
+            self.rerender_with_moving_editor(dst_ws, *moving).await;
         }
 
         if outcome.src_workspace_removed {

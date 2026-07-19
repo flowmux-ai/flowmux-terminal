@@ -660,6 +660,59 @@ impl PaneRegistry {
         self.surface_stacks.contains_key(&pane)
     }
 
+    pub fn pane_at_root_point(
+        &self,
+        root: &gtk::Widget,
+        x: f64,
+        y: f64,
+    ) -> Option<(PaneId, f64, f64)> {
+        self.pane_frames.iter().find_map(|(pane, frame)| {
+            let bounds = frame.compute_bounds(root)?;
+            let left = f64::from(bounds.x());
+            let top = f64::from(bounds.y());
+            let width = f64::from(bounds.width());
+            let height = f64::from(bounds.height());
+            if width <= 0.0
+                || height <= 0.0
+                || x < left
+                || y < top
+                || x >= left + width
+                || y >= top + height
+            {
+                return None;
+            }
+            Some((
+                *pane,
+                ((x - left) / width).clamp(0.0, 1.0),
+                ((y - top) / height).clamp(0.0, 1.0),
+            ))
+        })
+    }
+
+    pub fn tab_at_root_point(
+        &self,
+        root: &gtk::Widget,
+        x: f64,
+        y: f64,
+    ) -> Option<(PaneId, SurfaceId, usize, bool)> {
+        self.surface_tabs.iter().find_map(|(pane, tabs)| {
+            tabs.iter().enumerate().find_map(|(index, (surface, tab))| {
+                let bounds = tab.compute_bounds(root)?;
+                let left = f64::from(bounds.x());
+                let top = f64::from(bounds.y());
+                let width = f64::from(bounds.width());
+                let height = f64::from(bounds.height());
+                (width > 0.0
+                    && height > 0.0
+                    && x >= left
+                    && y >= top
+                    && x < left + width
+                    && y < top + height)
+                    .then_some((*pane, *surface, index, x >= left + width / 2.0))
+            })
+        })
+    }
+
     pub fn refresh_tab_multi_class(&self, pane: PaneId) {
         let Some(tabs_box) = self.pane_tab_containers.get(&pane) else {
             return;
@@ -947,9 +1000,9 @@ impl PaneRegistry {
 
     /// Mount a [`MovingSurface`] (produced by [`Self::detach_surface_for_move`])
     /// into `dst_pane`, appending its tab to the bar and re-registering the live
-    /// handle under `dst_workspace`. The moved tab becomes active. Returns
-    /// `false` if `dst_pane` is not currently rendered (caller should ensure the
-    /// destination workspace is built first).
+    /// handle under `dst_workspace`. The moved tab becomes active. On failure,
+    /// returns the still-live surface so the caller can recover it instead of
+    /// silently dropping it.
     pub fn attach_moved_surface(
         &mut self,
         dst_pane: PaneId,
@@ -957,12 +1010,12 @@ impl PaneRegistry {
         moving: MovingSurface,
         tab: gtk::Widget,
         label: gtk::Label,
-    ) -> bool {
+    ) -> Result<(), Box<MovingSurface>> {
         let Some(stack) = self.surface_stacks.get(&dst_pane).cloned() else {
-            return false;
+            return Err(Box::new(moving));
         };
         let Some(tabs_box) = self.pane_tab_containers.get(&dst_pane).cloned() else {
-            return false;
+            return Err(Box::new(moving));
         };
         let surface = moving.surface;
         stack.add_named(&moving.content, Some(&surface.to_string()));
@@ -989,7 +1042,21 @@ impl PaneRegistry {
             .push((surface, tab));
         self.activate_surface(dst_pane, surface);
         self.refresh_tab_multi_class(dst_pane);
-        true
+        Ok(())
+    }
+
+    /// Keep a detached editor alive across a full workspace rebuild. Other
+    /// surface kinds can be reconstructed from the model, but an editor may
+    /// contain unsaved buffers that must remain in the original live handle.
+    pub fn stash_moving_editor_for_rerender(&mut self, moving: MovingSurface) {
+        let MovingSurface {
+            surface,
+            content: _,
+            handle,
+        } = moving;
+        if let MovingHandle::Editor(editor) = handle {
+            self.pending_editor_reuse.insert(surface, editor);
+        }
     }
 }
 
@@ -1756,20 +1823,47 @@ mod tab_dnd_tests {
     }
 
     #[test]
-    fn tab_drag_split_direction_from_delta_uses_right_or_down_drag() {
-        assert!(tab_drag_split_direction_from_delta(20.0, 20.0).is_none());
+    fn pane_drop_zone_builds_move_or_split_commands() {
+        let source = PaneId::new();
+        let target = PaneId::new();
+        let surface = SurfaceId::new();
+
         assert!(matches!(
-            tab_drag_split_direction_from_delta(120.0, 20.0),
-            Some(SplitDirection::Vertical)
+            tab_drop_command_for_pane_zone(source, surface, None, target, PaneDropZone::Tab),
+            TabDropCommand::MoveToPane {
+                src_pane,
+                surface: moved,
+                dst_pane,
+                target_index,
+                ..
+            } if src_pane == source
+                && moved == surface
+                && dst_pane == target
+                && target_index == usize::MAX
         ));
         assert!(matches!(
-            tab_drag_split_direction_from_delta(20.0, 120.0),
-            Some(SplitDirection::Horizontal)
+            tab_drop_command_for_pane_zone(source, surface, None, target, PaneDropZone::SplitRight,),
+            TabDropCommand::SplitIntoPane {
+                direction: SplitDirection::Vertical,
+                ..
+            }
         ));
         assert!(matches!(
-            tab_drag_split_direction_from_delta(120.0, 160.0),
-            Some(SplitDirection::Horizontal)
+            tab_drop_command_for_pane_zone(source, surface, None, target, PaneDropZone::SplitDown,),
+            TabDropCommand::SplitIntoPane {
+                direction: SplitDirection::Horizontal,
+                ..
+            }
         ));
+    }
+
+    #[test]
+    fn tab_drop_index_accounts_for_source_removal() {
+        assert_eq!(tab_drop_final_index(2, false, Some(0)), 1);
+        assert_eq!(tab_drop_final_index(2, true, Some(0)), 2);
+        assert_eq!(tab_drop_final_index(0, false, Some(2)), 0);
+        assert_eq!(tab_drop_final_index(0, true, Some(2)), 1);
+        assert_eq!(tab_drop_final_index(3, true, None), 4);
     }
 
     #[test]
@@ -1940,7 +2034,9 @@ mod tab_dnd_tests {
             .insert(dst, gtk::Box::new(gtk::Orientation::Horizontal, 0));
         let dst_tab = gtk::Button::new().upcast::<gtk::Widget>();
         let dst_label = gtk::Label::new(Some("Editor"));
-        assert!(registry.attach_moved_surface(dst, dst_workspace, moving, dst_tab, dst_label,));
+        assert!(registry
+            .attach_moved_surface(dst, dst_workspace, moving, dst_tab, dst_label)
+            .is_ok());
 
         let moved = registry.active_editor(dst).expect("moved editor is active");
         assert_eq!(moved.pane_id(), dst);
@@ -1966,6 +2062,9 @@ fn attach_tab_dnd_handlers(
     callbacks: &PaneCallbacks,
 ) {
     let surface_id = surface.id;
+    #[cfg(target_os = "macos")]
+    let drag_widget = tab.clone().upcast::<gtk::Widget>();
+    #[cfg(not(target_os = "macos"))]
     let drag_widget = tab
         .first_child()
         .map(|child| child.upcast::<gtk::Widget>())
@@ -1978,6 +2077,8 @@ fn attach_tab_dnd_handlers(
 
     let drag_source = gtk::DragSource::new();
     drag_source.set_actions(gtk::gdk::DragAction::MOVE);
+    #[cfg(target_os = "macos")]
+    drag_source.set_propagation_phase(gtk::PropagationPhase::Capture);
     let surface_for_payload = surface.clone();
     drag_source.connect_prepare(move |_, _, _| {
         tracing::debug!(%pane_id, %surface_id, "tab drag prepare");
@@ -2011,7 +2112,6 @@ fn attach_tab_dnd_handlers(
     let committed_for_end = committed_tab_drop.clone();
     let opened_for_end = opened_new_window.clone();
     let new_window_cb_for_end = callbacks.on_tab_drag_to_new_window.clone();
-    let close_cb_for_remote_move = callbacks.on_close_surface.clone();
     let split_candidate_for_end = split_candidate.clone();
     let split_cb_for_end = callbacks.on_split_surface_into_pane.clone();
     let surface_for_end = surface.clone();
@@ -2049,18 +2149,10 @@ fn attach_tab_dnd_handlers(
                 );
             }
         }
-        if selected_action.contains(gtk::gdk::DragAction::MOVE)
-            && delete_data
-            && !saw_target_for_end.get()
-            && !committed_for_end.get()
-        {
-            tracing::info!(
-                %pane_id,
-                %surface_id,
-                "tab drag moved to another window; closing source tab"
-            );
-            (close_cb_for_remote_move.borrow_mut())(pane_id, surface_id);
-        } else if should_tear_off_unhandled_drag(
+        // Never close the source from GDK's delete_data hint alone. In-app
+        // moves already mutate the store through an acknowledged command; a
+        // late or unrelated MOVE hint must not destroy the original surface.
+        if should_tear_off_unhandled_drag(
             selected_action.is_empty(),
             delete_data,
             saw_target_for_end.get(),
@@ -2148,10 +2240,14 @@ fn attach_tab_dnd_handlers(
         native_views_suspend_for_cancel.borrow_mut().take();
         false
     });
+    // On macOS the native source can claim the pointer sequence without ever
+    // delivering a drop over WKWebView-backed panes. Let the coordinate-based
+    // fallback own that sequence instead.
+    #[cfg(not(target_os = "macos"))]
     drag_widget.add_controller(drag_source);
 
     #[cfg(target_os = "macos")]
-    install_macos_tab_split_drag_fallback(
+    install_macos_tab_drag_fallback(
         &drag_widget,
         tab,
         pane_id,
@@ -2208,7 +2304,10 @@ fn attach_tab_dnd_handlers(
     let split_candidate_for_drop = split_candidate.clone();
     drop_target.connect_drop(move |_, drop, x, _y| {
         saw_target_for_drop.set(true);
-        committed_for_drop.set(true);
+        if committed_for_drop.replace(true) {
+            drop.finish(gtk::gdk::DragAction::empty());
+            return true;
+        }
         split_candidate_for_drop.borrow_mut().take();
         tracing::debug!(%target_pane, %target_surface, "tab drop fired");
         tab_for_drop.remove_css_class("flowmux-pane-tab-drop-before");
@@ -2269,12 +2368,7 @@ fn attach_tab_dnd_handlers(
             // The final_index is computed after removing the source and inserting
             // next to target, using the source position exposed from PaneRegistry::surface_tabs.
             let src_index = (position_of_surface_cb)(target_pane, src_surface);
-            let final_index = match (after, src_index) {
-                (false, Some(s)) if s < target_index => target_index.saturating_sub(1),
-                (false, _) => target_index,
-                (true, Some(s)) if s < target_index => target_index,
-                (true, _) => target_index.saturating_add(1),
-            };
+            let final_index = tab_drop_final_index(target_index, after, src_index);
 
             tracing::info!(
                 %target_pane,
@@ -2343,7 +2437,7 @@ fn should_tear_off_unhandled_drag(
 }
 
 #[cfg(target_os = "macos")]
-fn install_macos_tab_split_drag_fallback(
+fn install_macos_tab_drag_fallback(
     drag_widget: &gtk::Widget,
     tab: &gtk::Box,
     pane_id: PaneId,
@@ -2356,72 +2450,141 @@ fn install_macos_tab_split_drag_fallback(
     let gesture = gtk::GestureDrag::new();
     gesture.set_propagation_phase(gtk::PropagationPhase::Capture);
     gesture.set_button(gtk::gdk::BUTTON_PRIMARY);
+    let drag_origin = Rc::new(Cell::new(None::<(f64, f64)>));
+    let native_views_suspend = Rc::new(RefCell::new(None));
 
     let tab_for_begin = tab.clone();
     let saw_target_for_begin = saw_tab_drop_target.clone();
     let committed_for_begin = committed_tab_drop.clone();
     let opened_for_begin = opened_new_window.clone();
-    gesture.connect_drag_begin(move |_, _, _| {
+    let origin_for_begin = drag_origin.clone();
+    let native_views_for_begin = native_views_suspend.clone();
+    gesture.connect_drag_begin(move |_, x, y| {
         saw_target_for_begin.set(false);
         committed_for_begin.set(false);
         opened_for_begin.set(false);
+        origin_for_begin.set(Some((x, y)));
+        native_views_for_begin.borrow_mut().take();
+        if let Some(window) = tab_for_begin.root().and_downcast::<gtk::Window>() {
+            *native_views_for_begin.borrow_mut() =
+                Some(crate::ui::browser_pane::suspend_native_browser_views_for_window(&window));
+        }
         tab_for_begin.set_opacity(0.4);
         tab_for_begin.add_css_class("flowmux-pane-tab-dragging");
     });
 
     let tab_for_end = tab.clone();
-    let split_cb = callbacks.on_split_surface_into_pane.clone();
+    let resolve_pane = callbacks.pane_at_root_point.clone();
+    let resolve_tab = callbacks.tab_at_root_point.clone();
+    let position_of_surface = callbacks.position_of_surface_in_pane.clone();
+    let dispatch_tab_drop = callbacks.dispatch_tab_drop.clone();
+    let open_new_window = callbacks.on_tab_drag_to_new_window.clone();
     let surface_model = surface.clone();
     let surface_id = surface.id;
+    let origin_for_end = drag_origin.clone();
+    let native_views_for_end = native_views_suspend.clone();
     gesture.connect_drag_end(move |_, dx, dy| {
         tab_for_end.set_opacity(1.0);
         tab_for_end.remove_css_class("flowmux-pane-tab-dragging");
         if committed_tab_drop.get() || opened_new_window.get() {
+            origin_for_end.take();
+            native_views_for_end.borrow_mut().take();
             return;
         }
-        let Some(direction) = tab_drag_split_direction_from_delta(dx, dy) else {
+        let Some((start_x, start_y)) = origin_for_end.take() else {
+            native_views_for_end.borrow_mut().take();
+            return;
+        };
+        if dx.hypot(dy) < 8.0 {
+            native_views_for_end.borrow_mut().take();
+            return;
+        }
+        let Some(window) = tab_for_end.root().and_downcast::<gtk::Window>() else {
+            native_views_for_end.borrow_mut().take();
+            return;
+        };
+        let root = window.upcast::<gtk::Widget>();
+        let point = gtk::graphene::Point::new((start_x + dx) as f32, (start_y + dy) as f32);
+        let Some(point) = tab_for_end.compute_point(&root, &point) else {
+            native_views_for_end.borrow_mut().take();
+            return;
+        };
+        let root_x = f64::from(point.x());
+        let root_y = f64::from(point.y());
+        let command = if let Some((target_pane, target_surface, target_index, after)) =
+            resolve_tab(&root, root_x, root_y)
+        {
+            if pane_id == target_pane && surface_id == target_surface {
+                native_views_for_end.borrow_mut().take();
+                return;
+            }
+            let src_index = (position_of_surface)(target_pane, surface_id);
+            let final_index = tab_drop_final_index(target_index, after, src_index);
+            if pane_id == target_pane {
+                TabDropCommand::Reorder {
+                    pane: target_pane,
+                    surface: surface_id,
+                    target_index: final_index,
+                }
+            } else {
+                TabDropCommand::MoveToPane {
+                    src_pane: pane_id,
+                    surface: surface_id,
+                    surface_model: Some(surface_model.clone()),
+                    dst_pane: target_pane,
+                    target_index: final_index,
+                }
+            }
+        } else if let Some((target_pane, fx, fy)) = resolve_pane(&root, root_x, root_y) {
+            let zone = drop_zone(fx, fy);
+            tab_drop_command_for_pane_zone(
+                pane_id,
+                surface_id,
+                Some(surface_model.clone()),
+                target_pane,
+                zone,
+            )
+        } else {
+            if root_x < 0.0
+                || root_y < 0.0
+                || root_x >= f64::from(root.width())
+                || root_y >= f64::from(root.height())
+            {
+                opened_new_window.set(true);
+                (open_new_window.borrow_mut())(pane_id, surface_id);
+            }
+            native_views_for_end.borrow_mut().take();
             return;
         };
         saw_tab_drop_target.set(true);
         committed_tab_drop.set(true);
-        opened_new_window.set(true);
         tracing::info!(
             %pane_id,
             %surface_id,
-            ?direction,
-            dx,
-            dy,
-            "macOS tab drag fallback committing split"
+            "macOS tab drag fallback dispatching pane drop"
         );
-        (split_cb.borrow_mut())(
-            pane_id,
-            surface_id,
-            Some(surface_model.clone()),
-            pane_id,
-            direction,
-        );
+        if let Some(ack) = dispatch_tab_drop(command) {
+            gtk::glib::MainContext::default().spawn_local(async move {
+                match ack.await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => tracing::warn!(%error, "macOS tab drop was rejected"),
+                    Err(error) => {
+                        tracing::warn!(%error, "macOS tab drop acknowledgement was dropped")
+                    }
+                }
+            });
+        } else {
+            tracing::warn!("macOS tab drop command bridge is unavailable");
+        }
+        native_views_for_end.borrow_mut().take();
     });
 
     drag_widget.add_controller(gesture);
 }
 
-#[cfg(any(target_os = "macos", test))]
-fn tab_drag_split_direction_from_delta(dx: f64, dy: f64) -> Option<SplitDirection> {
-    const MIN_DRAG_DISTANCE: f64 = 80.0;
-    let right = dx >= MIN_DRAG_DISTANCE;
-    let down = dy >= MIN_DRAG_DISTANCE;
-    match (right, down) {
-        (false, false) => None,
-        (true, false) => Some(SplitDirection::Vertical),
-        (false, true) => Some(SplitDirection::Horizontal),
-        (true, true) if dy > dx => Some(SplitDirection::Horizontal),
-        (true, true) => Some(SplitDirection::Vertical),
-    }
-}
-
 /// Which pane-body region a tab drag is over, deciding the drop outcome and the
 /// translucent preview shown on the pane.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PaneDropZone {
     /// Not hovering / no preview.
     None,
@@ -2463,6 +2626,47 @@ fn landed_drop_zone(previewed: PaneDropZone, fx: Option<f64>, fy: Option<f64>) -
     match (fx, fy) {
         (Some(fx), Some(fy)) => drop_zone(fx, fy),
         _ => PaneDropZone::Tab,
+    }
+}
+
+fn tab_drop_command_for_pane_zone(
+    src_pane: PaneId,
+    surface: SurfaceId,
+    surface_model: Option<PaneSurface>,
+    dst_pane: PaneId,
+    zone: PaneDropZone,
+) -> TabDropCommand {
+    match zone {
+        PaneDropZone::SplitRight => TabDropCommand::SplitIntoPane {
+            src_pane,
+            surface,
+            surface_model,
+            dst_pane,
+            direction: SplitDirection::Vertical,
+        },
+        PaneDropZone::SplitDown => TabDropCommand::SplitIntoPane {
+            src_pane,
+            surface,
+            surface_model,
+            dst_pane,
+            direction: SplitDirection::Horizontal,
+        },
+        PaneDropZone::Tab | PaneDropZone::None => TabDropCommand::MoveToPane {
+            src_pane,
+            surface,
+            surface_model,
+            dst_pane,
+            target_index: usize::MAX,
+        },
+    }
+}
+
+fn tab_drop_final_index(target_index: usize, after: bool, src_index: Option<usize>) -> usize {
+    match (after, src_index) {
+        (false, Some(source)) if source < target_index => target_index.saturating_sub(1),
+        (false, _) => target_index,
+        (true, Some(source)) if source < target_index => target_index,
+        (true, _) => target_index.saturating_add(1),
     }
 }
 
@@ -2552,7 +2756,10 @@ fn attach_pane_body_dnd(
     let split_candidate = callbacks.tab_drag_split_candidate.clone();
     drop_target.connect_drop(move |_, drop, x, y| {
         saw_drop_target.set(true);
-        committed_drop.set(true);
+        if committed_drop.replace(true) {
+            drop.finish(gtk::gdk::DragAction::empty());
+            return true;
+        }
         split_candidate.borrow_mut().take();
         let (w, h) = (frame.width() as f64, frame.height() as f64);
         let landed = landed_drop_zone(
@@ -2578,29 +2785,13 @@ fn attach_pane_body_dnd(
             let src_pane = payload.src_pane;
             let src_surface = payload.src_surface;
             let src_surface_model = payload.surface;
-            let command = match landed {
-                PaneDropZone::SplitRight => TabDropCommand::SplitIntoPane {
-                    src_pane,
-                    surface: src_surface,
-                    surface_model: src_surface_model,
-                    dst_pane: target_pane,
-                    direction: SplitDirection::Vertical,
-                },
-                PaneDropZone::SplitDown => TabDropCommand::SplitIntoPane {
-                    src_pane,
-                    surface: src_surface,
-                    surface_model: src_surface_model,
-                    dst_pane: target_pane,
-                    direction: SplitDirection::Horizontal,
-                },
-                PaneDropZone::Tab | PaneDropZone::None => TabDropCommand::MoveToPane {
-                    src_pane,
-                    surface: src_surface,
-                    surface_model: src_surface_model,
-                    dst_pane: target_pane,
-                    target_index: usize::MAX,
-                },
-            };
+            let command = tab_drop_command_for_pane_zone(
+                src_pane,
+                src_surface,
+                src_surface_model,
+                target_pane,
+                landed,
+            );
             let Some(ack) = dispatch_tab_drop(command) else {
                 tracing::warn!("pane-body tab drop: command bridge is unavailable");
                 drop.finish(gtk::gdk::DragAction::empty());
