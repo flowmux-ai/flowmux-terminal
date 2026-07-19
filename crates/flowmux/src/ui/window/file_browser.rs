@@ -138,6 +138,7 @@ impl WindowController {
             }
         }
         self.refresh_window_title().await;
+        self.refresh_file_browser_from_focus().await;
         self.focus_pane(target_pane);
     }
 

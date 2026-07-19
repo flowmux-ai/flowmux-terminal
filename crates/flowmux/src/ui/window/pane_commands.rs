@@ -227,6 +227,7 @@ impl WindowController {
                     self.sync_workspace_agent_status_from_store(ws_id).await;
                 }
                 self.refresh_agent_screen_status(surface, None).await;
+                self.refresh_file_browser_from_focus().await;
                 // After a surface is activated through click, IPC, or another
                 // path, move keyboard focus to the
                 // newly active widget: the terminal's gtk::DrawingArea or the

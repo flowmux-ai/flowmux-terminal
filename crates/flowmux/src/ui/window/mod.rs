@@ -4850,6 +4850,76 @@ mod tests {
 
     #[cfg(not(target_os = "macos"))]
     #[gtk::test]
+    async fn file_browser_follows_editor_tab_activation_in_same_pane() {
+        adw::init().expect("libadwaita should initialize in GTK test");
+        let workspace = tempfile::tempdir().unwrap();
+        let first_dir = workspace.path().join("first");
+        let second_dir = workspace.path().join("second");
+        std::fs::create_dir_all(&first_dir).unwrap();
+        std::fs::create_dir_all(&second_dir).unwrap();
+        let first_file = first_dir.join("first.txt");
+        let second_file = second_dir.join("second.txt");
+        std::fs::write(&first_file, "first\n").unwrap();
+        std::fs::write(&second_file, "second\n").unwrap();
+
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("editor-tabs".into()), workspace.path().to_path_buf())
+            .await;
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        let pane = ws.surfaces[0].root_pane.first_leaf_id().unwrap();
+        let (bridge, _rx) = Bridge::new();
+        let app = adw::Application::builder()
+            .application_id("com.flowmux.App.UiTest.EditorTabFileBrowser")
+            .build();
+        app.register(None::<&gtk::gio::Cancellable>).unwrap();
+        let controller = WindowController::new(
+            &app,
+            store.clone(),
+            Arc::new(ResolvedTheme::load()),
+            bridge,
+            gtk::CssProvider::new(),
+            None,
+        );
+        controller.render_workspace(&ws);
+        controller.focused_pane.set(Some(pane));
+
+        controller.open_file_in_editor(first_file, Some(pane)).await;
+        let first_surface = store.get_workspace(ws_id).await.unwrap().surfaces[0]
+            .root_pane
+            .active_surface_id(pane)
+            .unwrap();
+        controller
+            .open_file_in_editor(second_file, Some(pane))
+            .await;
+        let second_surface = store.get_workspace(ws_id).await.unwrap().surfaces[0]
+            .root_pane
+            .active_surface_id(pane)
+            .unwrap();
+        assert_ne!(first_surface, second_surface);
+
+        controller.show_file_browser_for_pane(pane).await;
+        assert!(controller.file_browser.panel.is_showing_root(&second_dir));
+
+        controller
+            .dispatch(GtkCommand::ActivateSurface {
+                pane,
+                surface: first_surface,
+            })
+            .await;
+        assert!(controller.file_browser.panel.is_showing_root(&first_dir));
+
+        controller
+            .dispatch(GtkCommand::ActivateSurface {
+                pane,
+                surface: second_surface,
+            })
+            .await;
+        assert!(controller.file_browser.panel.is_showing_root(&second_dir));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[gtk::test]
     async fn file_browser_escape_hides_panel_and_restores_saved_source_focus() {
         let (controller, _ws_id, pane) =
             build_single_workspace_controller("com.flowmux.App.UiTest.FileBrowserEscape").await;
