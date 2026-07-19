@@ -75,24 +75,19 @@ impl WindowController {
             return;
         };
 
-        let existing_surface = self
-            .pane_registry
-            .borrow()
-            .editor_surface_in_pane(target_pane);
-        let editor_surface = if let Some(surface) = existing_surface {
-            surface
-        } else {
-            let Some((workspace_id, surface)) =
-                self.store.add_editor_surface_to_pane(target_pane).await
-            else {
-                self.clipboard_toast
-                    .show_with_message("Could not create an editor tab");
-                return;
-            };
-            self.attach_or_rerender_surface(workspace_id, target_pane, surface)
-                .await;
-            surface
+        // A file owns one pane-level Editor surface, just like a terminal tab.
+        // Never reuse an existing editor for a different file: doing so hides
+        // the previous document inside the WebView instead of leaving a visible
+        // FlowMux tab the user can move, split, or return to.
+        let Some((workspace_id, editor_surface)) =
+            self.store.add_editor_surface_to_pane(target_pane).await
+        else {
+            self.clipboard_toast
+                .show_with_message("Could not create an editor tab");
+            return;
         };
+        self.attach_or_rerender_surface(workspace_id, target_pane, editor_surface)
+            .await;
 
         self.store
             .set_active_surface(target_pane, editor_surface)

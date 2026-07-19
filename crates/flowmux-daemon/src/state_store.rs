@@ -4146,6 +4146,23 @@ Do you want to continue?";
     }
 
     #[tokio::test]
+    async fn repeated_editor_adds_create_separate_pane_tabs() {
+        let store = StateStore::new_lazy(State::default());
+        let ws_id = store
+            .create_workspace(Some("demo".into()), std::path::PathBuf::from("/tmp/demo"))
+            .await;
+        let pane = first_pane(&store.get_workspace(ws_id).await.unwrap());
+
+        let (_, first_editor) = store.add_editor_surface_to_pane(pane).await.unwrap();
+        let (_, second_editor) = store.add_editor_surface_to_pane(pane).await.unwrap();
+
+        let ws = store.get_workspace(ws_id).await.unwrap();
+        assert_ne!(first_editor, second_editor);
+        assert_eq!(first_pane_tab_count(&ws), 3);
+        assert_eq!(first_pane_active_surface(&ws), second_editor);
+    }
+
+    #[tokio::test]
     async fn add_editor_surface_to_pane_returns_none_for_unknown_pane() {
         let store = StateStore::new_lazy(State::default());
         let _ = store
