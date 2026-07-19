@@ -38,6 +38,93 @@ body {
   background: var(--ink);
 }
 
+.document-tabs {
+  position: absolute;
+  z-index: 2;
+  inset: 0 0 auto;
+  display: flex;
+  height: 33px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border-bottom: 1px solid color-mix(in srgb, var(--muted) 24%, transparent);
+  background: var(--panel);
+  scrollbar-width: thin;
+}
+
+.document-tabs[hidden] {
+  display: none;
+}
+
+.document-tab {
+  display: flex;
+  flex: 0 1 180px;
+  min-width: 92px;
+  max-width: 220px;
+  border-right: 1px solid color-mix(in srgb, var(--muted) 18%, transparent);
+  color: var(--muted);
+  background: color-mix(in srgb, var(--panel) 94%, var(--ink));
+}
+
+.document-tab.is-active {
+  color: var(--text);
+  background: var(--ink);
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+
+.document-tab-main,
+.document-tab-close {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+}
+
+.document-tab-main {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 6px;
+  padding-left: 10px;
+  text-align: left;
+}
+
+.document-tab-main:focus-visible,
+.document-tab-close:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.document-tab-status {
+  flex: 0 0 7px;
+  color: var(--accent);
+  font-size: 8px;
+}
+
+.document-tab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.document-tab-close {
+  flex: 0 0 28px;
+  font-size: 16px;
+  opacity: 0;
+}
+
+.document-tab:hover .document-tab-close,
+.document-tab.is-active .document-tab-close,
+.document-tab-close:focus-visible {
+  opacity: 0.75;
+}
+
+.document-tab-close:hover {
+  opacity: 1;
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+}
+
 .document-state {
   position: absolute;
   z-index: 2;
@@ -49,6 +136,10 @@ body {
   background: color-mix(in srgb, var(--panel) 92%, transparent);
   white-space: nowrap;
   pointer-events: none;
+}
+
+.editor-shell.has-documents .document-state {
+  top: 41px;
 }
 
 .document-state.is-conflict {
@@ -69,6 +160,10 @@ body {
   border-radius: 6px;
   background: color-mix(in srgb, var(--panel) 94%, transparent);
   box-shadow: 0 5px 20px rgb(0 0 0 / 30%);
+}
+
+.editor-shell.has-documents .conflict-banner {
+  top: 71px;
 }
 
 .conflict-banner[hidden] {
@@ -109,6 +204,11 @@ body {
   inset: 0;
   min-width: 0;
   min-height: 0;
+}
+
+.editor-shell.has-documents .editor-surface,
+.editor-shell.has-documents .empty-state {
+  top: 33px;
 }
 
 .editor-surface {

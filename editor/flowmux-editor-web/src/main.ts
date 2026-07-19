@@ -118,6 +118,14 @@ const documentState = requiredElement("document-state");
 const emptyState = requiredElement("empty-state");
 const editorContainer = requiredElement("editor");
 const diffEditorContainer = requiredElement("diff-editor");
+const editorShell = (() => {
+  const element = document.querySelector<HTMLElement>(".editor-shell");
+  if (element === null) {
+    throw new Error("Missing required element: .editor-shell");
+  }
+  return element;
+})();
+const documentTabs = requiredElement("document-tabs");
 const conflictBanner = requiredElement("conflict-banner");
 const conflictMessage = requiredElement("conflict-message");
 const conflictCompare = requiredButton("conflict-compare");
@@ -179,6 +187,7 @@ let selectedSearchResult = 0;
 let renderedSearchResults: SearchSelection[] = [];
 const recentPaths: string[] = [];
 const documents = new Map<string, OpenDocument>();
+let renderedDocumentTabsSignature = "";
 
 interface SearchSelection {
   path: string;
@@ -799,6 +808,10 @@ function requestCloseActiveDocument(): void {
   if (document === undefined) {
     return;
   }
+  requestCloseDocument(document);
+}
+
+function requestCloseDocument(document: OpenDocument): void {
   if (document.payload.dirty) {
     showCloseDialog(document);
   } else {
@@ -1450,6 +1463,7 @@ function setEditorFontSize(fontSize: number): void {
 function renderState(): void {
   const active = activeDocumentId === null ? undefined : documents.get(activeDocumentId);
   const showingDiff = active !== undefined && diffDocumentId === active.payload.id;
+  renderDocumentTabs();
   emptyState.classList.toggle("is-hidden", active !== undefined);
   editorContainer.classList.toggle("is-visible", active !== undefined && !showingDiff);
   diffEditorContainer.classList.toggle("is-visible", showingDiff);
@@ -1480,6 +1494,75 @@ function renderState(): void {
     documentState.hidden = state.hidden || active.payload.externalChange;
   }
   renderConflictBanner(active, showingDiff);
+}
+
+function renderDocumentTabs(): void {
+  const signature = JSON.stringify({
+    activeDocumentId,
+    documents: [...documents.values()].map((openDocument) => ({
+      id: openDocument.payload.id,
+      name: openDocument.payload.name,
+      relativePath: openDocument.payload.relativePath,
+      dirty: openDocument.payload.dirty,
+    })),
+  });
+  if (signature === renderedDocumentTabsSignature) {
+    return;
+  }
+  renderedDocumentTabsSignature = signature;
+
+  const hasDocuments = documents.size > 0;
+  documentTabs.hidden = !hasDocuments;
+  editorShell.classList.toggle("has-documents", hasDocuments);
+
+  const tabs: HTMLElement[] = [];
+  let activeTab: HTMLButtonElement | null = null;
+  for (const openDocument of documents.values()) {
+    const active = openDocument.payload.id === activeDocumentId;
+    const tab = document.createElement("div");
+    tab.className = "document-tab";
+    tab.classList.toggle("is-active", active);
+
+    const activate = document.createElement("button");
+    activate.className = "document-tab-main";
+    activate.type = "button";
+    activate.role = "tab";
+    activate.tabIndex = active ? 0 : -1;
+    activate.setAttribute("aria-selected", String(active));
+    activate.setAttribute(
+      "aria-label",
+      `${openDocument.payload.name}${openDocument.payload.dirty ? ", unsaved changes" : ""}`,
+    );
+    activate.title = openDocument.payload.relativePath;
+    activate.addEventListener("click", () => activateDocument(openDocument.payload.id));
+
+    const status = document.createElement("span");
+    status.className = "document-tab-status";
+    status.setAttribute("aria-hidden", "true");
+    status.textContent = openDocument.payload.dirty ? "●" : "";
+    activate.append(status);
+
+    const name = document.createElement("span");
+    name.className = "document-tab-name";
+    name.textContent = openDocument.payload.name;
+    activate.append(name);
+    tab.append(activate);
+
+    const close = document.createElement("button");
+    close.className = "document-tab-close";
+    close.type = "button";
+    close.textContent = "×";
+    close.setAttribute("aria-label", `Close ${openDocument.payload.name}`);
+    close.addEventListener("click", () => requestCloseDocument(openDocument));
+    tab.append(close);
+
+    tabs.push(tab);
+    if (active) {
+      activeTab = activate;
+    }
+  }
+  documentTabs.replaceChildren(...tabs);
+  activeTab?.scrollIntoView({ block: "nearest", inline: "nearest" });
 }
 
 function renderConflictBanner(active: OpenDocument, showingDiff: boolean): void {

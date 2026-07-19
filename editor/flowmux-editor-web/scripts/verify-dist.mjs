@@ -38,6 +38,7 @@ if (
   !html.includes('id="recovery-dialog-discard"') ||
   !html.includes('id="search-dialog"') ||
   !html.includes('id="search-query"') ||
+  !html.includes('id="document-tabs"') ||
   !html.includes('id="conflict-banner"') ||
   !html.includes('id="save-as-dialog"') ||
   !html.includes('id="diff-editor"')
