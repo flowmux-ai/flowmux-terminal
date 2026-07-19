@@ -35,6 +35,18 @@ type NativeEditorAction =
   | "cursorRight"
   | "cursorUp"
   | "cursorDown"
+  | "cursorPageUp"
+  | "cursorPageDown"
+  | "cursorHome"
+  | "cursorEnd"
+  | "cursorLeftSelect"
+  | "cursorRightSelect"
+  | "cursorUpSelect"
+  | "cursorDownSelect"
+  | "cursorPageUpSelect"
+  | "cursorPageDownSelect"
+  | "cursorHomeSelect"
+  | "cursorEndSelect"
   | "copy"
   | "paste"
   | "find"
@@ -241,6 +253,18 @@ function runNativeEditorAction(
     case "cursorRight":
     case "cursorUp":
     case "cursorDown":
+    case "cursorPageUp":
+    case "cursorPageDown":
+    case "cursorHome":
+    case "cursorEnd":
+    case "cursorLeftSelect":
+    case "cursorRightSelect":
+    case "cursorUpSelect":
+    case "cursorDownSelect":
+    case "cursorPageUpSelect":
+    case "cursorPageDownSelect":
+    case "cursorHomeSelect":
+    case "cursorEndSelect":
     case "undo":
     case "redo":
       target.trigger("keyboard", action, null);

@@ -21,7 +21,12 @@ use std::time::Instant;
 
 type DeleteHandler = Arc<dyn Fn(&Path, &FileOperationControl) -> io::Result<()> + Send + Sync>;
 type OpenFileHandler = Rc<RefCell<Box<dyn Fn(PathBuf)>>>;
+type KeyboardInputGuard = Rc<RefCell<Box<dyn Fn() -> bool>>>;
 const ROW_BATCH_SIZE: usize = 500;
+
+pub(crate) fn file_browser_accepts_keyboard_input(editor_has_native_focus: bool) -> bool {
+    !editor_has_native_focus
+}
 
 #[derive(Clone)]
 pub struct FileBrowserPanel {
@@ -40,6 +45,7 @@ pub struct FileBrowserPanel {
     on_focus_out: Rc<RefCell<Option<Box<dyn Fn(FocusDir)>>>>,
     on_escape: Rc<RefCell<Option<Box<dyn Fn()>>>>,
     on_focus_changed: Rc<RefCell<Option<Box<dyn Fn(bool)>>>>,
+    keyboard_input_guard: KeyboardInputGuard,
     open: Rc<Cell<bool>>,
     file_operation_in_progress: Rc<Cell<bool>>,
     current_file_operation_cancel: Rc<RefCell<Option<Arc<AtomicBool>>>>,
@@ -338,6 +344,7 @@ impl FileBrowserPanel {
             on_focus_out: Rc::new(RefCell::new(None)),
             on_escape: Rc::new(RefCell::new(None)),
             on_focus_changed: Rc::new(RefCell::new(None)),
+            keyboard_input_guard: Rc::new(RefCell::new(Box::new(|| true))),
             open: Rc::new(Cell::new(false)),
             file_operation_in_progress: Rc::new(Cell::new(false)),
             current_file_operation_cancel: Rc::new(RefCell::new(None)),
@@ -446,6 +453,10 @@ impl FileBrowserPanel {
     /// whether the browser actually holds focus, which disambiguates Alt+arrow.
     pub fn connect_focus_changed<F: Fn(bool) + 'static>(&self, f: F) {
         *self.on_focus_changed.borrow_mut() = Some(Box::new(f));
+    }
+
+    pub(crate) fn set_keyboard_input_guard<F: Fn() -> bool + 'static>(&self, guard: F) {
+        *self.keyboard_input_guard.borrow_mut() = Box::new(guard);
     }
 
     pub fn connect_open_file<F: Fn(PathBuf) + 'static>(&self, f: F) {
@@ -927,6 +938,10 @@ impl FileBrowserPanel {
     }
 
     fn handle_key(&self, keyval: gdk::Key, state: gdk::ModifierType) -> glib::Propagation {
+        if !(self.keyboard_input_guard.borrow())() {
+            return glib::Propagation::Proceed;
+        }
+
         if keyval == gdk::Key::Escape {
             if let Some(cb) = self.on_escape.borrow().as_ref() {
                 cb();
@@ -4175,6 +4190,36 @@ mod tests {
         assert!(!file.exists());
         assert_eq!(panel_focused_path(&panel), Some(tmp.path.join("b.txt")));
         assert_eq!(panel.scroll.vadjustment().value(), 180.0);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[gtk::test]
+    fn keyboard_guard_leaves_navigation_and_delete_for_the_editor() {
+        let tmp = TestDir::new("keyboard-guard-editor");
+        let first = tmp.file("a.txt");
+        tmp.file("b.txt");
+
+        let panel = FileBrowserPanel::new();
+        panel.show_for_root_with_state(tmp.path.clone(), None);
+        panel.focus_path(first.clone());
+        panel.set_keyboard_input_guard(|| false);
+
+        assert_eq!(
+            panel.handle_key(gdk::Key::Down, gdk::ModifierType::empty()),
+            glib::Propagation::Proceed
+        );
+        assert_eq!(panel_focused_path(&panel), Some(first.clone()));
+        assert_eq!(
+            panel.handle_key(gdk::Key::Delete, gdk::ModifierType::empty()),
+            glib::Propagation::Proceed
+        );
+        assert!(first.exists());
+    }
+
+    #[test]
+    fn native_editor_focus_disables_file_browser_keyboard_input() {
+        assert!(!file_browser_accepts_keyboard_input(true));
+        assert!(file_browser_accepts_keyboard_input(false));
     }
 
     #[cfg(not(target_os = "macos"))]

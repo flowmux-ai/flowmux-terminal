@@ -19,6 +19,43 @@ use std::time::Duration;
 const RECOVERY_DEBOUNCE: Duration = Duration::from_millis(350);
 const QUICK_OPEN_LIMIT: usize = 2_000;
 
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EditorNavigationKey {
+    Left,
+    Right,
+    Up,
+    Down,
+    PageUp,
+    PageDown,
+    Home,
+    End,
+}
+
+#[cfg(target_os = "macos")]
+impl EditorNavigationKey {
+    pub(crate) fn monaco_action(self, extend_selection: bool) -> &'static str {
+        match (self, extend_selection) {
+            (Self::Left, false) => "cursorLeft",
+            (Self::Right, false) => "cursorRight",
+            (Self::Up, false) => "cursorUp",
+            (Self::Down, false) => "cursorDown",
+            (Self::PageUp, false) => "cursorPageUp",
+            (Self::PageDown, false) => "cursorPageDown",
+            (Self::Home, false) => "cursorHome",
+            (Self::End, false) => "cursorEnd",
+            (Self::Left, true) => "cursorLeftSelect",
+            (Self::Right, true) => "cursorRightSelect",
+            (Self::Up, true) => "cursorUpSelect",
+            (Self::Down, true) => "cursorDownSelect",
+            (Self::PageUp, true) => "cursorPageUpSelect",
+            (Self::PageDown, true) => "cursorPageDownSelect",
+            (Self::Home, true) => "cursorHomeSelect",
+            (Self::End, true) => "cursorEndSelect",
+        }
+    }
+}
+
 pub(super) type EditorFocusDirectionCallback =
     Rc<RefCell<Option<Box<dyn FnMut(PaneId, EditorFocusDirection)>>>>;
 
@@ -824,6 +861,38 @@ mod tests {
     use super::*;
     use flowmux_core::SurfaceId;
     use std::fs;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn editor_navigation_keys_map_to_monaco_commands() {
+        let cases = [
+            (EditorNavigationKey::Left, "cursorLeft", "cursorLeftSelect"),
+            (
+                EditorNavigationKey::Right,
+                "cursorRight",
+                "cursorRightSelect",
+            ),
+            (EditorNavigationKey::Up, "cursorUp", "cursorUpSelect"),
+            (EditorNavigationKey::Down, "cursorDown", "cursorDownSelect"),
+            (
+                EditorNavigationKey::PageUp,
+                "cursorPageUp",
+                "cursorPageUpSelect",
+            ),
+            (
+                EditorNavigationKey::PageDown,
+                "cursorPageDown",
+                "cursorPageDownSelect",
+            ),
+            (EditorNavigationKey::Home, "cursorHome", "cursorHomeSelect"),
+            (EditorNavigationKey::End, "cursorEnd", "cursorEndSelect"),
+        ];
+
+        for (key, plain, selecting) in cases {
+            assert_eq!(key.monaco_action(false), plain);
+            assert_eq!(key.monaco_action(true), selecting);
+        }
+    }
 
     fn wait_for_search(host: &EditorHostState) -> Vec<HostMessage> {
         for _ in 0..100 {

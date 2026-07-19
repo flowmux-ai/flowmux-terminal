@@ -20,6 +20,8 @@
 //! one and skips invalid entries with a warning.
 
 use crate::bridge::{Bridge, FocusDir, GtkCommand, WsNav};
+#[cfg(target_os = "macos")]
+use crate::ui::editor_pane::EditorNavigationKey;
 use crate::ui::pane_terminal::PaneTerminal;
 use crate::ui::pane_terminal::INSERT_NEWLINE_BYTES;
 use crate::ui::window::ClipboardToast;
@@ -49,7 +51,11 @@ const TOGGLE_USAGE_POPOVER_FULL_ACTION: &str = "win.toggle-usage-popover";
 
 #[cfg(target_os = "macos")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MacEditorControlAction {
+enum MacEditorKeyAction {
+    Navigate {
+        key: EditorNavigationKey,
+        extend_selection: bool,
+    },
     Copy,
     Paste,
     Find,
@@ -149,7 +155,7 @@ pub fn install_actions(
     usage_button: gtk::MenuButton,
 ) {
     #[cfg(target_os = "macos")]
-    install_macos_editor_control_capture(window, focused.clone(), registry.clone());
+    install_macos_editor_key_capture(window, focused.clone(), registry.clone());
 
     let split_right = make_pane_action(
         "split-right",
@@ -442,7 +448,7 @@ pub fn install_actions(
 }
 
 #[cfg(target_os = "macos")]
-fn install_macos_editor_control_capture(
+fn install_macos_editor_key_capture(
     window: &adw::ApplicationWindow,
     focused: FocusedPane,
     registry: TerminalRegistry,
@@ -451,7 +457,7 @@ fn install_macos_editor_control_capture(
     controller.set_propagation_phase(gtk::PropagationPhase::Capture);
     let window_for_key = window.clone();
     controller.connect_key_pressed(move |_, keyval, _, state| {
-        let Some(action) = macos_editor_control_action(keyval, state) else {
+        let Some(action) = macos_editor_key_action(keyval, state) else {
             return glib::Propagation::Proceed;
         };
         let Some(pane) = focused.get() else {
@@ -461,15 +467,21 @@ fn install_macos_editor_control_capture(
         let Some(editor) = registry.active_editor(pane) else {
             return glib::Propagation::Proceed;
         };
-        if !window_focus_is_widget(&window_for_key, &editor.root.clone().upcast()) {
+        if !window_focus_is_widget(&window_for_key, &editor.root.clone().upcast())
+            && !editor.has_native_focus()
+        {
             return glib::Propagation::Proceed;
         }
         match action {
-            MacEditorControlAction::Copy => editor.copy_selection(),
-            MacEditorControlAction::Paste => editor.paste_clipboard(),
-            MacEditorControlAction::Find => editor.show_find(),
-            MacEditorControlAction::Undo => editor.undo(),
-            MacEditorControlAction::Redo => editor.redo(),
+            MacEditorKeyAction::Navigate {
+                key,
+                extend_selection,
+            } => editor.navigate(key, extend_selection),
+            MacEditorKeyAction::Copy => editor.copy_selection(),
+            MacEditorKeyAction::Paste => editor.paste_clipboard(),
+            MacEditorKeyAction::Find => editor.show_find(),
+            MacEditorKeyAction::Undo => editor.undo(),
+            MacEditorKeyAction::Redo => editor.redo(),
         }
         glib::Propagation::Stop
     });
@@ -477,25 +489,43 @@ fn install_macos_editor_control_capture(
 }
 
 #[cfg(target_os = "macos")]
-fn macos_editor_control_action(
+fn macos_editor_key_action(
     keyval: gtk::gdk::Key,
     state: gtk::gdk::ModifierType,
-) -> Option<MacEditorControlAction> {
+) -> Option<MacEditorKeyAction> {
     use gtk::gdk::ModifierType;
 
     let modifiers = state & accelerator_mod_mask();
+    if modifiers.is_empty() || modifiers == ModifierType::SHIFT_MASK {
+        let key = match keyval {
+            gtk::gdk::Key::Left => EditorNavigationKey::Left,
+            gtk::gdk::Key::Right => EditorNavigationKey::Right,
+            gtk::gdk::Key::Up => EditorNavigationKey::Up,
+            gtk::gdk::Key::Down => EditorNavigationKey::Down,
+            gtk::gdk::Key::Page_Up => EditorNavigationKey::PageUp,
+            gtk::gdk::Key::Page_Down => EditorNavigationKey::PageDown,
+            gtk::gdk::Key::Home => EditorNavigationKey::Home,
+            gtk::gdk::Key::End => EditorNavigationKey::End,
+            _ => return None,
+        };
+        return Some(MacEditorKeyAction::Navigate {
+            key,
+            extend_selection: modifiers == ModifierType::SHIFT_MASK,
+        });
+    }
+
     let key = keyval.to_unicode()?.to_ascii_lowercase();
     if modifiers == ModifierType::CONTROL_MASK {
         return match key {
-            'c' => Some(MacEditorControlAction::Copy),
-            'v' => Some(MacEditorControlAction::Paste),
-            'f' => Some(MacEditorControlAction::Find),
-            'z' => Some(MacEditorControlAction::Undo),
+            'c' => Some(MacEditorKeyAction::Copy),
+            'v' => Some(MacEditorKeyAction::Paste),
+            'f' => Some(MacEditorKeyAction::Find),
+            'z' => Some(MacEditorKeyAction::Undo),
             _ => None,
         };
     }
     if modifiers == (ModifierType::CONTROL_MASK | ModifierType::SHIFT_MASK) && key == 'z' {
-        return Some(MacEditorControlAction::Redo);
+        return Some(MacEditorKeyAction::Redo);
     }
     None
 }
@@ -954,37 +984,78 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_editor_control_chords_are_exact_and_leave_other_modifiers_alone() {
+    fn macos_editor_keys_route_navigation_and_leave_global_shortcuts_alone() {
         use gtk::gdk::ModifierType;
 
+        let navigation_cases = [
+            (gtk::gdk::Key::Left, EditorNavigationKey::Left),
+            (gtk::gdk::Key::Right, EditorNavigationKey::Right),
+            (gtk::gdk::Key::Up, EditorNavigationKey::Up),
+            (gtk::gdk::Key::Down, EditorNavigationKey::Down),
+            (gtk::gdk::Key::Page_Up, EditorNavigationKey::PageUp),
+            (gtk::gdk::Key::Page_Down, EditorNavigationKey::PageDown),
+            (gtk::gdk::Key::Home, EditorNavigationKey::Home),
+            (gtk::gdk::Key::End, EditorNavigationKey::End),
+        ];
+        for (keyval, key) in navigation_cases {
+            assert_eq!(
+                macos_editor_key_action(keyval, ModifierType::empty()),
+                Some(MacEditorKeyAction::Navigate {
+                    key,
+                    extend_selection: false,
+                })
+            );
+            assert_eq!(
+                macos_editor_key_action(keyval, ModifierType::SHIFT_MASK),
+                Some(MacEditorKeyAction::Navigate {
+                    key,
+                    extend_selection: true,
+                })
+            );
+        }
         assert_eq!(
-            macos_editor_control_action(gtk::gdk::Key::c, ModifierType::CONTROL_MASK),
-            Some(MacEditorControlAction::Copy)
+            macos_editor_key_action(gtk::gdk::Key::c, ModifierType::CONTROL_MASK),
+            Some(MacEditorKeyAction::Copy)
         );
         assert_eq!(
-            macos_editor_control_action(gtk::gdk::Key::v, ModifierType::CONTROL_MASK),
-            Some(MacEditorControlAction::Paste)
+            macos_editor_key_action(gtk::gdk::Key::v, ModifierType::CONTROL_MASK),
+            Some(MacEditorKeyAction::Paste)
         );
         assert_eq!(
-            macos_editor_control_action(gtk::gdk::Key::f, ModifierType::CONTROL_MASK),
-            Some(MacEditorControlAction::Find)
+            macos_editor_key_action(gtk::gdk::Key::f, ModifierType::CONTROL_MASK),
+            Some(MacEditorKeyAction::Find)
         );
         assert_eq!(
-            macos_editor_control_action(gtk::gdk::Key::z, ModifierType::CONTROL_MASK),
-            Some(MacEditorControlAction::Undo)
+            macos_editor_key_action(gtk::gdk::Key::z, ModifierType::CONTROL_MASK),
+            Some(MacEditorKeyAction::Undo)
         );
         assert_eq!(
-            macos_editor_control_action(
+            macos_editor_key_action(
                 gtk::gdk::Key::z,
                 ModifierType::CONTROL_MASK | ModifierType::SHIFT_MASK,
             ),
-            Some(MacEditorControlAction::Redo)
+            Some(MacEditorKeyAction::Redo)
         );
         assert_eq!(
-            macos_editor_control_action(
+            macos_editor_key_action(
                 gtk::gdk::Key::c,
                 ModifierType::CONTROL_MASK | ModifierType::ALT_MASK,
             ),
+            None
+        );
+        assert_eq!(
+            macos_editor_key_action(gtk::gdk::Key::Right, ModifierType::ALT_MASK),
+            None
+        );
+        assert_eq!(
+            macos_editor_key_action(
+                gtk::gdk::Key::Page_Up,
+                ModifierType::META_MASK | ModifierType::SHIFT_MASK,
+            ),
+            None
+        );
+        assert_eq!(
+            macos_editor_key_action(gtk::gdk::Key::a, ModifierType::empty()),
             None
         );
     }

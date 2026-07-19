@@ -39,4 +39,19 @@ work natively inside the editor, and the terminal-style Ctrl+Shift+C/V
 copy/paste also routes to the focused editor. Flowmux surface shortcuts
 such as Alt+W remain global.
 
+## Context behavior
+
+| Input | Terminal, browser, or Files focused | Embedded editor focused |
+|---|---|---|
+| Flowmux layout, tab, workspace, panel, window, zoom, palette, and tig shortcuts listed above | Runs the flowmux action | Runs the same flowmux action |
+| copy / paste | Targets the focused terminal or file view | Targets the editor selection or cursor |
+| terminal-search | Searches the focused terminal or browser | Searches the editor workspace |
+| Alt+Arrow | Moves focus between panes | Moves focus between panes |
+| Arrow, PageUp/PageDown, Home/End | Remains local to the focused surface | Moves the editor cursor or viewport; Shift extends the selection |
+| Text input, Enter, Tab, Backspace, Delete, and IME composition | Remains local to the focused surface | Remains entirely inside the editor |
+
+The editor only overrides local editing input. Modifier chords assigned to a
+flowmux action are handled at the window level in both contexts, so focusing an
+editor does not disable pane, tab, workspace, or panel control.
+
 See the [configuration reference](configuration.md) for the JSON shape.

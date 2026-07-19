@@ -241,6 +241,12 @@ impl WindowController {
             }
             self.worktrees.active.set(false);
             self.file_browser.active.set(true);
+            #[cfg(target_os = "macos")]
+            if let Some(pane) = self.focused_pane.get() {
+                if let Some(editor) = self.pane_registry.borrow().active_editor(pane) {
+                    editor.resign_native_focus();
+                }
+            }
             self.file_browser.panel.grab_focus();
         }
     }

@@ -914,6 +914,23 @@ impl WindowController {
         content_box.append(&agent_bar.root);
 
         let file_browser = FileBrowserPanel::new();
+        #[cfg(target_os = "macos")]
+        {
+            let focused_pane = focused_pane.clone();
+            let pane_registry = pane_registry.clone();
+            file_browser.set_keyboard_input_guard(move || {
+                let Some(pane) = focused_pane.get() else {
+                    return true;
+                };
+                let registry = pane_registry.borrow();
+                let editor_has_native_focus = registry
+                    .active_editor(pane)
+                    .is_some_and(|editor| editor.has_native_focus());
+                crate::ui::file_browser::file_browser_accepts_keyboard_input(
+                    editor_has_native_focus,
+                )
+            });
+        }
         let file_browser_for_close = file_browser.clone();
         let file_browser_active_for_close = file_browser_active.clone();
         let file_browser_source_for_close = file_browser_source_pane.clone();

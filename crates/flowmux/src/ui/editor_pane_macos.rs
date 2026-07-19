@@ -4,6 +4,7 @@
 use super::{
     handle_bridge_message, is_allowed_editor_navigation, queue_host_messages,
     should_poll_editor_documents, EditorBridgeState, EditorFocusDirectionCallback, EditorHostState,
+    EditorNavigationKey,
 };
 use flowmux_core::{EditorSessionState, PaneId, SurfaceId};
 use flowmux_editor::{
@@ -38,10 +39,10 @@ const MESSAGE_HANDLER_NAME: &str = "flowmuxEditor";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EditorKeyAction {
-    CursorLeft,
-    CursorRight,
-    CursorUp,
-    CursorDown,
+    Navigate {
+        key: EditorNavigationKey,
+        extend_selection: bool,
+    },
     Copy,
     Paste,
     Find,
@@ -405,6 +406,24 @@ impl EditorPane {
         focus_native_view(&self.native.web_view);
     }
 
+    pub(crate) fn has_native_focus(&self) -> bool {
+        let web_view = self.native.web_view.as_super();
+        let Some(responder) = web_view.window().and_then(|window| window.firstResponder()) else {
+            return false;
+        };
+        let Some(responder_view) = responder.downcast_ref::<NSView>() else {
+            return false;
+        };
+        std::ptr::eq(responder_view, web_view) || responder_view.isDescendantOf(web_view)
+    }
+
+    pub(crate) fn resign_native_focus(&self) {
+        let web_view = self.native.web_view.as_super();
+        if let Some(window) = web_view.window() {
+            let _ = window.makeFirstResponder(None);
+        }
+    }
+
     pub fn connect_focus_direction<F: FnMut(PaneId, EditorFocusDirection) + 'static>(
         &self,
         callback: F,
@@ -456,6 +475,16 @@ impl EditorPane {
         evaluate_script(
             &self.native.web_view,
             "window.flowmuxEditorKeyboard?.('redo')",
+        );
+    }
+
+    pub(crate) fn navigate(&self, key: EditorNavigationKey, extend_selection: bool) {
+        evaluate_script(
+            &self.native.web_view,
+            &format!(
+                "window.flowmuxEditorKeyboard?.('{}')",
+                key.monaco_action(extend_selection)
+            ),
         );
     }
 
@@ -764,14 +793,22 @@ fn editor_key_action(
             | ModifierType::SHIFT_MASK
             | ModifierType::SUPER_MASK
             | ModifierType::META_MASK);
-    if relevant.is_empty() {
-        return match keyval {
-            gtk::gdk::Key::Left => Some(EditorKeyAction::CursorLeft),
-            gtk::gdk::Key::Right => Some(EditorKeyAction::CursorRight),
-            gtk::gdk::Key::Up => Some(EditorKeyAction::CursorUp),
-            gtk::gdk::Key::Down => Some(EditorKeyAction::CursorDown),
-            _ => None,
+    if relevant.is_empty() || relevant == ModifierType::SHIFT_MASK {
+        let key = match keyval {
+            gtk::gdk::Key::Left => EditorNavigationKey::Left,
+            gtk::gdk::Key::Right => EditorNavigationKey::Right,
+            gtk::gdk::Key::Up => EditorNavigationKey::Up,
+            gtk::gdk::Key::Down => EditorNavigationKey::Down,
+            gtk::gdk::Key::Page_Up => EditorNavigationKey::PageUp,
+            gtk::gdk::Key::Page_Down => EditorNavigationKey::PageDown,
+            gtk::gdk::Key::Home => EditorNavigationKey::Home,
+            gtk::gdk::Key::End => EditorNavigationKey::End,
+            _ => return None,
         };
+        return Some(EditorKeyAction::Navigate {
+            key,
+            extend_selection: relevant == ModifierType::SHIFT_MASK,
+        });
     }
 
     let key = keyval.to_unicode()?.to_ascii_lowercase();
@@ -798,18 +835,16 @@ fn run_editor_key_action(web_view: &WKWebView, action: EditorKeyAction) {
         EditorKeyAction::Paste => {
             perform_native_edit(web_view, EditorNativeEditAction::Paste, None)
         }
-        EditorKeyAction::CursorLeft => {
-            evaluate_script(web_view, "window.flowmuxEditorKeyboard?.('cursorLeft')")
-        }
-        EditorKeyAction::CursorRight => {
-            evaluate_script(web_view, "window.flowmuxEditorKeyboard?.('cursorRight')")
-        }
-        EditorKeyAction::CursorUp => {
-            evaluate_script(web_view, "window.flowmuxEditorKeyboard?.('cursorUp')")
-        }
-        EditorKeyAction::CursorDown => {
-            evaluate_script(web_view, "window.flowmuxEditorKeyboard?.('cursorDown')")
-        }
+        EditorKeyAction::Navigate {
+            key,
+            extend_selection,
+        } => evaluate_script(
+            web_view,
+            &format!(
+                "window.flowmuxEditorKeyboard?.('{}')",
+                key.monaco_action(extend_selection)
+            ),
+        ),
         EditorKeyAction::Find => {
             evaluate_script(web_view, "window.flowmuxEditorKeyboard?.('find')")
         }
@@ -872,11 +907,31 @@ mod tests {
 
         assert_eq!(
             editor_key_action(Key::Left, ModifierType::empty()),
-            Some(EditorKeyAction::CursorLeft)
+            Some(EditorKeyAction::Navigate {
+                key: EditorNavigationKey::Left,
+                extend_selection: false,
+            })
         );
         assert_eq!(
             editor_key_action(Key::Up, ModifierType::empty()),
-            Some(EditorKeyAction::CursorUp)
+            Some(EditorKeyAction::Navigate {
+                key: EditorNavigationKey::Up,
+                extend_selection: false,
+            })
+        );
+        assert_eq!(
+            editor_key_action(Key::Page_Down, ModifierType::empty()),
+            Some(EditorKeyAction::Navigate {
+                key: EditorNavigationKey::PageDown,
+                extend_selection: false,
+            })
+        );
+        assert_eq!(
+            editor_key_action(Key::Home, ModifierType::SHIFT_MASK),
+            Some(EditorKeyAction::Navigate {
+                key: EditorNavigationKey::Home,
+                extend_selection: true,
+            })
         );
         assert_eq!(
             editor_key_action(Key::c, ModifierType::CONTROL_MASK),
@@ -902,6 +957,9 @@ mod tests {
             Some(EditorKeyAction::Redo)
         );
         assert_eq!(editor_key_action(Key::Right, ModifierType::ALT_MASK), None);
-        assert_eq!(editor_key_action(Key::Down, ModifierType::SHIFT_MASK), None);
+        assert_eq!(
+            editor_key_action(Key::Page_Up, ModifierType::META_MASK),
+            None
+        );
     }
 }
