@@ -401,8 +401,13 @@ impl WindowController {
         button.set_child(Some(&row));
 
         let focus_for_tab = torn.focus.clone();
+        let editor_for_tab = torn.editor.clone();
         button.connect_clicked(move |_| {
-            focus_for_tab.grab_focus();
+            if let Some(editor) = &editor_for_tab {
+                editor.grab_focus();
+            } else {
+                focus_for_tab.grab_focus();
+            }
         });
         tab.append(&button);
 
@@ -528,6 +533,7 @@ impl WindowController {
         let pane_id = torn.pane;
         let surface_id = torn.surface;
         let editor = torn.editor.clone();
+        let editor_for_focus = editor.clone();
         let pane = Self::build_torn_off_pane(torn, &title, window_ref.clone());
         stack.add_named(&pane, Some(&workspace_id.to_string()));
         stack.set_visible_child_name(&workspace_id.to_string());
@@ -588,7 +594,11 @@ impl WindowController {
         window.present();
 
         glib::idle_add_local_once(move || {
-            focus.grab_focus();
+            if let Some(editor) = editor_for_focus {
+                editor.grab_focus();
+            } else {
+                focus.grab_focus();
+            }
         });
         tracing::info!(
             pane = %pane_id,

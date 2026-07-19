@@ -1712,6 +1712,32 @@ mod tab_dnd_tests {
         ));
     }
 
+    #[test]
+    fn unhandled_tab_drag_only_tears_off_outside_source_window() {
+        assert!(should_tear_off_unhandled_drag(
+            true, false, false, false, false,
+        ));
+        assert!(!should_tear_off_unhandled_drag(
+            true, false, false, false, true,
+        ));
+    }
+
+    #[test]
+    fn handled_or_committed_tab_drag_never_tears_off() {
+        assert!(!should_tear_off_unhandled_drag(
+            false, false, false, false, false,
+        ));
+        assert!(!should_tear_off_unhandled_drag(
+            true, true, false, false, false,
+        ));
+        assert!(!should_tear_off_unhandled_drag(
+            true, false, true, false, false,
+        ));
+        assert!(!should_tear_off_unhandled_drag(
+            true, false, false, true, false,
+        ));
+    }
+
     #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     fn take_surface_for_tearoff_moves_widget_out_of_source_pane() {
@@ -1821,14 +1847,13 @@ mod tab_dnd_tests {
     }
 }
 
-/// Attach controllers that reorder terminal or browser tabs left/right within
-/// the same pane by drag and drop, and open a new window when a tab drag ends
-/// without landing on another tab.
+/// Attach controllers that reorder or move surface tabs by drag and drop, and
+/// open a new window only when a tab is released outside its source window.
 ///
 /// - `DragSource`: serializes the (PaneId, SurfaceId) pair as a flowmux-only
-///   MIME payload. PaneId is included so DropTarget can reject cross-pane moves.
-/// - `DropTargetAsync`: dropping on another tab in the same pane uses x position to
-///   choose before/after and calls the reorder callback. Cross-pane drops are rejected.
+///   MIME payload.
+/// - `DropTargetAsync`: dropping on another tab uses x position to choose
+///   before/after, reordering within a pane or moving between panes.
 fn attach_tab_dnd_handlers(
     tab: &gtk::Box,
     pane_id: PaneId,
@@ -1888,15 +1913,17 @@ fn attach_tab_dnd_handlers(
     let native_views_suspend_for_end = native_views_suspend.clone();
     drag_source.connect_drag_end(move |_, drag, delete_data| {
         let selected_action = drag.selected_action();
+        let pointer_inside_origin = drag_pointer_is_inside_origin_surface(drag);
         tracing::debug!(
             %pane_id,
             %surface_id,
             delete_data,
             selected_action = ?selected_action,
+            pointer_inside_origin,
             saw_tab_drop_target = saw_target_for_end.get(),
             "tab drag end"
         );
-        if !committed_for_end.get() && !opened_for_end.get() {
+        if pointer_inside_origin && !committed_for_end.get() && !opened_for_end.get() {
             if let Some((target_pane, direction)) = split_candidate_for_end.borrow_mut().take() {
                 saw_target_for_end.set(true);
                 committed_for_end.set(true);
@@ -1928,11 +1955,13 @@ fn attach_tab_dnd_handlers(
                 "tab drag moved to another window; closing source tab"
             );
             (close_cb_for_remote_move.borrow_mut())(pane_id, surface_id);
-        } else if selected_action.is_empty()
-            && !delete_data
-            && !saw_target_for_end.get()
-            && !opened_for_end.get()
-        {
+        } else if should_tear_off_unhandled_drag(
+            selected_action.is_empty(),
+            delete_data,
+            saw_target_for_end.get(),
+            opened_for_end.get(),
+            pointer_inside_origin,
+        ) {
             opened_for_end.set(true);
             tracing::info!(
                 %pane_id,
@@ -1958,6 +1987,7 @@ fn attach_tab_dnd_handlers(
     let native_views_suspend_for_cancel = native_views_suspend.clone();
     drag_source.connect_drag_cancel(move |_, drag, reason| {
         let selected_action = drag.selected_action();
+        let pointer_inside_origin = drag_pointer_is_inside_origin_surface(drag);
         tab_for_cancel.set_opacity(1.0);
         tab_for_cancel.remove_css_class("flowmux-pane-tab-dragging");
         tracing::debug!(
@@ -1965,10 +1995,11 @@ fn attach_tab_dnd_handlers(
             %surface_id,
             ?reason,
             selected_action = ?selected_action,
+            pointer_inside_origin,
             saw_tab_drop_target = saw_target_for_cancel.get(),
             "tab drag cancel"
         );
-        if !committed_for_cancel.get() && !opened_for_cancel.get() {
+        if pointer_inside_origin && !committed_for_cancel.get() && !opened_for_cancel.get() {
             if let Some((target_pane, direction)) = split_candidate_for_cancel.borrow_mut().take() {
                 saw_target_for_cancel.set(true);
                 committed_for_cancel.set(true);
@@ -1992,10 +2023,13 @@ fn attach_tab_dnd_handlers(
         if matches!(
             reason,
             gtk::gdk::DragCancelReason::NoTarget | gtk::gdk::DragCancelReason::Error
-        ) && selected_action.is_empty()
-            && !saw_target_for_cancel.get()
-            && !opened_for_cancel.get()
-        {
+        ) && should_tear_off_unhandled_drag(
+            selected_action.is_empty(),
+            false,
+            saw_target_for_cancel.get(),
+            opened_for_cancel.get(),
+            pointer_inside_origin,
+        ) {
             opened_for_cancel.set(true);
             tracing::info!(
                 %pane_id,
@@ -2182,6 +2216,25 @@ fn attach_tab_dnd_handlers(
         true
     });
     tab.add_controller(drop_target);
+}
+
+fn drag_pointer_is_inside_origin_surface(drag: &gtk::gdk::Drag) -> bool {
+    let origin = drag.surface();
+    drag.device().surface_at_position().0.as_ref() == Some(&origin)
+}
+
+fn should_tear_off_unhandled_drag(
+    selected_action_empty: bool,
+    delete_data: bool,
+    saw_drop_target: bool,
+    opened_new_window: bool,
+    pointer_inside_origin: bool,
+) -> bool {
+    selected_action_empty
+        && !delete_data
+        && !saw_drop_target
+        && !opened_new_window
+        && !pointer_inside_origin
 }
 
 #[cfg(target_os = "macos")]

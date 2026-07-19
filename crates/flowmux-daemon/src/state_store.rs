@@ -5831,6 +5831,51 @@ Do you want to continue?";
     }
 
     #[tokio::test]
+    async fn editor_and_browser_kinds_survive_move_and_split() {
+        let root = std::path::PathBuf::from("/tmp/flowmux-dnd-kinds");
+        let store = StateStore::new_lazy(State::default());
+        let ws = store.create_workspace(Some("w".into()), root.clone()).await;
+        let src = first_pane(&store.get_workspace(ws).await.unwrap());
+        let (_, dst) = store
+            .split_pane(src, SplitDirection::Vertical)
+            .await
+            .unwrap();
+        let (_, editor) = store.add_editor_surface_to_pane(src).await.unwrap();
+        let (_, browser) = store
+            .add_browser_surface_to_pane(src, "https://example.test".into())
+            .await
+            .unwrap();
+
+        store
+            .move_surface_to_pane(src, editor, dst, usize::MAX)
+            .await
+            .expect("editor tab move should succeed");
+        let split = store
+            .split_surface_into_pane(src, browser, dst, SplitDirection::Horizontal)
+            .await
+            .expect("browser tab split should succeed");
+
+        let workspace = store.get_workspace(ws).await.unwrap();
+        let moved_editor = workspace
+            .surfaces
+            .iter()
+            .find_map(|surface| surface.root_pane.find_surface(dst, editor));
+        assert!(matches!(
+            moved_editor.map(|surface| surface.kind),
+            Some(SurfaceKind::Editor { workspace_root, .. }) if workspace_root == root
+        ));
+        let split_browser = workspace
+            .surfaces
+            .iter()
+            .find_map(|surface| surface.root_pane.find_surface(split.new_pane, browser));
+        assert!(matches!(
+            split_browser.map(|surface| surface.kind),
+            Some(SurfaceKind::Browser { initial_url: Some(url) })
+                if url == "https://example.test"
+        ));
+    }
+
+    #[tokio::test]
     async fn split_singleton_surface_into_its_own_pane_is_noop() {
         let store = StateStore::new_lazy(State::default());
         let ws = store

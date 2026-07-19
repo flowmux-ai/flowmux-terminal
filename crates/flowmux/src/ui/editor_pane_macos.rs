@@ -562,13 +562,21 @@ fn sync_native_view_frame(native: &NativeEditorView, placeholder: &gtk::Widget) 
     let frame = NSRect::new(NSPoint::new(x, y), NSSize::new(width, height));
     let view = web_view.as_super();
     view.setFrame(frame);
-    if unsafe { view.superview() }.is_none() {
+    let current_superview = unsafe { view.superview() };
+    let needs_reparent =
+        current_superview.as_ref().map(Retained::as_ptr) != Some(Retained::as_ptr(&content_view));
+    if needs_reparent {
+        if current_superview.is_some() {
+            view.removeFromSuperview();
+        }
         content_view.addSubview(view);
         view.setAutoresizingMask(
             objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable
                 | objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable,
         );
-        if !native.attached.replace(true) {
+        if native.attached.replace(true) {
+            tracing::debug!(width, height, "editor WKWebView moved to native window");
+        } else {
             tracing::debug!(width, height, "editor WKWebView attached to native window");
         }
     }
