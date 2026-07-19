@@ -310,8 +310,13 @@ pub fn install_actions(
             .build()
     });
 
-    let copy = make_copy_action(focused.clone(), registry.clone(), clipboard_toast.clone());
-    let paste = make_paste_action(focused.clone(), registry.clone());
+    let copy = make_copy_action(
+        window.clone(),
+        focused.clone(),
+        registry.clone(),
+        clipboard_toast.clone(),
+    );
+    let paste = make_paste_action(window.clone(), focused.clone(), registry.clone());
     let insert_newline =
         make_insert_newline_action(window.clone(), focused.clone(), registry.clone());
 
@@ -781,6 +786,7 @@ fn build_quit_dialog() -> (adw::AlertDialog, oneshot::Receiver<bool>) {
 }
 
 fn make_copy_action(
+    window: adw::ApplicationWindow,
     focused: FocusedPane,
     registry: TerminalRegistry,
     clipboard_toast: ClipboardToast,
@@ -789,6 +795,15 @@ fn make_copy_action(
         .activate(move |_, _, _| {
             let Some(pane) = focused.get() else { return };
             let r = registry.borrow();
+            // A focused editor owns the copy shortcut: without this the accel
+            // would copy the pane's previous terminal tab's selection (or
+            // silently swallow the key in an editor-only pane).
+            if let Some(editor) = r.active_editor(pane) {
+                if window_focus_is_widget(&window, &editor.root.clone().upcast()) {
+                    editor.copy_selection();
+                    return;
+                }
+            }
             let Some(term) = r.active_terminal(pane) else {
                 return;
             };
@@ -826,16 +841,19 @@ fn make_insert_newline_action(
 }
 
 fn window_focus_is_terminal(window: &adw::ApplicationWindow, term: &PaneTerminal) -> bool {
+    window_focus_is_widget(window, &term.root_widget())
+}
+
+/// True when the window's focused widget is `root` or lives inside it.
+fn window_focus_is_widget(window: &adw::ApplicationWindow, root: &gtk::Widget) -> bool {
     let Some(focus) = gtk::prelude::GtkWindowExt::focus(window) else {
         return false;
     };
-    // Works for either backend: the focused widget is this terminal when it is
-    // the pane's root or a descendant of it.
-    let root = term.root_widget();
-    focus == root || focus.is_ancestor(&root)
+    focus == *root || focus.is_ancestor(root)
 }
 
 fn make_paste_action(
+    window: adw::ApplicationWindow,
     focused: FocusedPane,
     registry: TerminalRegistry,
 ) -> gtk::gio::ActionEntry<adw::ApplicationWindow> {
@@ -843,6 +861,12 @@ fn make_paste_action(
         .activate(move |_, _, _| {
             let Some(pane) = focused.get() else { return };
             let r = registry.borrow();
+            if let Some(editor) = r.active_editor(pane) {
+                if window_focus_is_widget(&window, &editor.root.clone().upcast()) {
+                    editor.paste_clipboard();
+                    return;
+                }
+            }
             let Some(term) = r.active_terminal(pane) else {
                 return;
             };

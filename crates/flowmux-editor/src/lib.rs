@@ -27,8 +27,8 @@ pub use search::{
     DEFAULT_MAX_SEARCH_RESULTS,
 };
 pub use session::{
-    EditorFileSessionState, EditorSession, EditorSessionError, EditorSessionSnapshot,
-    EditorViewState,
+    diff_base_content, EditorFileSessionState, EditorSession, EditorSessionError,
+    EditorSessionSnapshot, EditorViewState,
 };
 pub use web_assets::{EditorAssetServer, EditorAssetServerError};
 
@@ -146,6 +146,20 @@ struct Document {
     base_bytes: Vec<u8>,
     base_missing: bool,
     permissions: Permissions,
+    /// `(mtime, len)` of the disk file when it last matched `base_bytes`.
+    /// Lets `disk_status` polling skip re-reading unchanged files; the byte
+    /// compare below stays the source of truth whenever this misses.
+    base_disk: std::cell::Cell<Option<(std::time::SystemTime, u64)>>,
+}
+
+impl Document {
+    fn refresh_base_disk(&self) {
+        self.base_disk.set(
+            fs::metadata(&self.snapshot.identity_path)
+                .ok()
+                .and_then(|metadata| Some((metadata.modified().ok()?, metadata.len()))),
+        );
+    }
 }
 
 struct LoadedDocument {
@@ -228,20 +242,29 @@ impl DocumentService {
             line_ending: loaded.line_ending,
             read_only: loaded.read_only,
         };
-        self.documents.insert(
-            id,
-            Document {
-                snapshot: snapshot.clone(),
-                base_bytes: loaded.bytes,
-                base_missing: false,
-                permissions: loaded.permissions,
-            },
-        );
+        let document = Document {
+            snapshot: snapshot.clone(),
+            base_bytes: loaded.bytes,
+            base_missing: false,
+            permissions: loaded.permissions,
+            base_disk: std::cell::Cell::new(None),
+        };
+        document.refresh_base_disk();
+        self.documents.insert(id, document);
         self.identities.insert(identity_path, id);
         Ok(OpenDocument {
             document: snapshot,
             already_open: false,
         })
+    }
+
+    /// Version and dirty state without cloning the document text; used by the
+    /// external-change poll, which runs for every open document.
+    pub fn version_and_dirty(&self, id: DocumentId) -> Result<(u64, bool), DocumentError> {
+        self.documents
+            .get(&id)
+            .map(|document| (document.snapshot.version, document.snapshot.is_dirty()))
+            .ok_or(DocumentError::NotOpen(id))
     }
 
     pub fn snapshot(&self, id: DocumentId) -> Result<DocumentSnapshot, DocumentError> {
@@ -331,6 +354,7 @@ impl DocumentService {
         document.snapshot.read_only = fs::metadata(&document.snapshot.identity_path)
             .map(|metadata| metadata.permissions().readonly())
             .unwrap_or(false);
+        document.refresh_base_disk();
         Ok(document.snapshot.clone())
     }
 
@@ -408,13 +432,25 @@ impl DocumentService {
         document.snapshot.read_only = false;
         document.base_bytes = bytes;
         document.base_missing = false;
+        document.permissions = permissions;
+        document.refresh_base_disk();
         Ok(document.snapshot.clone())
     }
 
     pub fn disk_status(&self, id: DocumentId) -> Result<DiskStatus, DocumentError> {
         let document = self.documents.get(&id).ok_or(DocumentError::NotOpen(id))?;
+        if let Some((mtime, len)) = document.base_disk.get() {
+            if !document.base_missing
+                && fs::metadata(&document.snapshot.identity_path).is_ok_and(|metadata| {
+                    metadata.len() == len && metadata.modified().ok() == Some(mtime)
+                })
+            {
+                return Ok(DiskStatus::Unchanged);
+            }
+        }
         match fs::read(&document.snapshot.identity_path) {
             Ok(bytes) if !document.base_missing && bytes == document.base_bytes => {
+                document.refresh_base_disk();
                 Ok(DiskStatus::Unchanged)
             }
             Ok(_) => Ok(DiskStatus::Modified),
@@ -469,6 +505,7 @@ impl DocumentService {
                 document.base_missing = false;
                 document.permissions = metadata.permissions();
                 document.snapshot.read_only = document.permissions.readonly();
+                document.refresh_base_disk();
                 Ok(document.snapshot.clone())
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -479,6 +516,7 @@ impl DocumentService {
                 document.base_bytes.clear();
                 document.base_missing = true;
                 document.snapshot.read_only = false;
+                document.base_disk.set(None);
                 Ok(document.snapshot.clone())
             }
             Err(source) => Err(io_error("read external version", &identity_path, source)),
@@ -508,6 +546,7 @@ impl DocumentService {
         document.base_bytes = loaded.bytes;
         document.base_missing = false;
         document.permissions = loaded.permissions;
+        document.refresh_base_disk();
         Ok(document.snapshot.clone())
     }
 

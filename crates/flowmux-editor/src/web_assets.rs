@@ -100,9 +100,6 @@ impl EditorAssetServer {
     pub fn start() -> Result<Self, EditorAssetServerError> {
         let listener =
             TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(EditorAssetServerError::Bind)?;
-        listener
-            .set_nonblocking(true)
-            .map_err(EditorAssetServerError::Configure)?;
         let address = listener
             .local_addr()
             .map_err(EditorAssetServerError::Configure)?;
@@ -159,9 +156,14 @@ impl Drop for EditorAssetServer {
 }
 
 fn serve(listener: TcpListener, token: String, stopping: Arc<AtomicBool>) {
+    // Blocking accept: `Drop` sets `stopping` and then connects once to wake
+    // this thread so it can observe the flag and exit.
     while !stopping.load(Ordering::Acquire) {
         match listener.accept() {
             Ok((stream, _)) => {
+                if stopping.load(Ordering::Acquire) {
+                    break;
+                }
                 let request_token = token.clone();
                 let _ = thread::Builder::new()
                     .name("flowmux-editor-asset-request".into())
@@ -169,9 +171,7 @@ fn serve(listener: TcpListener, token: String, stopping: Arc<AtomicBool>) {
                         let _ = handle_connection(stream, &request_token);
                     });
             }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                thread::park_timeout(Duration::from_millis(5));
-            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(_) => break,
         }
     }

@@ -47,6 +47,7 @@ pub struct EditorPane {
     bridge: Rc<EditorBridgeState>,
     host: Rc<EditorHostState>,
     _asset_server: Rc<EditorAssetServer>,
+    appearance: Rc<RefCell<EditorAppearance>>,
     file_monitors: Rc<RefCell<HashMap<PathBuf, gio::FileMonitor>>>,
     file_monitor_generation: Rc<Cell<u64>>,
 }
@@ -101,6 +102,10 @@ define_class!(
 
 struct EditorNavigationDelegateIvars {
     allowed_prefix: String,
+    bridge: Rc<EditorBridgeState>,
+    host: Rc<EditorHostState>,
+    workspace_root: PathBuf,
+    appearance: Rc<RefCell<EditorAppearance>>,
 }
 
 define_class!(
@@ -178,6 +183,32 @@ define_class!(
                 WKNavigationResponsePolicy::Cancel
             },));
         }
+
+        #[unsafe(method(webViewWebContentProcessDidTerminate:))]
+        #[allow(non_snake_case)]
+        unsafe fn webViewWebContentProcessDidTerminate(&self, web_view: &WKWebView) {
+            // A crashed web content process (OOM on a large document) would
+            // otherwise leave a permanently blank pane: the bridge still
+            // thinks the page is ready. Reset it, queue a full
+            // re-initialization, and reload the page.
+            tracing::warn!("editor WKWebView web content process terminated; reloading");
+            let ivars = self.ivars();
+            ivars.bridge.reset();
+            let mut messages = vec![HostMessage::SetAppearance {
+                appearance: ivars.appearance.borrow().clone(),
+            }];
+            messages.extend(
+                ivars
+                    .host
+                    .reinitialize_messages(workspace_name(&ivars.workspace_root)),
+            );
+            for message in messages {
+                if let Err(error) = ivars.bridge.queue(message) {
+                    tracing::warn!(%error, "failed to queue editor reinitialization");
+                }
+            }
+            let _ = unsafe { web_view.reload() };
+        }
     }
 );
 
@@ -200,26 +231,26 @@ impl EditorPane {
         workspace_root: PathBuf,
         restored: EditorSessionState,
         appearance: EditorAppearance,
-    ) -> Self {
-        let asset_server = Rc::new(
-            EditorAssetServer::start()
-                .expect("the editor asset server must bind to the IPv4 loopback interface"),
-        );
+    ) -> Result<Self, String> {
+        let asset_server = Rc::new(EditorAssetServer::start().map_err(|error| error.to_string())?);
         let editor_url = asset_server
             .editor_url(&surface_id.0.to_string())
-            .expect("surface UUIDs are valid editor URL identifiers");
+            .map_err(|error| error.to_string())?;
         let allowed_prefix = editor_url
             .strip_suffix(&format!("index.html?surface={}", surface_id.0))
             .expect("editor URLs end with the generated entry point")
             .to_string();
         let bridge = Rc::new(EditorBridgeState::new(surface_id));
         let host = Rc::new(EditorHostState::new(&workspace_root, restored));
+        let appearance = Rc::new(RefCell::new(appearance));
         let mtm = MainThreadMarker::new().expect("WKWebView must be created on the main thread");
         let native = Rc::new(create_native_editor_view(
             mtm,
             bridge.clone(),
             host.clone(),
             &allowed_prefix,
+            workspace_root.clone(),
+            appearance.clone(),
         ));
 
         let viewport = gtk::DrawingArea::new();
@@ -270,10 +301,12 @@ impl EditorPane {
             bridge,
             host,
             _asset_server: asset_server,
+            appearance,
             file_monitors: Rc::new(RefCell::new(HashMap::new())),
             file_monitor_generation: Rc::new(Cell::new(0)),
         };
-        pane.apply_appearance(appearance);
+        let initial_appearance = pane.appearance.borrow().clone();
+        pane.apply_appearance(initial_appearance);
         if let Err(error) = pane.send(
             pane.host
                 .initialize_message(workspace_name(pane.workspace_root())),
@@ -310,7 +343,7 @@ impl EditorPane {
                 glib::ControlFlow::Continue
             });
         }
-        pane
+        Ok(pane)
     }
 
     pub fn pane_id(&self) -> PaneId {
@@ -338,6 +371,7 @@ impl EditorPane {
     }
 
     pub fn apply_appearance(&self, appearance: EditorAppearance) {
+        *self.appearance.borrow_mut() = appearance.clone();
         if let Err(error) = self.send(HostMessage::SetAppearance { appearance }) {
             tracing::warn!(%error, "failed to apply editor appearance");
         }
@@ -347,6 +381,19 @@ impl EditorPane {
         unsafe {
             self.native.web_view.setPageZoom(zoom.clamp(0.1, 2.0));
         }
+    }
+
+    /// Copy the editor selection when the app-level copy shortcut fires while
+    /// this surface is focused. WKWebView implements the standard responder
+    /// editing actions, so this mirrors what Cmd+C does natively.
+    pub fn copy_selection(&self) {
+        let _: () =
+            unsafe { msg_send![&*self.native.web_view, copy: None::<&objc2::runtime::AnyObject>] };
+    }
+
+    pub fn paste_clipboard(&self) {
+        let _: () =
+            unsafe { msg_send![&*self.native.web_view, paste: None::<&objc2::runtime::AnyObject>] };
     }
 
     pub fn show_workspace_search(&self) {
@@ -453,12 +500,17 @@ fn create_native_editor_view(
     bridge: Rc<EditorBridgeState>,
     host: Rc<EditorHostState>,
     allowed_prefix: &str,
+    workspace_root: PathBuf,
+    appearance: Rc<RefCell<EditorAppearance>>,
 ) -> NativeEditorView {
     let configuration = unsafe { WKWebViewConfiguration::new(mtm) };
     let preferences = unsafe { WKPreferences::new(mtm) };
     let user_content_controller = unsafe { WKUserContentController::new(mtm) };
-    let script_message_handler = EditorScriptMessageHandler::alloc(mtm)
-        .set_ivars(EditorScriptMessageHandlerIvars { bridge, host });
+    let script_message_handler =
+        EditorScriptMessageHandler::alloc(mtm).set_ivars(EditorScriptMessageHandlerIvars {
+            bridge: bridge.clone(),
+            host: host.clone(),
+        });
     let script_message_handler: Retained<EditorScriptMessageHandler> =
         unsafe { msg_send![super(script_message_handler), init] };
     let handler_name = NSString::from_str(MESSAGE_HANDLER_NAME);
@@ -484,6 +536,10 @@ fn create_native_editor_view(
     let navigation_delegate =
         EditorNavigationDelegate::alloc(mtm).set_ivars(EditorNavigationDelegateIvars {
             allowed_prefix: allowed_prefix.to_string(),
+            bridge,
+            host,
+            workspace_root,
+            appearance,
         });
     let navigation_delegate: Retained<EditorNavigationDelegate> =
         unsafe { msg_send![super(navigation_delegate), init] };

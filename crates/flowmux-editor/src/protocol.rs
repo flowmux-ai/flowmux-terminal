@@ -7,7 +7,11 @@ use std::path::{Component, Path};
 use thiserror::Error;
 
 pub const PROTOCOL_VERSION: u16 = 1;
-pub const MAX_BRIDGE_MESSAGE_BYTES: usize = DEFAULT_MAX_DOCUMENT_BYTES as usize + 64 * 1024;
+/// Envelope cap measured on the JSON-escaped wire form. JSON escaping expands
+/// document text by up to 6x (backslash-u escapes), so the cap must leave that
+/// headroom above the raw document limit: rejecting a legal document here
+/// would silently drop `DocumentChanged` and desynchronize the editor.
+pub const MAX_BRIDGE_MESSAGE_BYTES: usize = 6 * DEFAULT_MAX_DOCUMENT_BYTES as usize + 64 * 1024;
 const MAX_IDENTIFIER_BYTES: usize = 128;
 const MAX_SEARCH_QUERY_BYTES: usize = 4 * 1024;
 const MAX_SEARCH_PATH_BYTES: usize = 16 * 1024;
@@ -111,6 +115,9 @@ pub enum HostMessage {
         document_version: u64,
         change_sequence: u64,
         reason: String,
+        /// True only when the file changed on disk; lets the WebView show the
+        /// conflict actions instead of treating every failure as a conflict.
+        conflict: bool,
     },
     DocumentDiskStatus {
         document_id: String,

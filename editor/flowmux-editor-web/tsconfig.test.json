@@ -5,5 +5,11 @@
     "outDir": ".test-build",
     "rootDir": "src"
   },
-  "include": ["src/editor_state.ts", "src/language.ts", "src/protocol.ts", "src/search_state.ts"]
+  "include": [
+    "src/editor_actions.ts",
+    "src/editor_state.ts",
+    "src/language.ts",
+    "src/protocol.ts",
+    "src/search_state.ts"
+  ]
 }

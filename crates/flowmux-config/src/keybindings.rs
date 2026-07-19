@@ -665,6 +665,70 @@ mod tests {
         assert_eq!(keys, vec!["copy".to_string()]);
     }
 
+    /// The embedded editor handles its own shortcuts inside the WebView:
+    /// Ctrl/Cmd+F find, +H replace, +S save, +P quick open, +W close
+    /// document, the Shift/Alt save variants, and Alt+Z word wrap. A global
+    /// accelerator on any of these would swallow the key before the focused
+    /// editor ever sees it, so the defaults must leave them unbound.
+    /// (Ctrl/Cmd+Shift+F is deliberately global: the terminal-search action
+    /// routes to the editor's workspace search when an editor is focused.)
+    #[test]
+    fn defaults_leave_editor_local_shortcuts_unbound() {
+        let reserved = [
+            "<primary>f",
+            "<primary>h",
+            "<primary>s",
+            "<primary>p",
+            "<primary>w",
+            "<primary><shift>s",
+            "<primary><alt>s",
+            "<alt>z",
+        ];
+        for (action, accels) in KeybindingOverrides::default().resolve() {
+            for accel in accels {
+                let normalized = accel
+                    .to_ascii_lowercase()
+                    .replace("<ctrl>", "<primary>")
+                    .replace("<control>", "<primary>")
+                    .replace("<meta>", "<primary>");
+                assert!(
+                    !reserved.contains(&normalized.as_str()),
+                    "global default {accel} on {} would shadow an editor shortcut",
+                    action.as_str(),
+                );
+            }
+        }
+    }
+
+    /// On Linux the editor relies on the native chords for clipboard and
+    /// selection work — Ctrl+C/X/V copy/cut/paste, Ctrl+A select all,
+    /// Ctrl+Z/Y undo/redo — reaching the focused WebView untouched. The
+    /// terminal carve-out uses Ctrl+Shift+C/V precisely so these stay free;
+    /// binding any of them globally would break basic editing. (macOS binds
+    /// Cmd+C/V globally on purpose: the copy/paste actions route to the
+    /// focused editor.)
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn linux_defaults_leave_native_editing_chords_unbound() {
+        let reserved = ["c", "x", "v", "a", "z", "y"];
+        for (action, accels) in KeybindingOverrides::default().resolve() {
+            for accel in accels {
+                let normalized = accel
+                    .to_ascii_lowercase()
+                    .replace("<ctrl>", "<primary>")
+                    .replace("<control>", "<primary>");
+                for key in reserved {
+                    assert_ne!(
+                        normalized,
+                        format!("<primary>{key}"),
+                        "global default {accel} on {} would break native editing in the editor",
+                        action.as_str(),
+                    );
+                }
+            }
+        }
+    }
+
     /// Multi-accel actions (Prev workspace has three) must serialize as
     /// an array and round-trip without reordering surprises.
     #[test]

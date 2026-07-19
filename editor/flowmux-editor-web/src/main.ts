@@ -9,6 +9,11 @@ import "monaco-editor/esm/vs/language/json/monaco.contribution.js";
 import "monaco-editor/esm/vs/language/typescript/monaco.contribution.js";
 import "./styles.css";
 
+import {
+  EDITOR_ACTION_SPECS,
+  monacoKeybinding,
+  type EditorActionRunner,
+} from "./editor_actions";
 import { adjustedFontSize, conflictUiState, visibleDocumentState } from "./editor_state";
 import { languageForPath } from "./language";
 import { commaSeparatedGlobs, rankQuickOpen } from "./search_state";
@@ -62,7 +67,21 @@ interface OpenDocument {
   suppressChanges: boolean;
   diskStatus: DocumentDiskStatus;
   restoreViewPending: boolean;
+  /** Last save failure that was not a disk conflict; cleared on edit or save. */
+  saveError: string | null;
+  /** Content edits not yet sent to the host (throttled, see syncDocument). */
+  pendingChanges: boolean;
+  changeTimer: ReturnType<typeof setTimeout> | null;
 }
+
+/**
+ * Content sync is throttled: the first change in a burst arms the timer, and
+ * everything typed inside the window rides along in one message. The full
+ * document crosses the bridge per message, so per-keystroke sends make large
+ * files janky. Any message that carries a document version must call
+ * syncDocument() first — the host rejects version gaps.
+ */
+const CHANGE_SYNC_DELAY_MS = 150;
 
 interface RecoveryProposal {
   documentId: string;
@@ -159,6 +178,7 @@ const DEFAULT_APPEARANCE: EditorAppearance = {
 const EDITOR_THEME = "flowmux-editor";
 const EDITOR_FONT_FALLBACKS =
   'SFMono-Regular, "Cascadia Code", "Noto Sans Mono CJK KR", "Noto Sans Mono", "Apple SD Gothic Neo", "Hiragino Sans", monospace';
+let appliedAppearance = DEFAULT_APPEARANCE;
 defineEditorTheme(DEFAULT_APPEARANCE);
 
 const editor = monaco.editor.create(editorContainer, {
@@ -166,7 +186,6 @@ const editor = monaco.editor.create(editorContainer, {
   theme: EDITOR_THEME,
   fontFamily: editorFontFamily(DEFAULT_APPEARANCE.fontFamily),
   fontSize: 13,
-  lineHeight: 20,
   lineNumbers: "on",
   cursorBlinking: "blink",
   cursorSmoothCaretAnimation: "off",
@@ -228,87 +247,72 @@ for (const input of [searchInclude, searchExclude]) {
   input.addEventListener("input", () => scheduleWorkspaceSearch());
 }
 
-editor.addAction({
-  id: "flowmux.save",
-  label: "Save",
-  keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS],
-  run: () => requestSave(),
-});
-
-editor.addAction({
-  id: "flowmux.quickOpen",
-  label: "Quick Open",
-  keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyP],
-  run: () => showQuickOpen(),
-});
-
-editor.addAction({
-  id: "flowmux.workspaceSearch",
-  label: "Find in Workspace",
-  keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyF],
-  run: () => showWorkspaceSearch(),
-});
-
-editor.addAction({
-  id: "flowmux.saveAll",
-  label: "Save All",
-  keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyMod.Alt | monaco.KeyCode.KeyS],
-  run: () => requestSaveAll(),
-});
-
-editor.addAction({
-  id: "flowmux.saveAs",
-  label: "Save As",
-  keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyS],
-  run: () => showSaveAsDialog(),
-});
-
-editor.addAction({
-  id: "flowmux.closeDocument",
-  label: "Close Current Document",
-  keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyW],
-  run: () => requestCloseActiveDocument(),
-});
-
-editor.addAction({
-  id: "flowmux.toggleWordWrap",
-  label: "Toggle Word Wrap",
-  keybindings: [monaco.KeyMod.Alt | monaco.KeyCode.KeyZ],
-  run: () => {
-    wordWrapEnabled = !wordWrapEnabled;
-    editor.updateOptions({ wordWrap: wordWrapEnabled ? "on" : "off" });
+// One handler per runner name in the shared action table. `target` is the
+// editor the shortcut fired in, so Find/Replace open their widget inside the
+// diff editor's modified pane as well as the main editor.
+const editorActionRunners: Record<
+  EditorActionRunner,
+  (target: monaco.editor.ICodeEditor) => void
+> = {
+  save: () => requestSave(),
+  saveAs: () => showSaveAsDialog(),
+  saveAll: () => requestSaveAll(),
+  find: (target) => {
+    void target.getAction("actions.find")?.run();
   },
-});
-
-editor.addAction({
-  id: "flowmux.toggleMinimap",
-  label: "Toggle Minimap",
-  run: () => {
+  replace: (target) => {
+    // Monaco disables the replace action on read-only editors; falling back
+    // to plain find keeps Ctrl+H responsive there.
+    const replace = target.getAction("editor.action.startFindReplaceAction");
+    if (replace !== null && target.getOption(monaco.editor.EditorOption.readOnly) === false) {
+      void replace.run();
+    } else {
+      void target.getAction("actions.find")?.run();
+    }
+  },
+  quickOpen: () => showQuickOpen(),
+  workspaceSearch: () => showWorkspaceSearch(),
+  closeDocument: () => requestCloseActiveDocument(),
+  toggleWordWrap: () => {
+    wordWrapEnabled = !wordWrapEnabled;
+    const wordWrap = wordWrapEnabled ? "on" : "off";
+    editor.updateOptions({ wordWrap });
+    diffEditor?.updateOptions({ wordWrap });
+  },
+  toggleMinimap: () => {
     minimapEnabled = !minimapEnabled;
     editor.updateOptions({ minimap: { enabled: minimapEnabled } });
   },
-});
+  increaseFontSize: () => setEditorFontSize(adjustedFontSize(editorFontSize, 1)),
+  decreaseFontSize: () => setEditorFontSize(adjustedFontSize(editorFontSize, -1)),
+  resetFontSize: () => setEditorFontSize(13),
+};
 
-editor.addAction({
-  id: "flowmux.increaseFontSize",
-  label: "Increase Editor Font Size",
-  keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.Equal],
-  run: () => setEditorFontSize(adjustedFontSize(editorFontSize, 1)),
-});
+// Registered on the main editor and on the diff editor's modified pane so
+// every shortcut keeps working in Diff mode. The chord table lives in
+// editor_actions.ts where the Node test suite pins the assignments
+// (Ctrl+F find, Ctrl+H replace, Ctrl+S save on Linux, Cmd on macOS).
+const sharedEditorActions: monaco.editor.IActionDescriptor[] = EDITOR_ACTION_SPECS.map(
+  (spec) => ({
+    id: spec.id,
+    label: spec.label,
+    keybindings:
+      spec.chord === null
+        ? undefined
+        : [
+            monacoKeybinding(
+              spec.chord,
+              monaco.KeyMod,
+              monaco.KeyCode as unknown as Record<string, number>,
+            ),
+          ],
+    run: (target) => editorActionRunners[spec.run](target),
+  }),
+);
 
-editor.addAction({
-  id: "flowmux.decreaseFontSize",
-  label: "Decrease Editor Font Size",
-  keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.Minus],
-  run: () => setEditorFontSize(adjustedFontSize(editorFontSize, -1)),
-});
-
-editor.addAction({
-  id: "flowmux.resetFontSize",
-  label: "Reset Editor Font Size",
-  keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.Digit0],
-  run: () => setEditorFontSize(13),
-});
+for (const action of sharedEditorActions) {
+  editor.addAction(action);
+}
 
 window.flowmuxEditorHost = {
   receive(message: unknown): void {
@@ -338,6 +342,7 @@ function handleHostMessage(message: HostMessage): void {
       closeSaveAsDialog(false);
       closeDiffView(false);
       for (const document of [...documents.values()]) {
+        clearChangeTimer(document);
         document.model.dispose();
       }
       documents.clear();
@@ -364,6 +369,7 @@ function handleHostMessage(message: HostMessage): void {
         document.payload.dirty = false;
         document.payload.externalChange = false;
         document.diskStatus = "unchanged";
+        document.saveError = null;
         renderState();
         if (closeAfterSaveDocumentId === document.payload.id) {
           closeAfterSaveDocumentId = null;
@@ -378,10 +384,18 @@ function handleHostMessage(message: HostMessage): void {
         if (closeAfterSaveDocumentId === document.payload.id) {
           closeAfterSaveDocumentId = null;
         }
-        document.payload.externalChange = true;
-        document.diskStatus = "modified";
+        if (message.conflict) {
+          document.payload.externalChange = true;
+          document.diskStatus = "modified";
+        } else {
+          // A permissions or I/O failure is not a conflict; offering
+          // "Reload from disk" here would throw the user's edits away.
+          document.saveError = message.reason;
+        }
         renderState();
-        conflictMessage.textContent = message.reason;
+        if (message.conflict && message.documentId === activeDocumentId) {
+          conflictMessage.textContent = message.reason;
+        }
       }
       break;
     }
@@ -424,8 +438,12 @@ function handleHostMessage(message: HostMessage): void {
       break;
     }
     case "document_disk_status": {
+      // No version guard: disk status is not version-sensitive, and the host
+      // only reports each transition once. Matching on the version would drop
+      // the notification whenever an edit is in flight, hiding the conflict
+      // until a save fails.
       const document = documents.get(message.documentId);
-      if (document !== undefined && document.payload.version === message.documentVersion) {
+      if (document !== undefined) {
         document.diskStatus = message.status;
         document.payload.externalChange = message.status !== "unchanged";
         renderState();
@@ -494,15 +512,32 @@ function addOrReplaceDocument(payload: DocumentPayload): void {
     if (diffDocumentId === payload.id) {
       closeDiffView(false);
     }
+    // The host's replacement supersedes anything typed but not yet synced.
+    clearChangeTimer(existing);
+    existing.pendingChanges = false;
     const viewState = activeDocumentId === payload.id ? editor.saveViewState() : null;
     existing.suppressChanges = true;
-    existing.model.setValue(payload.content);
+    if (existing.model.getValue() !== payload.content) {
+      // pushEditOperations instead of setValue so an external reload (e.g.
+      // `git checkout`) does not destroy the undo history.
+      existing.model.pushEditOperations(
+        [],
+        [{ range: existing.model.getFullModelRange(), text: payload.content }],
+        () => null,
+      );
+      existing.model.pushStackElement();
+    }
     monaco.editor.setModelLanguage(existing.model, payload.language ?? languageForPath(payload.relativePath));
     existing.payload = { ...payload };
     existing.diskStatus = payload.externalChange ? "modified" : "unchanged";
+    existing.saveError = null;
     existing.suppressChanges = false;
     if (viewState !== null) {
       editor.restoreViewState(viewState);
+    } else if (activeDocumentId !== payload.id) {
+      // A background document replaced by the host should reopen at the
+      // cursor position the payload carries, not at line 1.
+      existing.restoreViewPending = true;
     }
     renderState();
     return;
@@ -520,6 +555,9 @@ function addOrReplaceDocument(payload: DocumentPayload): void {
     suppressChanges: false,
     diskStatus: payload.externalChange ? "modified" : "unchanged",
     restoreViewPending: true,
+    saveError: null,
+    pendingChanges: false,
+    changeTimer: null,
   };
   model.onDidChangeContent(() => {
     if (document.suppressChanges) {
@@ -529,22 +567,43 @@ function addOrReplaceDocument(payload: DocumentPayload): void {
       closeAfterSaveDocumentId = null;
     }
     document.payload.dirty = true;
-    const edit = advanceDocumentEdit(document.payload.version, document.changeSequence);
-    document.payload.version = edit.nextVersion;
-    document.changeSequence = edit.changeSequence;
-    postToHost({
-      protocolVersion: PROTOCOL_VERSION,
-      surfaceId,
-      type: "document_changed",
-      documentId: document.payload.id,
-      documentVersion: edit.baseVersion,
-      changeSequence: edit.changeSequence,
-      content: model.getValue(),
-    });
+    document.saveError = null;
+    document.pendingChanges = true;
+    if (document.changeTimer === null) {
+      document.changeTimer = setTimeout(() => syncDocument(document), CHANGE_SYNC_DELAY_MS);
+    }
     renderState();
   });
   documents.set(payload.id, document);
   renderState();
+}
+
+function clearChangeTimer(document: OpenDocument): void {
+  if (document.changeTimer !== null) {
+    clearTimeout(document.changeTimer);
+    document.changeTimer = null;
+  }
+}
+
+/** Flush throttled edits so the host's document version catches up. */
+function syncDocument(document: OpenDocument): void {
+  clearChangeTimer(document);
+  if (!document.pendingChanges) {
+    return;
+  }
+  document.pendingChanges = false;
+  const edit = advanceDocumentEdit(document.payload.version, document.changeSequence);
+  document.payload.version = edit.nextVersion;
+  document.changeSequence = edit.changeSequence;
+  postToHost({
+    protocolVersion: PROTOCOL_VERSION,
+    surfaceId,
+    type: "document_changed",
+    documentId: document.payload.id,
+    documentVersion: edit.baseVersion,
+    changeSequence: edit.changeSequence,
+    content: document.model.getValue(),
+  });
 }
 
 function activateDocument(documentId: string | null): void {
@@ -570,6 +629,7 @@ function activateDocument(documentId: string | null): void {
       document.restoreViewPending = false;
     }
     if (previousDocumentId !== document.payload.id) {
+      syncDocument(document);
       postToHost({
         protocolVersion: PROTOCOL_VERSION,
         surfaceId,
@@ -606,6 +666,7 @@ function closeDocument(documentId: string): void {
       recoveryQueue.splice(index, 1);
     }
   }
+  clearChangeTimer(document);
   document.model.dispose();
   documents.delete(documentId);
   if (activeDocumentId === documentId) {
@@ -616,6 +677,7 @@ function closeDocument(documentId: string): void {
 }
 
 function requestClose(document: OpenDocument): void {
+  syncDocument(document);
   postToHost({
     protocolVersion: PROTOCOL_VERSION,
     surfaceId,
@@ -680,6 +742,7 @@ function discardCloseDialogDocument(): void {
     return;
   }
   hideCloseDialog();
+  syncDocument(document);
   postToHost({
     protocolVersion: PROTOCOL_VERSION,
     surfaceId,
@@ -758,6 +821,7 @@ function requestConflictAction(action: "compare" | "keep_mine" | "reload_from_di
   if (document === undefined || !document.payload.externalChange) {
     return;
   }
+  syncDocument(document);
   postToHost({
     protocolVersion: PROTOCOL_VERSION,
     surfaceId,
@@ -773,6 +837,7 @@ function requestDiffView(): void {
   if (document === undefined || diffDocumentId === document.payload.id) {
     return;
   }
+  syncDocument(document);
   postToHost({
     protocolVersion: PROTOCOL_VERSION,
     surfaceId,
@@ -795,9 +860,8 @@ function showDiff(document: OpenDocument, diskContent: string): void {
     diffEditor = monaco.editor.createDiffEditor(diffEditorContainer, {
       automaticLayout: true,
       theme: EDITOR_THEME,
-      fontFamily: editorFontFamily(DEFAULT_APPEARANCE.fontFamily),
+      fontFamily: editorFontFamily(appliedAppearance.fontFamily),
       fontSize: editorFontSize,
-      lineHeight: 20,
       lineNumbers: "on",
       cursorBlinking: "blink",
       cursorSmoothCaretAnimation: "off",
@@ -806,20 +870,21 @@ function showDiff(document: OpenDocument, diskContent: string): void {
       renderSideBySide: true,
       scrollBeyondLastLine: false,
       originalEditable: false,
+      wordWrap: wordWrapEnabled ? "on" : "off",
     });
-    diffEditor.getModifiedEditor().addAction({
-      id: "flowmux.diff.save",
-      label: "Save",
-      keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS],
-      run: () => requestSave(),
-    });
-    diffEditor.getModifiedEditor().addAction({
-      id: "flowmux.diff.saveAs",
-      label: "Save As",
-      keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyS],
-      run: () => showSaveAsDialog(),
+    const modified = diffEditor.getModifiedEditor();
+    for (const action of sharedEditorActions) {
+      modified.addAction(action);
+    }
+    modified.addAction({
+      id: "flowmux.diff.close",
+      label: "Close Diff",
+      keybindings: [monaco.KeyCode.Escape],
+      precondition: "!findWidgetVisible",
+      run: () => closeDiffView(),
     });
   }
+  diffEditor.getModifiedEditor().updateOptions({ readOnly: document.payload.readOnly });
   diffEditor.setModel({ original: diffOriginalModel, modified: document.model });
   diffDocumentId = document.payload.id;
   renderState();
@@ -869,6 +934,7 @@ function submitSaveAs(): void {
     return;
   }
   saveAsError.textContent = "Saving…";
+  syncDocument(document);
   postToHost({
     protocolVersion: PROTOCOL_VERSION,
     surfaceId,
@@ -955,6 +1021,11 @@ function closeSearchDialog(): void {
 
 function searchInputChanged(): void {
   if (searchMode === "quick") {
+    // The file index is still loading; rendering now would flash
+    // "0 matching files". The completion handler re-renders with this query.
+    if (activeSearchRequestId !== null) {
+      return;
+    }
     renderQuickOpen();
   } else {
     scheduleWorkspaceSearch();
@@ -1109,7 +1180,7 @@ function appendSearchResult(
     button.append(previewLabel);
   }
   button.addEventListener("click", () => openSearchResult(index));
-  button.addEventListener("mousemove", () => selectSearchResult(index));
+  button.addEventListener("mouseenter", () => selectSearchResult(index));
   searchResults.append(button);
 }
 
@@ -1130,15 +1201,21 @@ function selectSearchResult(index: number): void {
   if (renderedSearchResults.length === 0) {
     return;
   }
-  selectedSearchResult = Math.max(0, Math.min(index, renderedSearchResults.length - 1));
-  searchResults.querySelectorAll<HTMLButtonElement>(".search-result").forEach((element) => {
-    const selected = Number(element.dataset.index) === selectedSearchResult;
-    element.classList.toggle("is-selected", selected);
-    element.setAttribute("aria-selected", String(selected));
-    if (selected) {
-      element.scrollIntoView({ block: "nearest" });
-    }
-  });
+  const next = Math.max(0, Math.min(index, renderedSearchResults.length - 1));
+  // Touch only the two affected rows: this runs per mouseenter and per arrow
+  // key over a list of up to 500 results.
+  const previous = searchResults.children[selectedSearchResult];
+  if (previous instanceof HTMLElement) {
+    previous.classList.remove("is-selected");
+    previous.setAttribute("aria-selected", "false");
+  }
+  selectedSearchResult = next;
+  const selected = searchResults.children[next];
+  if (selected instanceof HTMLElement) {
+    selected.classList.add("is-selected");
+    selected.setAttribute("aria-selected", "true");
+    selected.scrollIntoView({ block: "nearest" });
+  }
 }
 
 function openSearchResult(index: number): void {
@@ -1189,6 +1266,7 @@ function reportActiveViewState(): void {
   document.payload.cursorLine = Math.max(0, position.lineNumber - 1);
   document.payload.cursorColumn = Math.max(0, position.column - 1);
   document.payload.scrollTop = Math.max(0, editor.getScrollTop());
+  syncDocument(document);
   postToHost({
     protocolVersion: PROTOCOL_VERSION,
     surfaceId,
@@ -1206,6 +1284,7 @@ function requestSave(documentId: string | null = activeDocumentId): void {
   if (document === undefined || document.payload.readOnly || !document.payload.dirty) {
     return;
   }
+  syncDocument(document);
   postToHost({
     protocolVersion: PROTOCOL_VERSION,
     surfaceId,
@@ -1246,6 +1325,7 @@ function defineEditorTheme(appearance: EditorAppearance): void {
 }
 
 function applyAppearance(appearance: EditorAppearance): void {
+  appliedAppearance = appearance;
   defineEditorTheme(appearance);
   monaco.editor.setTheme(EDITOR_THEME);
   const fontFamily = editorFontFamily(appearance.fontFamily);
@@ -1302,9 +1382,15 @@ function renderState(): void {
     active.payload.readOnly,
     active.payload.dirty,
   );
-  documentState.textContent = state.text;
-  documentState.className = `document-state${state.kind === "normal" ? "" : ` is-${state.kind}`}`;
-  documentState.hidden = state.hidden || active.payload.externalChange;
+  if (active.saveError !== null) {
+    documentState.textContent = active.saveError;
+    documentState.className = "document-state is-conflict";
+    documentState.hidden = false;
+  } else {
+    documentState.textContent = state.text;
+    documentState.className = `document-state${state.kind === "normal" ? "" : ` is-${state.kind}`}`;
+    documentState.hidden = state.hidden || active.payload.externalChange;
+  }
   renderConflictBanner(active, showingDiff);
 }
 

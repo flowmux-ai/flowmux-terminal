@@ -93,6 +93,7 @@ export type HostMessage =
       documentVersion: number;
       changeSequence: number;
       reason: string;
+      conflict: boolean;
     })
   | (HostMessageBase & {
       type: "document_disk_status";
@@ -296,7 +297,8 @@ export function isHostMessage(value: unknown): value is HostMessage {
         typeof value.documentId === "string" &&
         isVersion(value.documentVersion) &&
         isVersion(value.changeSequence) &&
-        typeof value.reason === "string"
+        typeof value.reason === "string" &&
+        typeof value.conflict === "boolean"
       );
     case "document_disk_status":
       return (

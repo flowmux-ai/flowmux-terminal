@@ -33,7 +33,10 @@ When the embedded editor has focus, it also provides its local editing
 shortcuts: Ctrl/Cmd+S saves, Ctrl/Cmd+Shift+S opens Save As,
 Ctrl/Cmd+Alt+S saves all, Ctrl/Cmd+F and Ctrl/Cmd+H find and replace,
 Ctrl/Cmd+P opens a file, Ctrl/Cmd+Shift+F searches the workspace, and
-Ctrl/Cmd+W closes the current document. Flowmux surface shortcuts such as
-Alt+W remain global.
+Ctrl/Cmd+W closes the current document. Standard editing chords —
+Ctrl/Cmd+C/X/V copy/cut/paste, Ctrl/Cmd+A select all, Ctrl/Cmd+Z undo —
+work natively inside the editor, and the terminal-style Ctrl+Shift+C/V
+copy/paste also routes to the focused editor. Flowmux surface shortcuts
+such as Alt+W remain global.
 
 See the [configuration reference](configuration.md) for the JSON shape.

@@ -11,7 +11,10 @@ use tempfile::NamedTempFile;
 use thiserror::Error;
 
 pub const RECOVERY_FORMAT_VERSION: u16 = 1;
-const MAX_RECOVERY_FILE_BYTES: u64 = DEFAULT_MAX_DOCUMENT_BYTES + 1024 * 1024;
+// JSON escaping expands content up to 6x; a legal document must always fit.
+const MAX_RECOVERY_FILE_BYTES: u64 = 6 * DEFAULT_MAX_DOCUMENT_BYTES + 1024 * 1024;
+/// Snapshots for files that are never reopened would otherwise live forever.
+const PRUNE_AFTER: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 60 * 60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -111,11 +114,10 @@ impl RecoveryStore {
         let workspace_root = fs::canonicalize(workspace_root.as_ref())
             .map_err(|source| recovery_io("resolve workspace", workspace_root.as_ref(), source))?;
         let workspace_id = content_hash(workspace_root.to_string_lossy().as_bytes());
-        let directory = state_root
-            .as_ref()
-            .join("editor-recovery")
-            .join(&workspace_id);
+        let recovery_root = state_root.as_ref().join("editor-recovery");
+        let directory = recovery_root.join(&workspace_id);
         create_private_directory(&directory)?;
+        prune_stale_snapshots(&recovery_root);
         Ok(Self {
             workspace_id,
             directory,
@@ -245,6 +247,32 @@ impl RecoveryStore {
             "{}.json",
             content_hash(identity_path.as_ref().to_string_lossy().as_bytes())
         ))
+    }
+}
+
+/// Best-effort removal of month-old snapshots across all workspaces; failures
+/// are ignored because recovery must never block the editor from starting.
+fn prune_stale_snapshots(recovery_root: &Path) {
+    let now = std::time::SystemTime::now();
+    let Ok(workspaces) = fs::read_dir(recovery_root) else {
+        return;
+    };
+    for workspace in workspaces.flatten() {
+        let Ok(snapshots) = fs::read_dir(workspace.path()) else {
+            continue;
+        };
+        for snapshot in snapshots.flatten() {
+            let stale = snapshot
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .is_ok_and(|modified| {
+                    now.duration_since(modified)
+                        .is_ok_and(|age| age > PRUNE_AFTER)
+                });
+            if stale {
+                let _ = fs::remove_file(snapshot.path());
+            }
+        }
     }
 }
 

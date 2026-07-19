@@ -3,10 +3,10 @@
 
 use flowmux_core::{EditorFileState, EditorSessionState, SurfaceId};
 use flowmux_editor::{
-    index_workspace_files, javascript_for_host_message, parse_editor_message, search_workspace,
-    EditorFileSessionState, EditorMessage, EditorSession, EditorSessionSnapshot, EditorViewState,
-    HostMessage, ProtocolError, RecoveryOperation, RecoveryStore, SearchCancellation,
-    SearchOptions, WorkspaceSearchResult,
+    diff_base_content, index_workspace_files, javascript_for_host_message, parse_editor_message,
+    search_workspace, EditorFileSessionState, EditorMessage, EditorSession, EditorSessionSnapshot,
+    EditorViewState, HostMessage, ProtocolError, RecoveryOperation, RecoveryStore,
+    SearchCancellation, SearchOptions, WorkspaceSearchResult,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -44,6 +44,12 @@ struct SearchWorker {
     receiver: Receiver<SearchWorkerMessage>,
 }
 
+/// Fetches the diff base (`git` + disk read) off the UI thread; the result is
+/// picked up by the same tick that polls search workers.
+struct DiffWorker {
+    receiver: Receiver<HostMessage>,
+}
+
 #[derive(Default)]
 pub(super) struct EditorBridgeReceive {
     scripts: Vec<String>,
@@ -63,6 +69,14 @@ impl EditorBridgeState {
             ready: Cell::new(false),
             pending: RefCell::new(Vec::new()),
         }
+    }
+
+    /// Forget readiness and queued messages after the WebView's web process
+    /// dies: the reloaded page starts from scratch and reports `editor_ready`
+    /// again, which drains whatever is queued after this reset.
+    pub(super) fn reset(&self) {
+        self.ready.set(false);
+        self.pending.borrow_mut().clear();
     }
 
     pub(super) fn queue(&self, message: HostMessage) -> Result<Option<String>, ProtocolError> {
@@ -129,8 +143,9 @@ pub(super) struct EditorHostState {
     startup_messages: RefCell<Vec<HostMessage>>,
     recovery_sender: Option<Sender<RecoveryOperation>>,
     pending_recovery: RefCell<HashMap<PathBuf, RecoveryOperation>>,
-    recovery_generation: Cell<u64>,
+    recovery_flush_pending: Cell<bool>,
     search_worker: RefCell<Option<SearchWorker>>,
+    diff_worker: RefCell<Option<DiffWorker>>,
 }
 
 impl EditorHostState {
@@ -185,8 +200,9 @@ impl EditorHostState {
             startup_messages: RefCell::new(startup_messages),
             recovery_sender,
             pending_recovery: RefCell::new(HashMap::new()),
-            recovery_generation: Cell::new(0),
+            recovery_flush_pending: Cell::new(false),
             search_worker: RefCell::new(None),
+            diff_worker: RefCell::new(None),
         };
         host.stage_recovery_operations();
         host
@@ -205,6 +221,16 @@ impl EditorHostState {
 
     pub(super) fn take_startup_messages(&self) -> Vec<HostMessage> {
         std::mem::take(&mut *self.startup_messages.borrow_mut())
+    }
+
+    /// Everything a freshly reloaded page needs after a web-process crash:
+    /// the full document set plus any still-undecided recovery proposals.
+    pub(super) fn reinitialize_messages(&self, workspace_name: String) -> Vec<HostMessage> {
+        let mut messages = vec![self.initialize_message(workspace_name)];
+        if let Ok(session) = &*self.session.borrow() {
+            messages.extend(session.pending_recovery_messages());
+        }
+        messages
     }
 
     pub(super) fn session_state(&self) -> EditorSessionState {
@@ -269,6 +295,10 @@ impl EditorHostState {
                 column,
                 length,
             } => self.open_search_result(path, line, column, length),
+            EditorMessage::DiffRequested {
+                document_id,
+                document_version,
+            } => self.start_diff(document_id, document_version),
             message => self.handle_session_message(message),
         }
     }
@@ -392,6 +422,64 @@ impl EditorHostState {
         Vec::new()
     }
 
+    fn start_diff(&self, document_id: String, document_version: u64) -> Vec<HostMessage> {
+        let target = match &*self.session.borrow() {
+            Ok(session) => session.diff_target(&document_id, document_version),
+            Err(error) => {
+                tracing::warn!(%error, "editor document session is unavailable");
+                return Vec::new();
+            }
+        };
+        let target = match target {
+            Ok(target) => target,
+            Err(error) => {
+                tracing::warn!(%error, "editor diff request was rejected");
+                return Vec::new();
+            }
+        };
+        let root = self.workspace_root.clone();
+        let (sender, receiver) = mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("flowmux-editor-diff".into())
+            .spawn(move || {
+                let disk_content = diff_base_content(&root, &target);
+                let _ = sender.send(HostMessage::ShowDiff {
+                    document_id,
+                    document_version,
+                    disk_content,
+                });
+            });
+        match spawned {
+            // A newer request replaces the pending worker; its stale result
+            // would be rejected by the WebView's version check anyway.
+            Ok(_) => *self.diff_worker.borrow_mut() = Some(DiffWorker { receiver }),
+            Err(error) => tracing::warn!(%error, "failed to start editor diff worker"),
+        }
+        Vec::new()
+    }
+
+    fn poll_diff_messages(&self) -> Vec<HostMessage> {
+        let received = {
+            let worker = self.diff_worker.borrow();
+            let Some(worker) = worker.as_ref() else {
+                return Vec::new();
+            };
+            match worker.receiver.try_recv() {
+                Ok(message) => Some(message),
+                Err(TryRecvError::Empty) => return Vec::new(),
+                Err(TryRecvError::Disconnected) => None,
+            }
+        };
+        self.diff_worker.borrow_mut().take();
+        match received {
+            Some(message) => vec![message],
+            None => {
+                tracing::warn!("editor diff worker stopped unexpectedly");
+                Vec::new()
+            }
+        }
+    }
+
     fn cancel_search(&self, request_id: &str) {
         let matches = self
             .search_worker
@@ -434,6 +522,12 @@ impl EditorHostState {
     }
 
     pub(super) fn poll_search_messages(&self) -> Vec<HostMessage> {
+        let mut messages = self.poll_diff_messages();
+        messages.extend(self.poll_search_worker_messages());
+        messages
+    }
+
+    fn poll_search_worker_messages(&self) -> Vec<HostMessage> {
         let received = {
             let workers = self.search_worker.borrow();
             let Some(worker) = workers.as_ref() else {
@@ -513,10 +607,6 @@ impl EditorHostState {
                 }
             }
         }
-        if has_write {
-            self.recovery_generation
-                .set(self.recovery_generation.get().wrapping_add(1));
-        }
         has_write
     }
 
@@ -557,6 +647,12 @@ impl EditorHostState {
 
 impl Drop for EditorHostState {
     fn drop(&mut self) {
+        // The throttled flush timer holds only a weak reference; without this
+        // final flush any recovery snapshot staged in the last few hundred
+        // milliseconds would be lost when the surface is torn down (pane
+        // close, workspace rerender, app quit).
+        self.stage_recovery_operations();
+        self.flush_recovery();
         if let Some(worker) = self.search_worker.get_mut().take() {
             worker.cancellation.cancel();
         }
@@ -597,16 +693,20 @@ pub(super) fn handle_bridge_message(
     scripts
 }
 
+// Throttle, not debounce: the flush fires a fixed delay after the first
+// pending write. A debounce that re-arms per keystroke would defer the crash
+// snapshot indefinitely while the user types continuously.
 fn schedule_recovery_flush(host: &Rc<EditorHostState>) {
-    let expected_generation = host.recovery_generation.get();
+    if host.recovery_flush_pending.replace(true) {
+        return;
+    }
     let host = Rc::downgrade(host);
     gtk::glib::timeout_add_local_once(RECOVERY_DEBOUNCE, move || {
         let Some(host) = host.upgrade() else {
             return;
         };
-        if host.recovery_generation.get() == expected_generation {
-            host.flush_recovery();
-        }
+        host.recovery_flush_pending.set(false);
+        host.flush_recovery();
     });
 }
 

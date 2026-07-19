@@ -194,6 +194,12 @@ impl EditorSession {
             if !snapshot.is_dirty() {
                 continue;
             }
+            if self.recovery_base_hashes.contains_key(&id) {
+                let error = DocumentError::ExternalChange {
+                    path: snapshot.display_path,
+                };
+                return (messages, Err(error.into()));
+            }
             match self.documents.save(id, snapshot.version) {
                 Ok(saved) => {
                     self.reported_disk_status.insert(id, DiskStatus::Unchanged);
@@ -223,13 +229,21 @@ impl EditorSession {
             let Ok(snapshot) = self.documents.snapshot(id) else {
                 continue;
             };
-            if self.documents.discard(id).is_err() {
-                continue;
+            // "Discard" drops the changes, not the file: revert to the disk
+            // content so the session keeps the open tabs across a restart.
+            // Only when the file cannot be reloaded (e.g. deleted) is the
+            // document forgotten entirely.
+            if self.documents.reload_discarding_changes(id).is_ok() {
+                self.reported_disk_status.insert(id, DiskStatus::Unchanged);
+            } else {
+                if self.documents.discard(id).is_err() {
+                    continue;
+                }
+                self.protocol_ids.retain(|_, mapped| *mapped != id);
+                self.open_order.retain(|candidate| *candidate != id);
+                self.reported_disk_status.remove(&id);
+                self.view_states.remove(&id);
             }
-            self.protocol_ids.retain(|_, mapped| *mapped != id);
-            self.open_order.retain(|candidate| *candidate != id);
-            self.reported_disk_status.remove(&id);
-            self.view_states.remove(&id);
             self.queue_recovery_removal(id, &snapshot.identity_path);
         }
         if self.active.is_some_and(|id| !self.open_order.contains(&id)) {
@@ -308,9 +322,14 @@ impl EditorSession {
                 .get(&id)
                 .copied()
                 .unwrap_or(DiskStatus::Unchanged);
-            let snapshot = self.documents.snapshot(id)?;
+            let (version, dirty) = self.documents.version_and_dirty(id)?;
 
-            if status == DiskStatus::Modified && !snapshot.is_dirty() {
+            // A pending recovery proposal pins the document version; reloading
+            // here would bump it and make the eventual `RecoveryDecision` stale.
+            if status == DiskStatus::Modified
+                && !dirty
+                && !self.pending_recoveries.contains_key(&id)
+            {
                 if let Ok(reloaded) = self.documents.reload_from_disk(id) {
                     self.reported_disk_status.insert(id, DiskStatus::Unchanged);
                     messages.push(HostMessage::ReplaceDocument {
@@ -324,7 +343,7 @@ impl EditorSession {
                 self.reported_disk_status.insert(id, status);
                 messages.push(HostMessage::DocumentDiskStatus {
                     document_id: protocol_id(id),
-                    document_version: snapshot.version,
+                    document_version: version,
                     status: protocol_disk_status(status),
                 });
             }
@@ -415,14 +434,13 @@ impl EditorSession {
                 );
                 Ok(Vec::new())
             }
+            // Search and diff are handled by the pane on worker threads; the
+            // session only validates and supplies their inputs.
             EditorMessage::QuickOpenRequested { .. }
             | EditorMessage::WorkspaceSearchRequested { .. }
             | EditorMessage::SearchCancelled { .. }
-            | EditorMessage::SearchResultOpenRequested { .. } => Ok(Vec::new()),
-            EditorMessage::DiffRequested {
-                document_id,
-                document_version,
-            } => Ok(vec![self.diff_requested(document_id, document_version)?]),
+            | EditorMessage::SearchResultOpenRequested { .. }
+            | EditorMessage::DiffRequested { .. } => Ok(Vec::new()),
             EditorMessage::ConflictActionRequested {
                 document_id,
                 document_version,
@@ -452,7 +470,14 @@ impl EditorSession {
         self.open_order.retain(|candidate| *candidate != id);
         self.reported_disk_status.remove(&id);
         self.view_states.remove(&id);
-        self.queue_recovery_removal(id, &identity_path);
+        // An undecided recovery proposal must survive the close: deleting the
+        // snapshot here would silently discard the only copy of crash edits
+        // the user never answered `RecoveryChoice::Discard` for.
+        if self.pending_recoveries.remove(&id).is_some() {
+            self.recovery_base_hashes.remove(&id);
+        } else {
+            self.queue_recovery_removal(id, &identity_path);
+        }
         if self.active == Some(id) {
             self.active = self.open_order.last().copied();
         }
@@ -478,6 +503,21 @@ impl EditorSession {
                 .into());
             }
             let snapshot = self.documents.snapshot(id)?;
+            // Run the failure-prone checks before `update_text`: a failed save
+            // after a version bump would leave the WebView without the new
+            // version, so every later message would be rejected as stale.
+            if snapshot.read_only {
+                return Err(DocumentError::ReadOnly {
+                    path: snapshot.display_path.clone(),
+                }
+                .into());
+            }
+            if self.documents.disk_status(id)? != DiskStatus::Unchanged {
+                return Err(DocumentError::ExternalChange {
+                    path: snapshot.display_path.clone(),
+                }
+                .into());
+            }
             let version = if snapshot.text == content {
                 snapshot.version
             } else {
@@ -496,12 +536,19 @@ impl EditorSession {
                 document_version: snapshot.version,
                 change_sequence,
             },
-            Err(error) => HostMessage::SaveFailed {
-                document_id,
-                document_version,
-                change_sequence,
-                reason: error.to_string(),
-            },
+            Err(error) => {
+                let conflict = matches!(
+                    &error,
+                    EditorSessionError::Document(DocumentError::ExternalChange { .. })
+                );
+                HostMessage::SaveFailed {
+                    document_id,
+                    document_version,
+                    change_sequence,
+                    reason: error.to_string(),
+                    conflict,
+                }
+            }
         }
     }
 
@@ -517,6 +564,12 @@ impl EditorSession {
         let result: Result<DocumentSnapshot, EditorSessionError> = (|| {
             let id = self.checked_document(&document_id, document_version)?;
             let snapshot = self.documents.snapshot(id)?;
+            let target = self.documents.workspace_root().join(relative_path);
+            // Check the common refusal before `update_text` so a failed save
+            // does not bump the version behind the WebView's back.
+            if !overwrite && std::fs::symlink_metadata(&target).is_ok() {
+                return Err(DocumentError::TargetExists { path: target }.into());
+            }
             let version = if snapshot.text == content {
                 snapshot.version
             } else {
@@ -525,7 +578,6 @@ impl EditorSession {
                     .version
             };
             let old_identity = snapshot.identity_path;
-            let target = self.documents.workspace_root().join(relative_path);
             let saved = self.documents.save_as(id, version, target, overwrite)?;
             self.reported_disk_status.insert(id, DiskStatus::Unchanged);
             self.queue_recovery_removal(id, &old_identity);
@@ -592,23 +644,33 @@ impl EditorSession {
         })
     }
 
-    fn diff_requested(
+    /// Recovery proposals the user has not answered yet, re-emitted with the
+    /// documents' current versions. Used to rebuild the WebView's prompts
+    /// after its web process crashed and the page reloaded.
+    pub fn pending_recovery_messages(&self) -> Vec<HostMessage> {
+        self.pending_recoveries
+            .iter()
+            .filter_map(|(id, (_, disk_state))| {
+                let (version, _) = self.documents.version_and_dirty(*id).ok()?;
+                Some(HostMessage::RecoveryAvailable {
+                    document_id: protocol_id(*id),
+                    document_version: version,
+                    disk_state: *disk_state,
+                })
+            })
+            .collect()
+    }
+
+    /// Validate a `DiffRequested` message and return the file the diff base
+    /// should be computed for. The content fetch itself (`diff_base_content`)
+    /// runs `git` and reads the disk, so callers run it off the UI thread.
+    pub fn diff_target(
         &self,
-        document_id: String,
+        document_id: &str,
         document_version: u64,
-    ) -> Result<HostMessage, EditorSessionError> {
-        let id = self.checked_document(&document_id, document_version)?;
-        let snapshot = self.documents.snapshot(id)?;
-        let disk_content =
-            match git_head_content(self.documents.workspace_root(), &snapshot.identity_path) {
-                Some(content) => content.unwrap_or_default(),
-                None => self.documents.disk_text(id).unwrap_or_default(),
-            };
-        Ok(HostMessage::ShowDiff {
-            document_id,
-            document_version,
-            disk_content,
-        })
+    ) -> Result<PathBuf, EditorSessionError> {
+        let id = self.checked_document(document_id, document_version)?;
+        Ok(self.documents.snapshot(id)?.identity_path)
     }
 
     fn recovery_decision(
@@ -650,6 +712,12 @@ impl EditorSession {
         if let Some(base_hash) = self.recovery_base_hashes.get(&id) {
             recovery.base_hash.clone_from(base_hash);
         }
+        // Last write wins: drop a not-yet-drained write for the same document
+        // so a typing burst queues one snapshot instead of one per keystroke.
+        self.recovery_operations.retain(|operation| {
+            !matches!(operation, RecoveryOperation::Write(pending)
+                if pending.identity_path == recovery.identity_path)
+        });
         self.recovery_operations
             .push(RecoveryOperation::Write(recovery));
         Ok(())
@@ -659,6 +727,8 @@ impl EditorSession {
         self.pending_recoveries.remove(&id);
         self.recovery_base_hashes.remove(&id);
         if self.recovery_store.is_some() {
+            self.recovery_operations
+                .retain(|operation| operation.identity_path() != identity_path);
             self.recovery_operations
                 .push(RecoveryOperation::Remove(identity_path.to_path_buf()));
         }
@@ -739,6 +809,18 @@ impl EditorSession {
             cursor_column: view.cursor_column,
             scroll_top: view.scroll_top,
         }
+    }
+}
+
+/// Content the diff view compares the editing buffer against: the file's
+/// `HEAD` blob in a Git workspace, the on-disk content otherwise. Runs `git`
+/// subprocesses and reads the file — call from a worker thread, not the UI.
+pub fn diff_base_content(workspace_root: &Path, identity_path: &Path) -> String {
+    match git_head_content(workspace_root, identity_path) {
+        Some(content) => content.unwrap_or_default(),
+        None => crate::read_text_document(identity_path, crate::DEFAULT_MAX_DOCUMENT_BYTES)
+            .map(|loaded| loaded.text)
+            .unwrap_or_default(),
     }
 }
 
@@ -860,17 +942,13 @@ mod tests {
 
         let mut session = EditorSession::new(workspace.path()).unwrap();
         let document = open_payload(session.open_document(&path).unwrap());
-        let messages = session
-            .handle_editor_message(EditorMessage::DiffRequested {
-                document_id: document.id,
-                document_version: document.version,
-            })
-            .unwrap();
+        let target = session.diff_target(&document.id, document.version).unwrap();
 
-        assert!(matches!(
-            messages.as_slice(),
-            [HostMessage::ShowDiff { disk_content, .. }] if disk_content == "기준 내용\n"
-        ));
+        assert_eq!(target, fs::canonicalize(&path).unwrap());
+        assert_eq!(
+            diff_base_content(&fs::canonicalize(workspace.path()).unwrap(), &target),
+            "기준 내용\n"
+        );
     }
 
     #[test]
@@ -1603,6 +1681,160 @@ mod tests {
             [HostMessage::SaveFailed { .. }]
         ));
         assert_eq!(fs::read_to_string(path).unwrap(), "외부 변경\n");
+    }
+
+    #[test]
+    fn save_all_dirty_refuses_restored_recovery_with_changed_base() {
+        let workspace = tempdir().unwrap();
+        let state = tempdir().unwrap();
+        let path = workspace.path().join("복구-충돌.txt");
+        fs::write(&path, "원본\n").unwrap();
+        let store = RecoveryStore::new(state.path(), workspace.path()).unwrap();
+        let mut first =
+            EditorSession::with_recovery_store(workspace.path(), store.clone()).unwrap();
+        let document = open_payload(first.open_document(&path).unwrap());
+        first
+            .handle_editor_message(EditorMessage::DocumentChanged {
+                document_id: document.id,
+                document_version: document.version,
+                change_sequence: 1,
+                content: "크래시 편집본\n".into(),
+            })
+            .unwrap();
+        apply_recovery_operations(&mut first, &store);
+        fs::write(&path, "외부 변경\n").unwrap();
+
+        let mut restarted =
+            EditorSession::with_recovery_store(workspace.path(), store.clone()).unwrap();
+        let messages = restarted.open_document(&path).unwrap();
+        let HostMessage::RecoveryAvailable {
+            document_id,
+            document_version,
+            ..
+        } = &messages[1]
+        else {
+            panic!("expected a recovery conflict");
+        };
+        restarted
+            .handle_editor_message(EditorMessage::RecoveryDecision {
+                document_id: document_id.clone(),
+                document_version: *document_version,
+                choice: RecoveryChoice::Restore,
+            })
+            .unwrap();
+
+        let (_, result) = restarted.save_all_dirty();
+        assert!(matches!(
+            result,
+            Err(EditorSessionError::Document(
+                DocumentError::ExternalChange { .. }
+            ))
+        ));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "외부 변경\n");
+    }
+
+    #[test]
+    fn closing_with_undecided_recovery_keeps_the_snapshot() {
+        let workspace = tempdir().unwrap();
+        let state = tempdir().unwrap();
+        let path = workspace.path().join("미결정.txt");
+        fs::write(&path, "disk\n").unwrap();
+        let identity_path = fs::canonicalize(&path).unwrap();
+        let store = RecoveryStore::new(state.path(), workspace.path()).unwrap();
+        let recovery = RecoverySnapshot::new(
+            store.workspace_id().to_string(),
+            identity_path.clone(),
+            b"disk\n",
+            2,
+            "unsaved crash edits\n".into(),
+            TextEncoding::Utf8,
+            LineEnding::Lf,
+        );
+        store.write(&recovery).unwrap();
+        let mut session =
+            EditorSession::with_recovery_store(workspace.path(), store.clone()).unwrap();
+        let messages = session.open_document(&path).unwrap();
+        let HostMessage::RecoveryAvailable {
+            document_id,
+            document_version,
+            ..
+        } = &messages[1]
+        else {
+            panic!("expected a recovery proposal");
+        };
+
+        session
+            .handle_editor_message(EditorMessage::CloseRequested {
+                document_id: document_id.clone(),
+                document_version: *document_version,
+                dirty: false,
+            })
+            .unwrap();
+        apply_recovery_operations(&mut session, &store);
+
+        assert!(store.read(&identity_path).unwrap().is_some());
+    }
+
+    #[test]
+    fn failed_save_keeps_the_reported_version_valid() {
+        let workspace = tempdir().unwrap();
+        let path = workspace.path().join("실패-후-동기화.txt");
+        fs::write(&path, "base\n").unwrap();
+        let mut session = EditorSession::new(workspace.path()).unwrap();
+        let document = open_payload(session.open_document(&path).unwrap());
+        fs::write(&path, "external\n").unwrap();
+
+        // The save carries content the host has not seen yet; a failure must
+        // not bump the version, or the WebView could never talk again.
+        let response = session
+            .handle_editor_message(EditorMessage::SaveRequested {
+                document_id: document.id.clone(),
+                document_version: document.version,
+                change_sequence: 1,
+                content: "unsent edits\n".into(),
+            })
+            .unwrap();
+        assert!(matches!(
+            response.as_slice(),
+            [HostMessage::SaveFailed { .. }]
+        ));
+        session
+            .handle_editor_message(EditorMessage::ViewStateChanged {
+                document_id: document.id,
+                document_version: document.version,
+                cursor_line: 1,
+                cursor_column: 1,
+                scroll_top: 0.0,
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn discard_all_dirty_reverts_documents_but_keeps_them_open() {
+        let workspace = tempdir().unwrap();
+        let path = workspace.path().join("되돌리기.txt");
+        fs::write(&path, "disk\n").unwrap();
+        let mut session = EditorSession::new(workspace.path()).unwrap();
+        let document = open_payload(session.open_document(&path).unwrap());
+        session
+            .handle_editor_message(EditorMessage::DocumentChanged {
+                document_id: document.id,
+                document_version: document.version,
+                change_sequence: 1,
+                content: "버릴 편집\n".into(),
+            })
+            .unwrap();
+
+        session.discard_all_dirty();
+
+        assert!(session.dirty_document_paths().is_empty());
+        assert!(session.contains_document(&path));
+        assert_eq!(
+            session.session_snapshot().open_files.len(),
+            1,
+            "discarding changes must not forget the open tab"
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "disk\n");
     }
 
     #[test]

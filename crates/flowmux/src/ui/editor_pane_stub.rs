@@ -21,17 +21,17 @@ impl EditorPane {
         workspace_root: PathBuf,
         _restored: EditorSessionState,
         _appearance: EditorAppearance,
-    ) -> Self {
+    ) -> Result<Self, String> {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.set_hexpand(true);
         root.set_vexpand(true);
         let label = gtk::Label::new(Some("The embedded editor is unavailable on this platform."));
         root.append(&label);
-        Self {
+        Ok(Self {
             pane_id: Rc::new(Cell::new(pane_id)),
             workspace_root,
             root,
-        }
+        })
     }
 
     pub fn pane_id(&self) -> PaneId {
@@ -61,6 +61,10 @@ impl EditorPane {
     pub fn apply_appearance(&self, _appearance: EditorAppearance) {}
 
     pub fn set_zoom_level(&self, _zoom: f64) {}
+
+    pub fn copy_selection(&self) {}
+
+    pub fn paste_clipboard(&self) {}
 
     pub fn show_workspace_search(&self) {}
 

@@ -141,6 +141,10 @@ pub fn search_workspace(
         let Some(relative) = relative_path(&root_identity, &document_identity) else {
             continue;
         };
+        // The open buffer always wins over its disk copy, even when the buffer
+        // itself is too large to search: the disk copy is stale and its match
+        // ranges would highlight the wrong text.
+        overridden_paths.insert(document_identity.clone());
         if document.content.len() as u64 > options.max_file_bytes {
             continue;
         }
@@ -155,7 +159,6 @@ pub fn search_workspace(
             &mut result,
             cancellation,
         );
-        overridden_paths.insert(document_identity);
         if result.truncated || result.cancelled {
             return Ok(result);
         }

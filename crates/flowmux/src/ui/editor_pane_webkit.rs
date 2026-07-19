@@ -31,6 +31,7 @@ pub struct EditorPane {
     _asset_server: Rc<EditorAssetServer>,
     _network_session: webkit6::NetworkSession,
     closed: Rc<Cell<bool>>,
+    appearance: Rc<RefCell<EditorAppearance>>,
     file_monitors: Rc<RefCell<HashMap<PathBuf, gio::FileMonitor>>>,
     file_monitor_generation: Rc<Cell<u64>>,
 }
@@ -42,20 +43,19 @@ impl EditorPane {
         workspace_root: PathBuf,
         restored: EditorSessionState,
         appearance: EditorAppearance,
-    ) -> Self {
-        let asset_server = Rc::new(
-            EditorAssetServer::start()
-                .expect("the editor asset server must bind to the IPv4 loopback interface"),
-        );
+    ) -> Result<Self, String> {
+        let asset_server = Rc::new(EditorAssetServer::start().map_err(|error| error.to_string())?);
         let editor_url = asset_server
             .editor_url(&surface_id.0.to_string())
-            .expect("surface UUIDs are valid editor URL identifiers");
+            .map_err(|error| error.to_string())?;
         let allowed_prefix = editor_url
             .strip_suffix(&format!("index.html?surface={}", surface_id.0))
             .expect("editor URLs end with the generated entry point")
             .to_string();
         let bridge = Rc::new(EditorBridgeState::new(surface_id));
         let host = Rc::new(EditorHostState::new(&workspace_root, restored));
+        let closed = Rc::new(Cell::new(false));
+        let appearance = Rc::new(RefCell::new(appearance));
         let user_content_manager = webkit6::UserContentManager::new();
         assert!(
             user_content_manager.register_script_message_handler(MESSAGE_HANDLER_NAME, None),
@@ -130,6 +130,37 @@ impl EditorPane {
             request.deny();
             true
         });
+        {
+            // A crashed web process (OOM on a large document, WebKit bug)
+            // otherwise leaves a permanently blank pane: `ready` stays true so
+            // every later message is fired into a dead page. Reset the bridge,
+            // queue a full re-initialization, and reload the page.
+            let bridge = bridge.clone();
+            let host = Rc::downgrade(&host);
+            let closed = closed.clone();
+            let appearance = appearance.clone();
+            let workspace_root = workspace_root.clone();
+            web_view.connect_web_process_terminated(move |web_view, reason| {
+                if closed.get() {
+                    return;
+                }
+                let Some(host) = host.upgrade() else {
+                    return;
+                };
+                tracing::warn!(?reason, "editor WebView web process terminated; reloading");
+                bridge.reset();
+                let mut messages = vec![HostMessage::SetAppearance {
+                    appearance: appearance.borrow().clone(),
+                }];
+                messages.extend(host.reinitialize_messages(workspace_name(&workspace_root)));
+                for message in messages {
+                    if let Err(error) = bridge.queue(message) {
+                        tracing::warn!(%error, "failed to queue editor reinitialization");
+                    }
+                }
+                web_view.reload();
+            });
+        }
 
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.set_hexpand(true);
@@ -147,11 +178,13 @@ impl EditorPane {
             host,
             _asset_server: asset_server,
             _network_session: network_session,
-            closed: Rc::new(Cell::new(false)),
+            closed,
+            appearance,
             file_monitors: Rc::new(RefCell::new(HashMap::new())),
             file_monitor_generation: Rc::new(Cell::new(0)),
         };
-        pane.apply_appearance(appearance);
+        let initial_appearance = pane.appearance.borrow().clone();
+        pane.apply_appearance(initial_appearance);
         if let Err(error) = pane.send(
             pane.host
                 .initialize_message(workspace_name(pane.workspace_root())),
@@ -188,7 +221,7 @@ impl EditorPane {
                 gtk::glib::ControlFlow::Continue
             });
         }
-        pane
+        Ok(pane)
     }
 
     pub fn pane_id(&self) -> PaneId {
@@ -216,6 +249,7 @@ impl EditorPane {
     }
 
     pub fn apply_appearance(&self, appearance: EditorAppearance) {
+        *self.appearance.borrow_mut() = appearance.clone();
         if let Err(error) = self.send(HostMessage::SetAppearance { appearance }) {
             tracing::warn!(%error, "failed to apply editor appearance");
         }
@@ -223,6 +257,18 @@ impl EditorPane {
 
     pub fn set_zoom_level(&self, zoom: f64) {
         self.web_view.set_zoom_level(zoom.clamp(0.1, 2.0));
+    }
+
+    /// Copy the editor selection when the app-level copy shortcut fires while
+    /// this surface is focused (plain Ctrl+C reaches the WebView natively;
+    /// this covers the global Ctrl+Shift+C accelerator).
+    pub fn copy_selection(&self) {
+        // WebKit's built-in editing command names ("Copy"/"Paste").
+        self.web_view.execute_editing_command("Copy");
+    }
+
+    pub fn paste_clipboard(&self) {
+        self.web_view.execute_editing_command("Paste");
     }
 
     pub fn show_workspace_search(&self) {

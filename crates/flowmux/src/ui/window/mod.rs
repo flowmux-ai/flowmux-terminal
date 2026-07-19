@@ -1236,8 +1236,17 @@ impl WindowController {
         self.clear_pane_zoom();
         self.sidebar.upsert(ws);
         let name = ws.id.to_string();
-        self.pane_registry.borrow_mut().clear_workspace(ws.id);
+        {
+            // Keep live editors across the rebuild: destroying one would turn
+            // its unsaved buffer into a crash-recovery prompt.
+            let mut registry = self.pane_registry.borrow_mut();
+            registry.detach_workspace_editors(ws.id);
+            registry.clear_workspace(ws.id);
+        }
         let new_widget = self.build_workspace_widget(ws);
+        self.pane_registry
+            .borrow_mut()
+            .discard_unused_detached_editors();
         let mut surfaces = self.surfaces.borrow_mut();
         if let Some(old) = surfaces.remove(&ws.id) {
             self.stack.remove(&old);

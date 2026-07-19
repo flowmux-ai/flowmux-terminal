@@ -142,6 +142,12 @@ pub struct PaneRegistry {
     /// in the store, and restore the same ratio on next launch.
     split_paneds: HashMap<PaneId, gtk::Paned>,
     split_workspace: HashMap<PaneId, WorkspaceId>,
+    /// Live editors detached ahead of a workspace rerender, waiting to be
+    /// re-adopted by the rebuilt tree (see `detach_workspace_editors`).
+    pending_editor_reuse: HashMap<SurfaceId, EditorPane>,
+    /// Focus controller per editor surface, so re-adoption can swap in a
+    /// controller bound to the new pane frame.
+    editor_focus_controllers: HashMap<SurfaceId, gtk::EventControllerFocus>,
 }
 
 pub struct TornOffSurface {
@@ -435,6 +441,58 @@ impl PaneRegistry {
             .map(|label| label.text().to_string())
     }
 
+    /// Detach this workspace's live editor widgets ahead of a full rerender so
+    /// [`Self::clear_workspace`] does not destroy them: destroying a dirty
+    /// editor would demote its unsaved buffer to a crash-recovery prompt. The
+    /// rebuilt tree re-adopts them via [`Self::take_reusable_editor`]; anything
+    /// left over must be released with
+    /// [`Self::discard_unused_detached_editors`].
+    pub fn detach_workspace_editors(&mut self, workspace: WorkspaceId) {
+        let surfaces: Vec<SurfaceId> = self
+            .surface_workspace
+            .iter()
+            .filter_map(|(surface, owner)| (*owner == workspace).then_some(*surface))
+            .collect();
+        for surface in surfaces {
+            let Some(editor) = self.editors.remove(&surface) else {
+                continue;
+            };
+            if let Some(parent) = editor.root.parent() {
+                if let Some(stack) = parent.downcast_ref::<gtk::Stack>() {
+                    stack.remove(&editor.root);
+                } else {
+                    editor.root.unparent();
+                }
+            }
+            self.pending_editor_reuse.insert(surface, editor);
+        }
+    }
+
+    pub fn take_reusable_editor(&mut self, surface: SurfaceId) -> Option<EditorPane> {
+        self.pending_editor_reuse.remove(&surface)
+    }
+
+    pub fn set_editor_focus_controller(
+        &mut self,
+        surface: SurfaceId,
+        editor: &EditorPane,
+        controller: gtk::EventControllerFocus,
+    ) {
+        if let Some(previous) = self.editor_focus_controllers.remove(&surface) {
+            editor.root.remove_controller(&previous);
+        }
+        self.editor_focus_controllers.insert(surface, controller);
+    }
+
+    /// Close detached editors the rebuilt tree did not re-adopt (their
+    /// surfaces no longer exist in the workspace).
+    pub fn discard_unused_detached_editors(&mut self) {
+        for (surface, editor) in self.pending_editor_reuse.drain() {
+            self.editor_focus_controllers.remove(&surface);
+            editor.prepare_for_close();
+        }
+    }
+
     pub fn clear_workspace(&mut self, workspace: WorkspaceId) {
         let panes: Vec<PaneId> = self
             .pane_workspace
@@ -476,6 +534,7 @@ impl PaneRegistry {
                 browser.prepare_for_close();
             }
             if let Some(editor) = self.editors.remove(&surface) {
+                self.editor_focus_controllers.remove(&surface);
                 editor.prepare_for_close();
             }
             self.surface_tab_labels.remove(&surface);
@@ -782,6 +841,7 @@ impl PaneRegistry {
                 None,
             )
         } else if let Some(editor) = self.editors.remove(&surface) {
+            self.editor_focus_controllers.remove(&surface);
             let session = editor.session_state();
             (
                 editor.focus_widget(),
@@ -1782,6 +1842,50 @@ mod tab_dnd_tests {
 
     #[cfg(not(target_os = "macos"))]
     #[gtk::test]
+    fn detached_editor_is_reused_across_rerender() {
+        let pane = PaneId::new();
+        let surface = SurfaceId::new();
+        let workspace = WorkspaceId::new();
+        let options = flowmux_config::options::Options::default();
+        let appearance = ResolvedTheme::load().editor_appearance(&options);
+        let editor = EditorPane::new(
+            pane,
+            surface,
+            "/tmp/재사용-워크스페이스".into(),
+            flowmux_core::EditorSessionState::default(),
+            appearance,
+        )
+        .expect("test editor pane should start");
+        let root = editor.root.clone();
+
+        let stack = gtk::Stack::new();
+        stack.add_named(&root, Some(&surface.to_string()));
+        let mut registry = PaneRegistry::default();
+        registry.surface_stacks.insert(pane, stack);
+        registry.surface_workspace.insert(surface, workspace);
+        registry.editors.insert(surface, editor);
+
+        registry.detach_workspace_editors(workspace);
+        assert!(!registry.editors.contains_key(&surface));
+        assert!(
+            root.parent().is_none(),
+            "detached editor must be unparented"
+        );
+
+        registry.clear_workspace(workspace);
+        let reused = registry
+            .take_reusable_editor(surface)
+            .expect("detached editor should be reusable");
+        assert_eq!(reused.root, root);
+        assert!(registry.take_reusable_editor(surface).is_none());
+
+        registry.pending_editor_reuse.insert(surface, reused);
+        registry.discard_unused_detached_editors();
+        assert!(registry.pending_editor_reuse.is_empty());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[gtk::test]
     fn editor_surface_moves_between_panes_with_live_handle() {
         let src = PaneId::new();
         let dst = PaneId::new();
@@ -1796,7 +1900,8 @@ mod tab_dnd_tests {
             "/tmp/다국어-プロジェクト".into(),
             flowmux_core::EditorSessionState::default(),
             appearance,
-        );
+        )
+        .expect("test editor pane should start");
         let content = editor.root.clone().upcast::<gtk::Widget>();
 
         let src_stack = gtk::Stack::new();
@@ -2893,15 +2998,41 @@ fn build_panel(
             workspace_root,
             session,
         } => {
-            let options = (callbacks.read_options)();
-            let editor = EditorPane::new(
-                pane_id,
-                surface.id,
-                workspace_root.clone(),
-                session.clone(),
-                theme.editor_appearance(&options),
-            );
-            editor.set_zoom_level(options.zoom_factor());
+            // A workspace rerender detaches live editors instead of
+            // destroying them; adopt the detached widget so open documents
+            // and unsaved edits survive the rebuild.
+            let reused = registry.borrow_mut().take_reusable_editor(surface.id);
+            let editor = if let Some(editor) = reused {
+                editor.set_pane_id(pane_id);
+                editor
+            } else {
+                let options = (callbacks.read_options)();
+                let editor = match EditorPane::new(
+                    pane_id,
+                    surface.id,
+                    workspace_root.clone(),
+                    session.clone(),
+                    theme.editor_appearance(&options),
+                ) {
+                    Ok(editor) => editor,
+                    Err(error) => {
+                        // A failed editor (e.g. the loopback asset server
+                        // could not bind) must not take the whole app down;
+                        // show the reason in the tab instead.
+                        tracing::error!(%error, "failed to create editor surface");
+                        let label =
+                            gtk::Label::new(Some(&format!("The editor could not start: {error}")));
+                        label.set_wrap(true);
+                        label.set_hexpand(true);
+                        label.set_vexpand(true);
+                        let mut registry = registry.borrow_mut();
+                        registry.surface_workspace.insert(surface.id, workspace);
+                        return label.upcast::<gtk::Widget>();
+                    }
+                };
+                editor.set_zoom_level(options.zoom_factor());
+                editor
+            };
 
             let frame_in = frame.clone();
             let frame_out = frame.clone();
@@ -2917,10 +3048,11 @@ fn build_panel(
             focus.connect_leave(move |_| {
                 frame_out.remove_css_class("focused");
             });
-            editor.root.add_controller(focus);
+            editor.root.add_controller(focus.clone());
 
             let widget = editor.root.clone().upcast::<gtk::Widget>();
             let mut registry = registry.borrow_mut();
+            registry.set_editor_focus_controller(surface.id, &editor, focus);
             registry.editors.insert(surface.id, editor);
             registry.surface_workspace.insert(surface.id, workspace);
             widget
