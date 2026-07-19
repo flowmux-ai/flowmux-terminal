@@ -916,11 +916,8 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_shift_z_toggles_focused_pane_zoom() {
-        assert_eq!(
-            default_for(ActionId::TogglePaneZoom),
-            vec!["<Ctrl><Shift>z"]
-        );
+    fn ctrl_alt_z_toggles_focused_pane_zoom_without_stealing_redo() {
+        assert_eq!(default_for(ActionId::TogglePaneZoom), vec!["<Ctrl><Alt>z"]);
         assert!(ActionId::TogglePaneZoom.is_user_editable());
     }
 

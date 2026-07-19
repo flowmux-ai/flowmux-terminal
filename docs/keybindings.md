@@ -19,7 +19,7 @@ under Options → Keybindings. Action names are the keys used in
 | new-workspace / new-window | Ctrl+N / Ctrl+Shift+N | Cmd+N / Cmd+Shift+N |
 | command-palette | Ctrl+Shift+P | Cmd+Shift+P |
 | terminal-search | Ctrl+Shift+F | Ctrl+Shift+F |
-| toggle-pane-zoom | Ctrl+Shift+Z | Ctrl+Shift+Z |
+| toggle-pane-zoom | Ctrl+Alt+Z | Ctrl+Alt+Z |
 | copy-pane-path | Ctrl+Shift+K | Cmd+Shift+K |
 | toggle-worktree-panel / toggle-file-browser | Ctrl+Alt+W / Ctrl+Alt+F | Cmd+Alt+W / Cmd+Alt+F |
 | toggle-usage-popover | Ctrl+Alt+U | Cmd+Alt+U |
