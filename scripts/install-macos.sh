@@ -233,6 +233,12 @@ write_info_plist() {
   <string>13.0</string>
   <key>NSHighResolutionCapable</key>
   <true/>
+  <key>NSDocumentsFolderUsageDescription</key>
+  <string>FlowMux needs access to Documents so terminal panes and file tools can use workspace files.</string>
+  <key>NSDesktopFolderUsageDescription</key>
+  <string>FlowMux needs access to Desktop so terminal panes and file tools can use workspace files.</string>
+  <key>NSDownloadsFolderUsageDescription</key>
+  <string>FlowMux needs access to Downloads so terminal panes and file tools can use workspace files.</string>
 </dict>
 </plist>
 EOF
