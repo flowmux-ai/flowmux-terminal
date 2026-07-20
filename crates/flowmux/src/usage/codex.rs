@@ -284,11 +284,22 @@ fn is_flowmux_agent_wrapper(path: &Path) -> bool {
 fn parse_rate_limits_response(value: &Value) -> Result<Vec<UsageWindow>, UsageError> {
     let result = response_result(value)?;
     let mut windows = Vec::new();
+    let root_limit_id = result
+        .get("rateLimits")
+        .and_then(|snapshot| snapshot.get("limitId"))
+        .and_then(Value::as_str);
     if let Some(snapshot) = result.get("rateLimits") {
         append_snapshot_windows(snapshot, None, &mut windows)?;
     }
     if let Some(by_id) = result.get("rateLimitsByLimitId").and_then(Value::as_object) {
         for (limit_id, snapshot) in by_id {
+            let limit_id = snapshot
+                .get("limitId")
+                .and_then(Value::as_str)
+                .unwrap_or(limit_id);
+            if Some(limit_id) == root_limit_id {
+                continue;
+            }
             let scope = snapshot
                 .get("limitName")
                 .and_then(Value::as_str)
@@ -361,7 +372,7 @@ fn parse_token_usage_response(value: &Value, day: NaiveDate) -> Result<TokenTota
         None | Some(Value::Null) => None,
         Some(Value::Array(buckets)) => {
             let target = day.format("%Y-%m-%d").to_string();
-            let mut today = 0;
+            let mut today = None;
             for bucket in buckets {
                 let bucket = bucket.as_object().ok_or_else(invalid_response)?;
                 let start_date = bucket
@@ -373,11 +384,11 @@ fn parse_token_usage_response(value: &Value, day: NaiveDate) -> Result<TokenTota
                     .and_then(Value::as_u64)
                     .ok_or_else(invalid_response)?;
                 if start_date == target {
-                    today = tokens;
+                    today = Some(tokens);
                     break;
                 }
             }
-            Some(today)
+            today
         }
         Some(_) => return Err(invalid_response()),
     };
@@ -650,6 +661,30 @@ mod tests {
     }
 
     #[test]
+    fn rate_limit_parser_deduplicates_null_named_root_by_limit_id() {
+        let value = serde_json::json!({"result": {
+            "rateLimits": {
+                "limitId": "codex",
+                "limitName": null,
+                "primary": {"usedPercent": 33, "windowDurationMins": 10080, "resetsAt": 1784971874}
+            },
+            "rateLimitsByLimitId": {
+                "codex": {
+                    "limitId": "codex",
+                    "limitName": null,
+                    "primary": {"usedPercent": 33, "windowDurationMins": 10080, "resetsAt": 1784971874}
+                }
+            }
+        }});
+
+        let windows = parse_rate_limits_response(&value).unwrap();
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].used_percent, 33.0);
+        assert_eq!(windows[0].scope, None);
+    }
+
+    #[test]
     fn token_usage_parser_selects_local_date_bucket() {
         let value = serde_json::json!({"result": {
             "summary": {"lifetimeTokens": 123456},
@@ -683,6 +718,25 @@ mod tests {
                 .unwrap_err();
 
         assert_eq!(error.kind, UsageErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn token_usage_parser_does_not_invent_zero_for_missing_day() {
+        let value = serde_json::json!({"result": {
+            "summary": {"lifetimeTokens": 123456},
+            "dailyUsageBuckets": [
+                {"startDate": "2026-07-19", "tokens": 789}
+            ]
+        }});
+
+        assert_eq!(
+            parse_token_usage_response(&value, NaiveDate::from_ymd_opt(2026, 7, 20).unwrap())
+                .unwrap(),
+            TokenTotals {
+                today: None,
+                lifetime: Some(123456)
+            }
+        );
     }
 
     #[test]
