@@ -2256,26 +2256,6 @@ fn agent_notification_target_controls_blink_flags() {
 }
 
 #[test]
-fn agent_notification_clear_triggers_clear_all_visual_flags() {
-    let flags = AgentNotificationVisualFlags {
-        agent_bar: true,
-        workspace: true,
-        desktop_toast: true,
-    };
-
-    for trigger in [
-        AgentNotificationClearTrigger::WorkspaceClick,
-        AgentNotificationClearTrigger::PaneFocus,
-        AgentNotificationClearTrigger::AgentBarItemClick,
-    ] {
-        assert_eq!(
-            clear_agent_notification_visuals(trigger, flags),
-            AgentNotificationVisualFlags::default()
-        );
-    }
-}
-
-#[test]
 fn agent_notification_target_default_is_agent_bar() {
     assert_eq!(
         AgentNotificationTarget::default(),

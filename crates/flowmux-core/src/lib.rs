@@ -1914,24 +1914,6 @@ impl AgentNotificationVisualFlags {
             desktop_toast,
         }
     }
-
-    pub fn clear(self) -> Self {
-        Self::default()
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AgentNotificationClearTrigger {
-    WorkspaceClick,
-    PaneFocus,
-    AgentBarItemClick,
-}
-
-pub fn clear_agent_notification_visuals(
-    _trigger: AgentNotificationClearTrigger,
-    flags: AgentNotificationVisualFlags,
-) -> AgentNotificationVisualFlags {
-    flags.clear()
 }
 
 /// Public/live status of an AI coding agent inside a surface. `Done` is a
