@@ -29,10 +29,9 @@ const HOOK_NOTIFY_TIMEOUT: Duration = Duration::from_millis(750);
 
 /// Subset of an agent hook payload that flowmux cares about. Reused
 /// across Claude/Codex/OpenCode because their JSON shapes overlap on
-/// the fields we surface (event name, optional message, optional
+/// the fields we surface (session, reason, optional message, optional
 /// last assistant text). Unknown fields are ignored so a new agent
 /// release doesn't break us.
-#[allow(dead_code)]
 #[derive(Debug, Default, Deserialize)]
 pub struct ClaudeHookInput {
     #[serde(
@@ -44,12 +43,6 @@ pub struct ClaudeHookInput {
         alias = "taskId"
     )]
     pub session_id: Option<String>,
-    #[serde(default)]
-    pub transcript_path: Option<PathBuf>,
-    #[serde(default)]
-    pub cwd: Option<PathBuf>,
-    #[serde(default)]
-    pub hook_event_name: Option<String>,
     /// Claude `SessionEnd` reason. Intentional exits such as Ctrl+C at the
     /// prompt use `prompt_input_exit`; the non-specific `other` reason remains
     /// resumable so an ambiguous teardown cannot discard recovery state.
@@ -677,7 +670,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_claude_hook_payload_extracts_stop_event_fields() {
+    fn parse_claude_hook_payload_ignores_unused_stop_event_fields() {
         let raw = r#"{
             "session_id": "abc",
             "transcript_path": "/tmp/t.jsonl",
@@ -686,8 +679,6 @@ mod tests {
         }"#;
         let parsed: ClaudeHookInput = serde_json::from_str(raw).unwrap();
         assert_eq!(parsed.session_id.as_deref(), Some("abc"));
-        assert_eq!(parsed.hook_event_name.as_deref(), Some("Stop"));
-        assert!(parsed.transcript_path.is_some());
     }
 
     #[test]
@@ -717,14 +708,12 @@ mod tests {
         // Future Claude versions may add fields; we must not error.
         let raw = r#"{ "future_field": 42, "hook_event_name": "Notification", "message": "hi" }"#;
         let parsed: ClaudeHookInput = serde_json::from_str(raw).unwrap();
-        assert_eq!(parsed.hook_event_name.as_deref(), Some("Notification"));
         assert_eq!(parsed.message.as_deref(), Some("hi"));
     }
 
     #[test]
     fn parse_claude_hook_payload_handles_empty_object() {
         let parsed: ClaudeHookInput = serde_json::from_str("{}").unwrap();
-        assert!(parsed.hook_event_name.is_none());
         assert!(parsed.session_id.is_none());
     }
 
