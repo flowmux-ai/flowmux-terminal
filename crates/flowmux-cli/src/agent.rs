@@ -71,7 +71,7 @@ impl Target {
     /// Body that gets written to disk. All supported agents accept the
     /// same `SKILL.md` frontmatter+body shape, so the payload is
     /// uniform.
-    pub fn payload(self) -> &'static str {
+    pub fn payload() -> &'static str {
         SKILL_BODY
     }
 
@@ -221,7 +221,7 @@ pub fn install_all(
     let mut out = Vec::with_capacity(targets.len());
     for t in targets {
         let path = t.resolved_install_path(home, codex_home);
-        let outcome = install_one(&path, t.payload(), force)?;
+        let outcome = install_one(&path, Target::payload(), force)?;
         out.push((*t, path, outcome));
     }
     Ok(out)
@@ -233,7 +233,7 @@ pub fn doctor_all(targets: &[Target], home: &Path, codex_home: Option<&Path>) ->
         .iter()
         .map(|t| {
             let path = t.resolved_install_path(home, codex_home);
-            let status = doctor_one(&path, t.payload());
+            let status = doctor_one(&path, Target::payload());
             DoctorEntry {
                 target: *t,
                 path,
@@ -406,7 +406,7 @@ mod tests {
         // Install Claude only.
         install_one(
             &Target::ClaudeCode.resolved_install_path(home.path(), None),
-            Target::ClaudeCode.payload(),
+            Target::payload(),
             false,
         )
         .unwrap();
@@ -447,13 +447,8 @@ mod tests {
     }
 
     #[test]
-    fn all_targets_share_the_same_skill_payload() {
-        // Why: every supported agent must auto-load the SKILL as a
-        // skill, not as a sibling AGENTS snippet — so the payload is
-        // identical across targets (frontmatter + body).
-        for t in Target::ALL {
-            assert_eq!(t.payload(), SKILL_BODY, "{:?} drifted", t);
-        }
+    fn supported_targets_share_the_same_skill_payload() {
+        assert_eq!(Target::payload(), SKILL_BODY);
     }
 
     #[test]

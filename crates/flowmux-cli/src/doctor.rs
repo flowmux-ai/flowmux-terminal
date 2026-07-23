@@ -892,7 +892,7 @@ pub fn run_fix(home: &Path, codex_home: Option<&Path>, flowmux_bin: &str) -> Fix
             continue;
         }
         let path = target.resolved_install_path(home, codex_home);
-        match agent::install_one(&path, target.payload(), true) {
+        match agent::install_one(&path, agent::Target::payload(), true) {
             Ok(agent::InstallOutcome::Written) => outcomes.push(FixOutcome {
                 area: format!("{} skill", target.slug()),
                 status: Status::Ok,
@@ -1433,7 +1433,7 @@ mod tests {
 
         let _ = run_fix(home.path(), None, "flowmux");
         let after = fs::read_to_string(&path).unwrap();
-        assert_eq!(after, agent::Target::ClaudeCode.payload());
+        assert_eq!(after, agent::Target::payload());
     }
 
     /// A user upgrading from a pre-skills flowmux build still has a
