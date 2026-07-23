@@ -561,14 +561,6 @@ pub enum GtkCommand {
         pane: PaneId,
         surface: SurfaceId,
     },
-    /// A notification was raised on a pane (from terminal OSC signal). Update
-    /// the pane border / sidebar badge.
-    #[allow(dead_code)]
-    NotificationOnPane {
-        pane: PaneId,
-        title: String,
-        body: String,
-    },
     /// Evaluate JavaScript in a browser pane.
     BrowserEval {
         pane: PaneId,

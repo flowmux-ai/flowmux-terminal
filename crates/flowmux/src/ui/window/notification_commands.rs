@@ -301,31 +301,6 @@ impl WindowController {
             } => {
                 self.open_agent_bar_item(workspace, pane, surface).await;
             }
-            GtkCommand::NotificationOnPane { pane, title, body } => {
-                tracing::info!(%pane, %title, %body, "pane notification");
-                let (surface, workspace) = {
-                    let registry = self.pane_registry.borrow();
-                    (
-                        registry.active_surface(pane),
-                        registry.workspace_of_pane(pane),
-                    )
-                };
-                if self
-                    .notifications
-                    .push(
-                        title,
-                        body,
-                        flowmux_core::NotificationLevel::Info,
-                        Some(pane),
-                        surface,
-                        workspace,
-                    )
-                    .is_some()
-                {
-                    self.sidebar.bump_notification_badge();
-                    self.refresh_launcher_badge();
-                }
-            }
             other => {
                 unreachable!("notification router got a non-notification command: {other:?}")
             }

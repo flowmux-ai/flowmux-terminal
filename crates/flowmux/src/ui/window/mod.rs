@@ -1845,8 +1845,7 @@ impl WindowController {
             | GtkCommand::ClearAllNotifications
             | GtkCommand::SetAgentStatus { .. }
             | GtkCommand::QueryAgentSurfaceVisible { .. }
-            | GtkCommand::OpenAgentBarItem { .. }
-            | GtkCommand::NotificationOnPane { .. }) => {
+            | GtkCommand::OpenAgentBarItem { .. }) => {
                 self.dispatch_notification_command(command).await;
             }
             command @ (GtkCommand::WorkspaceCreated { .. }
