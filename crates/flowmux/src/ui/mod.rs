@@ -20,7 +20,6 @@ pub mod update_banner;
 pub mod usage_popover;
 pub mod window;
 pub mod workspace_view;
-#[allow(dead_code)] // Standalone in this task; controller wiring follows separately.
 pub mod worktree_panel;
 
 pub use window::{spawn_dispatch_loop, WindowController};

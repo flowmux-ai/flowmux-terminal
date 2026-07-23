@@ -130,7 +130,7 @@ fn confirmation_receiver(
     rx
 }
 
-fn build_remove_confirmation(_path: &Path) -> (adw::AlertDialog, oneshot::Receiver<bool>) {
+fn build_remove_confirmation() -> (adw::AlertDialog, oneshot::Receiver<bool>) {
     let dialog = adw::AlertDialog::new(
         Some("Remove worktree?"),
         Some("The checkout directory will be removed. Its Git branch will be kept."),
@@ -144,10 +144,7 @@ fn build_remove_confirmation(_path: &Path) -> (adw::AlertDialog, oneshot::Receiv
     (dialog, rx)
 }
 
-fn build_force_remove_confirmation(
-    _path: &Path,
-    reason: &str,
-) -> (adw::AlertDialog, oneshot::Receiver<bool>) {
+fn build_force_remove_confirmation(reason: &str) -> (adw::AlertDialog, oneshot::Receiver<bool>) {
     let reason: String = reason.chars().take(2_000).collect();
     let body = format!(
         "{reason}\n\nTracked and untracked changes in this checkout will be lost. The branch will be kept."
@@ -283,7 +280,7 @@ impl WindowController {
                 return;
             }
         };
-        let (dialog, response) = build_remove_confirmation(&row.info.path);
+        let (dialog, response) = build_remove_confirmation();
         if self.present_worktree_confirmation(dialog, response).await {
             self.start_worktree_removal(row.info.path, false);
         }
@@ -353,7 +350,7 @@ impl WindowController {
                 }
             }
             Err(RemoveWorktreeError::RequiresForce(reason)) if !force && still_represented => {
-                let (dialog, response) = build_force_remove_confirmation(&path, &reason);
+                let (dialog, response) = build_force_remove_confirmation(&reason);
                 if self.present_worktree_confirmation(dialog, response).await {
                     match self.removable_worktree_row(&path).await {
                         Ok(row) => self.start_worktree_removal(row.info.path, true),
@@ -697,7 +694,7 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     #[gtk::test]
     async fn safe_remove_defaults_to_cancel_and_force_is_destructive() {
-        let (safe, safe_rx) = build_remove_confirmation(Path::new("/repo/feature"));
+        let (safe, safe_rx) = build_remove_confirmation();
         assert_eq!(safe.default_response().as_deref(), Some("cancel"));
         assert_eq!(safe.close_response().as_str(), "cancel");
         assert_eq!(
@@ -707,8 +704,7 @@ mod tests {
         safe.emit_by_name::<()>("response", &[&"cancel"]);
         assert!(!safe_rx.await.unwrap());
 
-        let (force, force_rx) =
-            build_force_remove_confirmation(Path::new("/repo/feature"), "dirty");
+        let (force, force_rx) = build_force_remove_confirmation("dirty");
         assert_eq!(force.default_response().as_deref(), Some("cancel"));
         assert_eq!(force.close_response().as_str(), "cancel");
         assert_eq!(

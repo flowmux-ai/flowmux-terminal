@@ -18,6 +18,7 @@ pub struct WorktreeRowView {
 }
 
 impl WorktreeRowView {
+    #[cfg(all(test, not(target_os = "macos")))]
     pub fn available(info: WorktreeInfo) -> Self {
         Self {
             info,
@@ -481,6 +482,7 @@ impl WorktreePanel {
         self.root.add_controller(key);
     }
 
+    #[cfg(all(test, not(target_os = "macos")))]
     fn handle_key(&self, key: gdk::Key, state: gdk::ModifierType) -> glib::Propagation {
         dispatch_key(
             &self.list,
@@ -493,6 +495,7 @@ impl WorktreePanel {
         )
     }
 
+    #[cfg(all(test, not(target_os = "macos")))]
     fn handle_navigation_key(&self, key: gdk::Key) -> glib::Propagation {
         dispatch_navigation_key(&self.list, &self.scroll, &self.rows, key)
     }
@@ -510,12 +513,12 @@ impl WorktreePanel {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(target_os = "macos")))]
     fn row_count(&self) -> usize {
         self.rows.borrow().len()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(target_os = "macos")))]
     fn action_labels(&self, index: i32) -> Vec<String> {
         let Some(row) = self.list.row_at_index(index) else {
             return Vec::new();
@@ -526,14 +529,14 @@ impl WorktreePanel {
             .collect()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(target_os = "macos")))]
     fn select_index(&self, index: i32) {
         if let Ok(index) = usize::try_from(index) {
             self.select_index_internal(index);
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(target_os = "macos")))]
     pub(crate) fn repository_name(&self) -> Option<String> {
         let name = self.repository_label.text();
         (!name.is_empty()).then(|| name.into())
@@ -686,7 +689,7 @@ fn key_to_focus_dir(key: gdk::Key) -> Option<FocusDir> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "macos")))]
 fn descendant_buttons(widget: &gtk::Widget) -> Vec<gtk::Button> {
     let mut buttons = Vec::new();
     let mut child = widget.first_child();
