@@ -1297,7 +1297,7 @@ fn uninstall_opencode() -> Result<HookInstallReport> {
 /// bare binary path. New call sites prefer
 /// [`opencode_plugin_source_with_argv`] so the spawn array can carry
 /// the Flatpak `flatpak run …` prefix.
-#[allow(dead_code)]
+#[cfg(test)]
 fn opencode_plugin_source(flowmux_bin: &str) -> String {
     opencode_plugin_source_with_argv(&[flowmux_bin.to_string()])
 }
