@@ -1509,7 +1509,7 @@ fn build_leaf_pane(
 
     // Dropping a tab on the pane body splits or appends depending on the region;
     // see `attach_pane_body_dnd`.
-    attach_pane_body_dnd(&frame, pane_id, drop_zone, preview, callbacks);
+    attach_pane_body_dnd(&stack, pane_id, drop_zone, preview, callbacks);
 
     {
         let frame_widget = frame.clone().upcast::<gtk::Widget>();
@@ -1917,6 +1917,29 @@ mod tab_dnd_tests {
 
     #[cfg(not(target_os = "macos"))]
     #[gtk::test]
+    fn tab_reorder_uses_a_synchronous_drop_target() {
+        let surface = PaneSurface::terminal("one", None);
+        let callbacks = PaneCallbacks::noop_for_test();
+        let (tab, _) = build_surface_tab_widget(PaneId::new(), &surface, true, &callbacks);
+        let controllers = tab.observe_controllers();
+
+        let has_sync_target = (0..controllers.n_items()).any(|index| {
+            controllers
+                .item(index)
+                .is_some_and(|controller| controller.is::<gtk::DropTarget>())
+        });
+        let has_async_target = (0..controllers.n_items()).any(|index| {
+            controllers
+                .item(index)
+                .is_some_and(|controller| controller.is::<gtk::DropTargetAsync>())
+        });
+
+        assert!(has_sync_target);
+        assert!(!has_async_target);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[gtk::test]
     fn take_surface_for_tearoff_moves_widget_out_of_source_pane() {
         let pane = PaneId::new();
         let surface = SurfaceId::new();
@@ -2140,7 +2163,7 @@ mod tab_dnd_tests {
 ///
 /// - `DragSource`: serializes the (PaneId, SurfaceId) pair as a flowmux-only
 ///   MIME payload.
-/// - `DropTargetAsync`: dropping on another tab uses x position to choose
+/// - `DropTarget`: dropping on another tab uses x position to choose
 ///   before/after, reordering within a pane or moving between panes.
 fn set_tab_drag_visual_state(tab: &gtk::Box, dragging: bool) {
     // Keep opacity in CSS so a canceled gesture cannot leave the widget-level
@@ -2359,12 +2382,12 @@ fn attach_tab_dnd_handlers(
     );
 
     let drop_target =
-        gtk::DropTargetAsync::new(Some(tab_dnd_content_formats()), gtk::gdk::DragAction::MOVE);
+        gtk::DropTarget::new(gtk::glib::types::Type::STRING, gtk::gdk::DragAction::MOVE);
     drop_target.connect_accept(|target, drop| {
         if tab_dnd_formats_accept_payload(&drop.formats()) {
             true
         } else {
-            target.reject_drop(drop);
+            target.reject();
             false
         }
     });
@@ -2373,7 +2396,7 @@ fn attach_tab_dnd_handlers(
     // line marks the actual drop position. Hovering the left half of the first
     // tab signals "move to the front".
     let tab_for_motion = tab.clone();
-    drop_target.connect_drag_motion(move |_, _drop, x, _y| {
+    drop_target.connect_motion(move |_, x, _y| {
         let width = tab_for_motion.width();
         let after = if width > 0 {
             x > (width as f64) / 2.0
@@ -2390,7 +2413,7 @@ fn attach_tab_dnd_handlers(
         gtk::gdk::DragAction::MOVE
     });
     let tab_for_leave = tab.clone();
-    drop_target.connect_drag_leave(move |_, _drop| {
+    drop_target.connect_leave(move |_| {
         tab_for_leave.remove_css_class("flowmux-pane-tab-drop-before");
         tab_for_leave.remove_css_class("flowmux-pane-tab-drop-after");
     });
@@ -2402,113 +2425,108 @@ fn attach_tab_dnd_handlers(
     let saw_target_for_drop = saw_tab_drop_target.clone();
     let committed_for_drop = committed_tab_drop.clone();
     let split_candidate_for_drop = split_candidate.clone();
-    drop_target.connect_drop(move |_, drop, x, _y| {
+    drop_target.connect_drop(move |_, value, x, _y| {
         saw_target_for_drop.set(true);
         if committed_for_drop.replace(true) {
-            drop.finish(gtk::gdk::DragAction::empty());
-            return true;
+            return false;
         }
         split_candidate_for_drop.borrow_mut().take();
         tracing::debug!(%target_pane, %target_surface, "tab drop fired");
         tab_for_drop.remove_css_class("flowmux-pane-tab-drop-before");
         tab_for_drop.remove_css_class("flowmux-pane-tab-drop-after");
-        let drop = drop.clone();
-        let tab_for_drop = tab_for_drop.clone();
-        let dispatch_tab_drop = dispatch_tab_drop.clone();
-        let position_of_surface_cb = position_of_surface_cb.clone();
-        gtk::glib::MainContext::default().spawn_local(async move {
-            let payload = match read_tab_dnd_payload_from_drop(&drop).await {
+        let payload = match value.get::<String>() {
+            Ok(payload) => match parse_tab_dnd_payload(&payload) {
                 Ok(payload) => payload,
                 Err(error) => {
-                    tracing::warn!(error = %error, "tab drop: failed to read payload");
-                    drop.finish(gtk::gdk::DragAction::empty());
-                    return;
+                    tracing::warn!(error, "tab drop: payload invalid");
+                    return false;
                 }
-            };
-            let src_pane = payload.src_pane;
-            let src_surface = payload.src_surface;
-            let src_surface_model = payload.surface;
-            // Dropping a tab onto itself within the same pane is a no-op.
-            if src_pane == target_pane && src_surface == target_surface {
-                tracing::debug!(%src_surface, "tab drop: dropped onto self, ignoring");
-                drop.finish(gtk::gdk::DragAction::empty());
-                return;
+            },
+            Err(error) => {
+                tracing::warn!(%error, "tab drop: payload was not text");
+                return false;
             }
+        };
+        let src_pane = payload.src_pane;
+        let src_surface = payload.src_surface;
+        let src_surface_model = payload.surface;
+        // Dropping a tab onto itself within the same pane is a no-op.
+        if src_pane == target_pane && src_surface == target_surface {
+            tracing::debug!(%src_surface, "tab drop: dropped onto self, ignoring");
+            return false;
+        }
 
-            // If drop x is left of half the tab width, insert before the target;
-            // otherwise insert after it. Since target_index is the final index,
-            // count sibling positions in the parent GtkBox to find the target's
-            // current index.
-            let Some(parent) = tab_for_drop.parent() else {
-                drop.finish(gtk::gdk::DragAction::empty());
-                return;
-            };
-            let mut target_index: usize = 0;
-            let mut child = parent.first_child();
-            while let Some(c) = child {
-                if c == tab_for_drop.clone().upcast::<gtk::Widget>() {
-                    break;
-                }
-                target_index += 1;
-                child = c.next_sibling();
+        // If drop x is left of half the tab width, insert before the target;
+        // otherwise insert after it. Since target_index is the final index,
+        // count sibling positions in the parent GtkBox to find the target's
+        // current index.
+        let Some(parent) = tab_for_drop.parent() else {
+            return false;
+        };
+        let mut target_index: usize = 0;
+        let mut child = parent.first_child();
+        while let Some(c) = child {
+            if c == tab_for_drop.clone().upcast::<gtk::Widget>() {
+                break;
             }
+            target_index += 1;
+            child = c.next_sibling();
+        }
 
-            let tab_width = tab_for_drop.width();
-            let after = if tab_width > 0 {
-                x > (tab_width as f64) / 2.0
-            } else {
-                false
-            };
+        let tab_width = tab_for_drop.width();
+        let after = if tab_width > 0 {
+            x > (tab_width as f64) / 2.0
+        } else {
+            false
+        };
 
-            // In the same box:
-            // - When the source is left of the target (src_idx < target_index),
-            //   "before target" means target_index - 1, and "after target" means target_index.
-            // - When the source is right of the target (src_idx > target_index),
-            //   "before target" means target_index, and "after target" means target_index + 1.
-            // The final_index is computed after removing the source and inserting
-            // next to target, using the source position exposed from PaneRegistry::surface_tabs.
-            let src_index = (position_of_surface_cb)(target_pane, src_surface);
-            let final_index = tab_drop_final_index(target_index, after, src_index);
+        // In the same box:
+        // - When the source is left of the target (src_idx < target_index),
+        //   "before target" means target_index - 1, and "after target" means target_index.
+        // - When the source is right of the target (src_idx > target_index),
+        //   "before target" means target_index, and "after target" means target_index + 1.
+        // The final_index is computed after removing the source and inserting
+        // next to target, using the source position exposed from PaneRegistry::surface_tabs.
+        let src_index = (position_of_surface_cb)(target_pane, src_surface);
+        let final_index = tab_drop_final_index(target_index, after, src_index);
 
-            tracing::info!(
-                %target_pane,
-                %src_surface,
-                %target_surface,
-                target_index,
-                src_index = ?src_index,
-                final_index,
-                after,
-                "tab drop: dispatching reorder callback"
-            );
-            let command = if src_pane == target_pane {
-                TabDropCommand::Reorder {
-                    pane: target_pane,
-                    surface: src_surface,
-                    target_index: final_index,
-                }
-            } else {
-                TabDropCommand::MoveToPane {
-                    src_pane,
-                    surface: src_surface,
-                    surface_model: src_surface_model,
-                    dst_pane: target_pane,
-                    target_index: final_index,
-                }
-            };
-            let Some(ack) = dispatch_tab_drop(command) else {
-                tracing::warn!("tab drop: command bridge is unavailable");
-                drop.finish(gtk::gdk::DragAction::empty());
-                return;
-            };
+        tracing::info!(
+            %target_pane,
+            %src_surface,
+            %target_surface,
+            target_index,
+            src_index = ?src_index,
+            final_index,
+            after,
+            "tab drop: dispatching reorder callback"
+        );
+        let command = if src_pane == target_pane {
+            TabDropCommand::Reorder {
+                pane: target_pane,
+                surface: src_surface,
+                target_index: final_index,
+            }
+        } else {
+            TabDropCommand::MoveToPane {
+                src_pane,
+                surface: src_surface,
+                surface_model: src_surface_model,
+                dst_pane: target_pane,
+                target_index: final_index,
+            }
+        };
+        let Some(ack) = dispatch_tab_drop(command) else {
+            tracing::warn!("tab drop: command bridge is unavailable");
+            return false;
+        };
+        gtk::glib::MainContext::default().spawn_local(async move {
             match ack.await {
-                Ok(Ok(())) => drop.finish(gtk::gdk::DragAction::MOVE),
+                Ok(Ok(())) => {}
                 Ok(Err(error)) => {
                     tracing::warn!(%error, "tab drop: move rejected");
-                    drop.finish(gtk::gdk::DragAction::empty());
                 }
                 Err(error) => {
                     tracing::warn!(%error, "tab drop: move acknowledgement dropped");
-                    drop.finish(gtk::gdk::DragAction::empty());
                 }
             }
         });
