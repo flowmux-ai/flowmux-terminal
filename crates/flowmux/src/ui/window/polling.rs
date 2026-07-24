@@ -175,8 +175,8 @@ impl WindowController {
             "agent process poll completed"
         );
         let changed = self.store.reconcile_process_agents(&detected).await;
-        for (workspace, status) in changed {
-            self.sync_workspace_agent_status(workspace, status).await;
+        for (workspace, _) in changed {
+            self.sync_workspace_agent_status(workspace).await;
         }
     }
     pub(super) async fn poll_terminal_cwds(&self) {

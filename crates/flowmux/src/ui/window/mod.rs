@@ -24,9 +24,8 @@ use crate::ui::worktree_panel::WorktreePanel;
 use adw::prelude::*;
 use flowmux_config::cmux_json::{CmuxJson, CommandTarget, CustomCommand};
 use flowmux_core::{
-    AgentNotificationVisualFlags, AgentStatus, Pane, PaneContent, PaneId, PaneSurface,
-    PlacementStrategy, SplitDirection, Surface, SurfaceId, SurfaceKind, Workspace,
-    WorkspaceAgentBlock, WorkspaceId,
+    AgentNotificationVisualFlags, Pane, PaneContent, PaneId, PaneSurface, PlacementStrategy,
+    SplitDirection, Surface, SurfaceId, SurfaceKind, Workspace, WorkspaceAgentBlock, WorkspaceId,
 };
 use flowmux_daemon::StateStore;
 use flowmux_ipc::protocol::{BrowserWaitCondition, NotificationSummary};
@@ -6931,10 +6930,7 @@ mod tests {
             )
             .await;
         controller
-            .dispatch(GtkCommand::SetAgentStatus {
-                workspace: ws_id,
-                status: Some(AgentStatus::Working),
-            })
+            .dispatch(GtkCommand::SetAgentStatus { workspace: ws_id })
             .await;
         assert!(
             agent_bar_visible(&controller),
@@ -6943,10 +6939,7 @@ mod tests {
 
         controller.store.set_agent_activity(surface, None).await;
         controller
-            .dispatch(GtkCommand::SetAgentStatus {
-                workspace: ws_id,
-                status: None,
-            })
+            .dispatch(GtkCommand::SetAgentStatus { workspace: ws_id })
             .await;
         assert!(
             !agent_bar_visible(&controller),
@@ -6978,10 +6971,7 @@ mod tests {
             )
             .await;
         controller
-            .dispatch(GtkCommand::SetAgentStatus {
-                workspace: ws_id,
-                status: Some(AgentStatus::Working),
-            })
+            .dispatch(GtkCommand::SetAgentStatus { workspace: ws_id })
             .await;
         assert!(
             !agent_bar_visible(&controller),

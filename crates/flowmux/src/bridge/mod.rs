@@ -9,8 +9,8 @@
 //! window controller.
 
 use flowmux_core::{
-    AgentStatus, NotificationId, NotificationLevel, PaneId, PaneSurface, PlacementStrategy,
-    SplitDirection, SurfaceId, WorkspaceId,
+    NotificationId, NotificationLevel, PaneId, PaneSurface, PlacementStrategy, SplitDirection,
+    SurfaceId, WorkspaceId,
 };
 use flowmux_ipc::protocol::{BrowserWaitCondition, NotificationSummary};
 use std::path::PathBuf;
@@ -626,10 +626,7 @@ pub enum GtkCommand {
     /// breathing opacity of the workspace's left color bar.
     /// `activity: None` clears the presence (session end / dead PID).
     /// Fire-and-forget — the sidebar render has no reply.
-    SetAgentStatus {
-        workspace: WorkspaceId,
-        status: Option<AgentStatus>,
-    },
+    SetAgentStatus { workspace: WorkspaceId },
     /// Ask the GTK thread whether an agent surface is genuinely visible:
     /// active app window, focused containing pane, and active pane tab.
     QueryAgentSurfaceVisible {

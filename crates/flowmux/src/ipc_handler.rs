@@ -739,14 +739,10 @@ impl GuiHandler {
                         if let Some(ws_id) =
                             self.inner.store().set_agent_activity(surface, None).await
                         {
-                            let rollup = self.inner.store().workspace_agent_status(ws_id).await;
                             let _ = self
                                 .bridge
                                 .tx
-                                .send(GtkCommand::SetAgentStatus {
-                                    workspace: ws_id,
-                                    status: rollup,
-                                })
+                                .send(GtkCommand::SetAgentStatus { workspace: ws_id })
                                 .await;
                         }
                     } else {
@@ -771,7 +767,7 @@ impl GuiHandler {
                             custom_status,
                             session_id,
                         };
-                        if let Some((ws_id, rollup)) = self
+                        if let Some((ws_id, _)) = self
                             .inner
                             .store()
                             .report_agent_status_with_visibility(surface, report, surface_visible)
@@ -780,10 +776,7 @@ impl GuiHandler {
                             let _ = self
                                 .bridge
                                 .tx
-                                .send(GtkCommand::SetAgentStatus {
-                                    workspace: ws_id,
-                                    status: rollup,
-                                })
+                                .send(GtkCommand::SetAgentStatus { workspace: ws_id })
                                 .await;
                         }
                     }

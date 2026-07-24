@@ -49,19 +49,14 @@ impl WindowController {
             .bar
             .render(&model, &attentions, focused_surface);
     }
-    pub(super) async fn sync_workspace_agent_status(
-        &self,
-        workspace: WorkspaceId,
-        _status: Option<AgentStatus>,
-    ) {
+    pub(super) async fn sync_workspace_agent_status(&self, workspace: WorkspaceId) {
         let attention = self.store.workspace_agent_attention_status(workspace).await;
         self.sidebar.set_agent_status(workspace, attention);
         self.sync_workspace_label(workspace).await;
         self.refresh_agent_bar().await;
     }
     pub(super) async fn sync_workspace_agent_status_from_store(&self, workspace: WorkspaceId) {
-        let status = self.store.workspace_agent_status(workspace).await;
-        self.sync_workspace_agent_status(workspace, status).await;
+        self.sync_workspace_agent_status(workspace).await;
     }
     pub(super) fn mark_agent_bar_attention(&self, surface: SurfaceId) {
         if self.agent_bar.attentions.borrow_mut().insert(surface) {
@@ -159,7 +154,7 @@ impl WindowController {
         if screen.is_none() && title.is_none() {
             return;
         }
-        if let Some((ws_id, status)) = self
+        if let Some((ws_id, _)) = self
             .store
             .report_agent_screen_signals_with_visibility(
                 surface,
@@ -169,7 +164,7 @@ impl WindowController {
             )
             .await
         {
-            self.sync_workspace_agent_status(ws_id, status).await;
+            self.sync_workspace_agent_status(ws_id).await;
         }
     }
     pub(super) async fn refresh_all_agent_screen_statuses(&self) {

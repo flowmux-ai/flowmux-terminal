@@ -533,11 +533,16 @@ async fn agent_activity_update_refreshes_store_and_sidebar() {
         .expect("activity update should dispatch SetAgentStatus");
     assert!(matches!(
         command,
-        GtkCommand::SetAgentStatus {
-            workspace,
-            status: Some(AgentStatus::Working),
-        } if workspace == expected_workspace
+        GtkCommand::SetAgentStatus { workspace } if workspace == expected_workspace
     ));
+    assert_eq!(
+        handler
+            .inner
+            .store()
+            .workspace_agent_status(expected_workspace)
+            .await,
+        Some(AgentStatus::Working)
+    );
     assert_eq!(
         handler.inner.store().live_agent_presences().await,
         vec![(expected_workspace, surface, 1234)]
@@ -568,10 +573,7 @@ async fn agent_activity_update_refreshes_store_and_sidebar() {
         .expect("activity clear should dispatch SetAgentStatus");
     assert!(matches!(
         command,
-        GtkCommand::SetAgentStatus {
-            workspace,
-            status: None,
-        } if workspace == expected_workspace
+        GtkCommand::SetAgentStatus { workspace } if workspace == expected_workspace
     ));
     assert!(
         handler
