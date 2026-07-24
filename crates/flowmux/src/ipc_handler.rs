@@ -145,7 +145,6 @@ impl Handler for GuiHandler {
                 | Request::SurfaceCreate { .. } => self.handle_workspace_verb(req).await,
                 Request::PaneSplit { .. }
                 | Request::PaneSendKeys { .. }
-                | Request::TerminalTimelineMark { .. }
                 | Request::PaneReadScreen { .. }
                 | Request::SurfaceFocus { .. }
                 | Request::SurfaceClose { .. }
@@ -334,23 +333,6 @@ impl GuiHandler {
                     .send(GtkCommand::PaneSendKeys {
                         pane,
                         keys,
-                        ack: tx,
-                    })
-                    .await;
-                match rx.await {
-                    Ok(Ok(())) => Response::Ok,
-                    Ok(Err(e)) => Response::Error(RpcError::NotFound(e)),
-                    Err(_) => Response::Error(RpcError::Internal("bridge closed".into())),
-                }
-            }
-            Request::TerminalTimelineMark { pane, surface } => {
-                let (tx, rx) = oneshot::channel();
-                let _ = self
-                    .bridge
-                    .tx
-                    .send(GtkCommand::TerminalTimelineMark {
-                        pane,
-                        surface,
                         ack: tx,
                     })
                     .await;

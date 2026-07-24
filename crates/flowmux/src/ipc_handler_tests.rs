@@ -254,34 +254,6 @@ async fn pane_send_keys_dispatches_terminal_command_and_waits_for_ack() {
 }
 
 #[tokio::test]
-async fn terminal_timeline_mark_routes_to_exact_surface_and_waits_for_ack() {
-    let (handler, rx, pane, surface) = single_pane_handler().await;
-    let response = handler.handle(Request::TerminalTimelineMark {
-        pane: Some(pane),
-        surface: Some(surface),
-    });
-    tokio::pin!(response);
-
-    let command = tokio::select! {
-        response = &mut response => panic!("timeline mark completed before bridge ack: {response:?}"),
-        command = rx.recv() => command.expect("timeline mark should dispatch to GTK"),
-    };
-    let GtkCommand::TerminalTimelineMark {
-        pane: command_pane,
-        surface: command_surface,
-        ack,
-    } = command
-    else {
-        panic!("expected TerminalTimelineMark command");
-    };
-    assert_eq!(command_pane, Some(pane));
-    assert_eq!(command_surface, Some(surface));
-    ack.send(Ok(())).unwrap();
-
-    assert!(matches!(response.await, Response::Ok));
-}
-
-#[tokio::test]
 async fn pane_read_screen_dispatches_terminal_command_and_waits_for_ack() {
     let (handler, rx, pane, _tab) = single_pane_handler().await;
     let response = handler.handle(Request::PaneReadScreen { pane });

@@ -15,7 +15,7 @@
 //! ```text
 //!     terminal pane  <-->  outer PTY (stdin/stdout)  <-->  pty-tee  <-->  inner PTY  <-->  shell
 //!                                                  |
-//!                                                  +--> IPC events (notifications + input marks)
+//!                                                  +--> OscExtractor --> Request::Notify
 //! ```
 //!
 //! Bytes flow verbatim except for cursor-key normalization while a
@@ -85,112 +85,6 @@ struct NotifyEvent {
     level: NotificationLevel,
 }
 
-enum PtyEvent {
-    Notify(NotifyEvent),
-    TimelineMark(mpsc::SyncSender<()>),
-}
-
-/// Lightweight editor state for deciding whether Enter submitted actual text.
-/// This deliberately tracks terminal input, not any agent-specific protocol.
-#[derive(Default)]
-struct SubmittedInput {
-    chars: Vec<bool>,
-    escape: Vec<u8>,
-    bracketed_paste: bool,
-}
-
-impl SubmittedInput {
-    fn reset(&mut self) {
-        self.chars.clear();
-        self.escape.clear();
-        self.bracketed_paste = false;
-    }
-
-    /// Returns one entry for every non-empty Enter found in `bytes`.
-    fn observe(&mut self, bytes: &[u8]) -> usize {
-        let mut submits = 0;
-        for &byte in bytes {
-            if !self.escape.is_empty() {
-                self.observe_escape(byte);
-                continue;
-            }
-
-            match byte {
-                0x1b => self.escape.push(byte),
-                0x90 | 0x9d | 0x9e | 0x9f => {
-                    self.escape.extend_from_slice(b"\x1b]");
-                }
-                0x9b => self.escape.extend_from_slice(b"\x1b["),
-                b'\r' | b'\n' if !self.bracketed_paste => {
-                    submits += usize::from(self.chars.iter().any(|meaningful| *meaningful));
-                    self.chars.clear();
-                }
-                b'\r' | b'\n' => self.chars.push(false),
-                0x08 | 0x7f => {
-                    self.chars.pop();
-                }
-                0x03 | 0x15 => self.chars.clear(), // Ctrl-C / Ctrl-U
-                0x17 => self.delete_word(),        // Ctrl-W
-                b' ' | b'\t' => self.chars.push(false),
-                0x20..=0x7e => self.chars.push(true),
-                0x80..=0xff if byte & 0xc0 != 0x80 => self.chars.push(true),
-                _ => {}
-            }
-        }
-        submits
-    }
-
-    fn observe_escape(&mut self, byte: u8) {
-        self.escape.push(byte);
-
-        if self.escape.starts_with(b"\x1b[") {
-            if self.escape.len() > 2 && (0x40..=0x7e).contains(&byte) {
-                match self.escape.as_slice() {
-                    b"\x1b[200~" => self.bracketed_paste = true,
-                    b"\x1b[201~" => self.bracketed_paste = false,
-                    _ => {}
-                }
-                self.escape.clear();
-            }
-            return;
-        }
-
-        if self
-            .escape
-            .get(1)
-            .is_some_and(|kind| matches!(kind, b']' | b'P' | b'_' | b'^' | b'X'))
-        {
-            let terminated_by_st =
-                self.escape.len() >= 3 && self.escape[self.escape.len() - 2..] == *b"\x1b\\";
-            if byte == 0x07 || terminated_by_st {
-                self.escape.clear();
-            } else if self.escape.len() > 4096 {
-                self.escape.truncate(2);
-            }
-            return;
-        }
-
-        if self.escape.starts_with(b"\x1bO") && self.escape.len() < 3 {
-            return;
-        }
-
-        // Shift+Enter is encoded as ESC CR. It inserts a newline without
-        // submitting, so consuming the whole pair is intentional.
-        if self.escape.len() >= 2 {
-            self.escape.clear();
-        }
-    }
-
-    fn delete_word(&mut self) {
-        while self.chars.last() == Some(&false) {
-            self.chars.pop();
-        }
-        while self.chars.last() == Some(&true) {
-            self.chars.pop();
-        }
-    }
-}
-
 /// Public entry point used by `main.rs`. Returns the inner shell's exit
 /// code so `flowmuxctl` can exit transparently — the terminal pane sees the
 /// child exit at the user's expected status.
@@ -214,13 +108,13 @@ pub fn run(
 
     // Spin up the IPC worker BEFORE the I/O loop starts so the first
     // OSC arriving in the very first millisecond doesn't get dropped.
-    let (event_tx, event_rx) = mpsc::channel::<PtyEvent>();
+    let (notify_tx, notify_rx) = mpsc::channel::<NotifyEvent>();
     let worker = std::thread::Builder::new()
         .name("flowmuxctl-pty-tee-ipc".into())
-        .spawn(move || ipc_worker(socket, pane, surface, event_rx))
+        .spawn(move || ipc_worker(socket, pane, surface, notify_rx))
         .context("spawn ipc worker thread")?;
 
-    let result = run_pty_pump(child_argv, event_tx);
+    let result = run_pty_pump(child_argv, notify_tx);
 
     // Worker shuts down naturally when the sender half drops. Join so
     // the last in-flight Notify isn't truncated mid-write on exit.
@@ -231,7 +125,7 @@ pub fn run(
 
 fn run_pty_pump(
     child_argv: Vec<OsString>,
-    event_tx: mpsc::Sender<PtyEvent>,
+    notify_tx: mpsc::Sender<NotifyEvent>,
 ) -> anyhow::Result<i32> {
     // 1. Allocate the inner PTY pair the shell will live on.
     let OpenptyResult { master, slave } = openpty(None, None).context("openpty for inner shell")?;
@@ -310,8 +204,6 @@ fn run_pty_pump(
         pending_for_cb.borrow_mut().push(payload.to_string());
     });
     let mut input_modes = TerminalInputModes::default();
-    let mut submitted_input = SubmittedInput::default();
-    let mut tracked_foreground = child_pid.as_raw();
     let mut cwd_tracker = CwdOscTracker::default();
     cwd_tracker.emit_if_changed(child_pid);
 
@@ -363,7 +255,7 @@ fn run_pty_pump(
                     master_fd,
                     &mut extractor,
                     &pending,
-                    &event_tx,
+                    &notify_tx,
                 );
                 break;
             }
@@ -377,7 +269,7 @@ fn run_pty_pump(
             // remaining inner-master bytes below and break.
             if let Some(code) = try_reap(child_pid) {
                 drain_inner(master_fd, &mut extractor);
-                flush_pending(&pending, &event_tx);
+                flush_pending(&pending, &notify_tx);
                 exit_code = code;
                 break;
             }
@@ -387,19 +279,6 @@ fn run_pty_pump(
         if fds[0].revents & libc::POLLIN != 0 {
             match read_some(libc::STDIN_FILENO, &mut buf) {
                 ReadOutcome::Data(slice) => {
-                    let foreground_pid = foreground_process_group(master_fd, child_pid);
-                    if foreground_pid != tracked_foreground {
-                        submitted_input.reset();
-                        tracked_foreground = foreground_pid;
-                    }
-                    let meaningful_submits = submitted_input.observe(slice);
-                    for _ in 0..timeline_mark_count(
-                        meaningful_submits,
-                        foreground_pid,
-                        child_pid.as_raw(),
-                    ) {
-                        request_timeline_mark(&event_tx);
-                    }
                     let input = input_modes.rewrite_input(slice);
                     if let Err(e) = write_all(master_fd, input.as_ref()) {
                         tracing::warn!(error = %e, "write to inner master failed; exiting");
@@ -408,7 +287,7 @@ fn run_pty_pump(
                             master_fd,
                             &mut extractor,
                             &pending,
-                            &event_tx,
+                            &notify_tx,
                         );
                         break;
                     }
@@ -420,7 +299,7 @@ fn run_pty_pump(
                         master_fd,
                         &mut extractor,
                         &pending,
-                        &event_tx,
+                        &notify_tx,
                     );
                     break;
                 }
@@ -431,7 +310,7 @@ fn run_pty_pump(
         }
         if fds[0].revents & (libc::POLLHUP | libc::POLLERR) != 0 {
             exit_code =
-                terminate_inner_group(child_pid, master_fd, &mut extractor, &pending, &event_tx);
+                terminate_inner_group(child_pid, master_fd, &mut extractor, &pending, &notify_tx);
             break;
         }
 
@@ -448,18 +327,18 @@ fn run_pty_pump(
                             master_fd,
                             &mut extractor,
                             &pending,
-                            &event_tx,
+                            &notify_tx,
                         );
                         break;
                     }
-                    flush_pending(&pending, &event_tx);
+                    flush_pending(&pending, &notify_tx);
                     cwd_tracker.emit_if_changed(child_pid);
                 }
                 ReadOutcome::WouldBlock => {}
                 ReadOutcome::Eof | ReadOutcome::Err(_) => {
                     let code = wait_blocking(child_pid).unwrap_or(0);
                     drain_inner(master_fd, &mut extractor);
-                    flush_pending(&pending, &event_tx);
+                    flush_pending(&pending, &notify_tx);
                     exit_code = code;
                     break;
                 }
@@ -469,7 +348,7 @@ fn run_pty_pump(
             && fds[1].revents & libc::POLLIN == 0
         {
             drain_inner(master_fd, &mut extractor);
-            flush_pending(&pending, &event_tx);
+            flush_pending(&pending, &notify_tx);
             let code = wait_blocking(child_pid).unwrap_or(0);
             exit_code = code;
             break;
@@ -489,7 +368,7 @@ fn terminate_inner_group<F: FnMut(&str)>(
     master_fd: RawFd,
     extractor: &mut OscExtractor<F>,
     pending: &Rc<RefCell<Vec<String>>>,
-    event_tx: &mpsc::Sender<PtyEvent>,
+    notify_tx: &mpsc::Sender<NotifyEvent>,
 ) -> i32 {
     let sighup_grace = termination_grace("FLOWMUX_PTY_TEE_SIGHUP_GRACE_MS", Duration::from_secs(2));
     let sigterm_grace =
@@ -512,7 +391,7 @@ fn terminate_inner_group<F: FnMut(&str)>(
     }
 
     drain_inner(master_fd, extractor);
-    flush_pending(pending, event_tx);
+    flush_pending(pending, notify_tx);
     exit_code.unwrap_or(128 + libc::SIGKILL)
 }
 
@@ -629,7 +508,7 @@ fn ipc_worker(
     socket: PathBuf,
     pane: Option<PaneId>,
     surface: Option<SurfaceId>,
-    rx: mpsc::Receiver<PtyEvent>,
+    rx: mpsc::Receiver<NotifyEvent>,
 ) {
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -658,28 +537,16 @@ fn ipc_worker(
 
         loop {
             match rx.recv_timeout(Duration::from_millis(250)) {
-                Ok(event) => {
-                    let (req, timeline_ack) = match event {
-                        PtyEvent::Notify(ev) => (
-                            Request::Notify {
-                                pane,
-                                surface,
-                                title: ev.title,
-                                body: ev.body,
-                                level: ev.level,
-                            },
-                            None,
-                        ),
-                        PtyEvent::TimelineMark(ack) => {
-                            (Request::TerminalTimelineMark { pane, surface }, Some(ack))
-                        }
+                Ok(ev) => {
+                    let req = Request::Notify {
+                        pane,
+                        surface,
+                        title: ev.title,
+                        body: ev.body,
+                        level: ev.level,
                     };
-                    let result = client.call(req).await;
-                    if let Err(e) = &result {
-                        tracing::warn!(error = %e, "ipc worker: event call failed");
-                    }
-                    if let Some(ack) = timeline_ack {
-                        let _ = ack.send(());
+                    if let Err(e) = client.call(req).await {
+                        tracing::warn!(error = %e, "ipc worker: notify call failed");
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
@@ -706,65 +573,19 @@ async fn connect_with_retry(socket: &std::path::Path) -> Option<Client> {
 
 // ---- Helpers -----------------------------------------------------
 
-fn flush_pending(pending: &Rc<RefCell<Vec<String>>>, tx: &mpsc::Sender<PtyEvent>) {
+fn flush_pending(pending: &Rc<RefCell<Vec<String>>>, tx: &mpsc::Sender<NotifyEvent>) {
     let drained: Vec<String> = pending.borrow_mut().drain(..).collect();
     for payload in drained {
         if let Some(n) = parse_osc(&payload) {
             // Best-effort send. Worker may have shut down on a fatal
             // error; in that case the notification is silently dropped
             // — better than blocking the I/O loop.
-            let _ = tx.send(PtyEvent::Notify(NotifyEvent {
+            let _ = tx.send(NotifyEvent {
                 title: n.title,
                 body: n.body,
                 level: n.level,
-            }));
+            });
         }
-    }
-}
-
-fn timeline_mark_count(
-    submits: usize,
-    foreground_pid: libc::pid_t,
-    shell_pid: libc::pid_t,
-) -> usize {
-    if foreground_pid > 0 && foreground_pid != shell_pid {
-        submits
-    } else {
-        0
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn foreground_process_group(_master_fd: RawFd, shell_pid: Pid) -> libc::pid_t {
-    std::fs::read_to_string(format!("/proc/{}/stat", shell_pid.as_raw()))
-        .ok()
-        .and_then(|stat| linux_tpgid_from_stat(&stat))
-        .unwrap_or(-1)
-}
-
-#[cfg(target_os = "linux")]
-fn linux_tpgid_from_stat(stat: &str) -> Option<libc::pid_t> {
-    // `/proc/<pid>/stat`: after the final `)`, fields are state, ppid,
-    // pgrp, session, tty_nr, then tpgid. rsplit handles `)` in comm safely.
-    stat.rsplit_once(") ")?
-        .1
-        .split_whitespace()
-        .nth(5)?
-        .parse()
-        .ok()
-}
-
-#[cfg(not(target_os = "linux"))]
-fn foreground_process_group(master_fd: RawFd, _shell_pid: Pid) -> libc::pid_t {
-    unsafe { libc::tcgetpgrp(master_fd) }
-}
-
-fn request_timeline_mark(tx: &mpsc::Sender<PtyEvent>) {
-    let (ack_tx, ack_rx) = mpsc::sync_channel(0);
-    if tx.send(PtyEvent::TimelineMark(ack_tx)).is_ok() {
-        // Capture the prompt before forwarding its Enter to the application.
-        // If the GUI is unavailable, never make terminal input feel stuck.
-        let _ = ack_rx.recv_timeout(Duration::from_millis(40));
     }
 }
 
@@ -968,77 +789,5 @@ impl SavedTermios {
 impl Drop for SavedTermios {
     fn drop(&mut self) {
         let _ = termios::tcsetattr(std::io::stdin(), SetArg::TCSAFLUSH, &self.termios);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn blank_and_erased_input_do_not_submit_timeline_marks() {
-        let mut input = SubmittedInput::default();
-
-        assert_eq!(input.observe(b"\r \t\r"), 0);
-        assert_eq!(input.observe(b"text\x15\r"), 0);
-        assert_eq!(input.observe(b"a\x7f\r"), 0);
-        assert_eq!(input.observe("한\x08\r".as_bytes()), 0);
-    }
-
-    #[test]
-    fn meaningful_input_submits_once_and_resets() {
-        let mut input = SubmittedInput::default();
-
-        assert_eq!(input.observe(b"explain this"), 0);
-        assert_eq!(input.observe(b"\r"), 1);
-        assert_eq!(input.observe(b"\r"), 0);
-    }
-
-    #[test]
-    fn multiline_and_bracketed_paste_newlines_are_not_submits() {
-        let mut input = SubmittedInput::default();
-
-        assert_eq!(input.observe(b"first\x1b\rsecond"), 0);
-        assert_eq!(input.observe(b"\r"), 1);
-        assert_eq!(input.observe(b"\x1b[200~one\ntwo\x1b[201~"), 0);
-        assert_eq!(input.observe(b"\r"), 1);
-    }
-
-    #[test]
-    fn terminal_protocol_replies_do_not_count_as_user_input() {
-        let mut input = SubmittedInput::default();
-
-        assert_eq!(input.observe(b"\x1b[12;40R"), 0);
-        assert_eq!(input.observe(b"\x1b]10;rgb:ffff/ffff/ffff\x1b\\"), 0);
-        assert_eq!(input.observe(b"\x1bP1+r544e=787465726d\x1b\\"), 0);
-        assert_eq!(input.observe(b"\r"), 0);
-    }
-
-    #[test]
-    fn foreground_change_discards_stale_input_state() {
-        let mut input = SubmittedInput::default();
-
-        assert_eq!(input.observe(b"claude"), 0);
-        input.reset();
-        assert_eq!(input.observe(b"\r"), 0);
-    }
-
-    #[test]
-    fn shell_command_enter_is_excluded_but_foreground_app_enter_is_marked() {
-        let shell_pid = 1200;
-
-        assert_eq!(timeline_mark_count(1, shell_pid, shell_pid), 0);
-        assert_eq!(timeline_mark_count(1, 1300, shell_pid), 1);
-        assert_eq!(timeline_mark_count(0, 1300, shell_pid), 0);
-        assert_eq!(timeline_mark_count(1, -1, shell_pid), 0);
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn linux_stat_parser_reads_foreground_group_after_complex_comm() {
-        let stat = "42 (shell ) worker) S 1 42 42 34816 99 0 0 0";
-
-        assert_eq!(linux_tpgid_from_stat(stat), Some(99));
-        assert_eq!(linux_tpgid_from_stat("malformed"), None);
     }
 }

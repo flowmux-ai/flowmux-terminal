@@ -230,13 +230,6 @@ pub enum GtkCommand {
         keys: String,
         ack: oneshot::Sender<Result<(), String>>,
     },
-    /// Record a meaningful foreground-application submission in the terminal
-    /// timeline. Surface is preferred so inactive tabs are routed exactly.
-    TerminalTimelineMark {
-        pane: Option<PaneId>,
-        surface: Option<SurfaceId>,
-        ack: oneshot::Sender<Result<(), String>>,
-    },
     /// Read the terminal buffer text of a pane (`flowmux read-screen`).
     /// `Ok(None)` means the pane has no readable terminal surface (e.g. a
     /// browser tab); `Err` means the pane id did not resolve to a pane.

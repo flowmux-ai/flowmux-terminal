@@ -511,22 +511,6 @@ impl WindowController {
                 };
                 let _ = ack.send(res);
             }
-            GtkCommand::TerminalTimelineMark { pane, surface, ack } => {
-                let registry = self.pane_registry.borrow();
-                let terminal = surface
-                    .and_then(|id| registry.terminals.get(&id))
-                    .or_else(|| pane.and_then(|id| registry.active_terminal(id)));
-                let res = match terminal {
-                    Some(terminal) => {
-                        terminal.capture_timeline_mark();
-                        Ok(())
-                    }
-                    None => Err(format!(
-                        "terminal surface not found: pane={pane:?} surface={surface:?}"
-                    )),
-                };
-                let _ = ack.send(res);
-            }
             GtkCommand::PaneReadScreen { pane, ack } => {
                 let registry = self.pane_registry.borrow();
                 let res = match registry.active_terminal(pane) {
