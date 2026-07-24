@@ -24,6 +24,7 @@ type OpenFileHandler = Rc<RefCell<Box<dyn Fn(PathBuf)>>>;
 type KeyboardInputGuard = Rc<RefCell<Box<dyn Fn() -> bool>>>;
 const ROW_BATCH_SIZE: usize = 500;
 
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn file_browser_accepts_keyboard_input(editor_has_native_focus: bool) -> bool {
     !editor_has_native_focus
 }
@@ -455,6 +456,7 @@ impl FileBrowserPanel {
         *self.on_focus_changed.borrow_mut() = Some(Box::new(f));
     }
 
+    #[cfg(any(target_os = "macos", test))]
     pub(crate) fn set_keyboard_input_guard<F: Fn() -> bool + 'static>(&self, guard: F) {
         *self.keyboard_input_guard.borrow_mut() = Box::new(guard);
     }
