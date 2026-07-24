@@ -1885,6 +1885,7 @@ impl WindowController {
             | GtkCommand::RefreshWindowTitle
             | GtkCommand::PaneFocused { .. }
             | GtkCommand::PaneSendKeys { .. }
+            | GtkCommand::TerminalTimelineMark { .. }
             | GtkCommand::PaneReadScreen { .. }
             | GtkCommand::FocusPane { .. }
             | GtkCommand::TogglePaneZoom { .. }

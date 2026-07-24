@@ -255,6 +255,14 @@ pub enum Request {
         keys: String,
     },
 
+    /// Internal PTY event: a foreground terminal application received a
+    /// non-empty input submission. The GUI records the current viewport in
+    /// that surface's conversation timeline.
+    TerminalTimelineMark {
+        pane: Option<PaneId>,
+        surface: Option<SurfaceId>,
+    },
+
     /// `flowmux read-screen <pane>` — plain-text dump of a terminal
     /// pane's buffer. Read-only.
     PaneReadScreen {
@@ -716,6 +724,25 @@ mod tests {
         assert_eq!(value["verb"], "pane_split");
         assert_eq!(value["pane"], pane.to_string());
         assert_eq!(value["direction"], "vertical");
+    }
+
+    #[test]
+    fn terminal_timeline_mark_roundtrips_exact_surface() {
+        let pane = PaneId::new();
+        let surface = SurfaceId::new();
+        let request = Request::TerminalTimelineMark {
+            pane: Some(pane),
+            surface: Some(surface),
+        };
+
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(matches!(
+            serde_json::from_str::<Request>(&json).unwrap(),
+            Request::TerminalTimelineMark {
+                pane: Some(got_pane),
+                surface: Some(got_surface),
+            } if got_pane == pane && got_surface == surface
+        ));
     }
 
     #[test]

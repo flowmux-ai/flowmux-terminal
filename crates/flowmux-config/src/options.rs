@@ -49,7 +49,7 @@ pub const RESTORE_TERMINAL_SCROLLBACK_DEFAULT: bool = true;
 
 /// Number of terminal history lines kept by a new terminal tab when the
 /// option is not explicitly configured.
-pub const SCROLLBACK_LINES_DEFAULT: u32 = 10_000;
+pub const SCROLLBACK_LINES_DEFAULT: u32 = 5_000;
 pub const SCROLLBACK_LINES_MIN: u32 = 1_000;
 pub const SCROLLBACK_LINES_MAX: u32 = 1_000_000;
 
@@ -906,10 +906,7 @@ mod tests {
 
     #[test]
     fn scrollback_lines_default_clamp_and_round_trip() {
-        assert_eq!(
-            Options::default().scrollback_lines_or_default(),
-            SCROLLBACK_LINES_DEFAULT
-        );
+        assert_eq!(Options::default().scrollback_lines_or_default(), 5_000);
         assert_eq!(Options::clamp_scrollback_lines(0), SCROLLBACK_LINES_MIN);
         assert_eq!(
             Options::clamp_scrollback_lines(u32::MAX),
