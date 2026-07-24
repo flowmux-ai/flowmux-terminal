@@ -70,12 +70,6 @@ impl EditorPane {
 
     pub fn paste_clipboard(&self) {}
 
-    pub fn show_find(&self) {}
-
-    pub fn undo(&self) {}
-
-    pub fn redo(&self) {}
-
     pub fn show_workspace_search(&self) {}
 
     pub fn open_file(&self, _path: &Path) -> Result<(), String> {

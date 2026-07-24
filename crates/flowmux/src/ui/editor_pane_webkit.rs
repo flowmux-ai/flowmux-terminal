@@ -298,18 +298,6 @@ impl EditorPane {
         perform_native_edit(&self.web_view, EditorNativeEditAction::Paste, None);
     }
 
-    pub fn show_find(&self) {
-        evaluate_script(&self.web_view, "window.flowmuxEditorKeyboard?.('find')");
-    }
-
-    pub fn undo(&self) {
-        evaluate_script(&self.web_view, "window.flowmuxEditorKeyboard?.('undo')");
-    }
-
-    pub fn redo(&self) {
-        evaluate_script(&self.web_view, "window.flowmuxEditorKeyboard?.('redo')");
-    }
-
     pub fn show_workspace_search(&self) {
         if let Err(error) = self.send(HostMessage::ShowWorkspaceSearch) {
             tracing::warn!(%error, "failed to show editor workspace search");
