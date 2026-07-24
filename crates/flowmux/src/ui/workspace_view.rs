@@ -663,6 +663,7 @@ impl PaneRegistry {
         self.surface_stacks.contains_key(&pane)
     }
 
+    #[cfg(target_os = "macos")]
     pub fn pane_at_root_point(
         &self,
         root: &gtk::Widget,
@@ -695,6 +696,7 @@ impl PaneRegistry {
         })
     }
 
+    #[cfg(target_os = "macos")]
     pub fn tab_at_root_point(
         &self,
         root: &gtk::Widget,

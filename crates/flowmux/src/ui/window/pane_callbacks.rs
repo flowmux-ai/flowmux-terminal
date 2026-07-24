@@ -337,10 +337,12 @@ impl PaneCallbackRouter {
                         .position(|(id, _)| *id == surface)
                 })
             },
+            #[cfg(target_os = "macos")]
             pane_at_root_point: {
                 let registry = pane_registry.clone();
                 Rc::new(move |root, x, y| registry.borrow().pane_at_root_point(root, x, y))
             },
+            #[cfg(target_os = "macos")]
             tab_at_root_point: {
                 let registry = pane_registry.clone();
                 Rc::new(move |root, x, y| registry.borrow().tab_at_root_point(root, x, y))

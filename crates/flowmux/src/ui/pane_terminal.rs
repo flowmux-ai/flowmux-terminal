@@ -137,9 +137,11 @@ pub struct PaneCallbacks {
     /// Resolve a point in the window root to the rendered pane under it and
     /// normalized coordinates inside that pane. macOS uses this when native
     /// WebViews prevent GDK from delivering a normal drop event.
+    #[cfg(target_os = "macos")]
     pub pane_at_root_point: Rc<dyn Fn(&gtk::Widget, f64, f64) -> Option<(PaneId, f64, f64)>>,
     /// Resolve a point in the window root to a surface tab, including its
     /// current index and whether the point is on the tab's trailing half.
+    #[cfg(target_os = "macos")]
     pub tab_at_root_point:
         Rc<dyn Fn(&gtk::Widget, f64, f64) -> Option<(PaneId, SurfaceId, usize, bool)>>,
     /// Called when Ctrl+click selects a URL inside the terminal. The caller
@@ -188,7 +190,9 @@ impl PaneCallbacks {
             on_terminal_title_changed: Rc::new(RefCell::new(|_, _, _| {})),
             read_options: Rc::new(flowmux_config::options::Options::default),
             position_of_surface_in_pane: Rc::new(|_, _| None),
+            #[cfg(target_os = "macos")]
             pane_at_root_point: Rc::new(|_, _, _| None),
+            #[cfg(target_os = "macos")]
             tab_at_root_point: Rc::new(|_, _, _| None),
             on_open_url: Rc::new(RefCell::new(|_, _| {})),
             on_open_image: Rc::new(RefCell::new(|_, _| {})),
