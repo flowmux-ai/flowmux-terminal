@@ -5,6 +5,25 @@
 
 use super::*;
 
+/// glibc never returns burst-freed main-arena memory to the OS on its own:
+/// long-lived small allocations pin the heap top, and the dynamic mmap
+/// threshold routes multi-MB transients through sbrk, so a single allocation
+/// burst on the GTK main thread leaves RSS pinned at its high-water mark for
+/// the lifetime of the process (observed: 2.6 GB RSS with ~50 KB of live
+/// terminal text). `malloc_trim(0)` also releases free pages in the middle of
+/// the arena, costs about a millisecond, and is a no-op when nothing is
+/// reclaimable.
+#[cfg(target_env = "gnu")]
+pub(super) fn install_heap_trim() {
+    glib::timeout_add_seconds_local(60, || {
+        unsafe { libc::malloc_trim(0) };
+        glib::ControlFlow::Continue
+    });
+}
+
+#[cfg(not(target_env = "gnu"))]
+pub(super) fn install_heap_trim() {}
+
 fn agent_poll_delay(has_hook_presence: bool) -> Duration {
     if has_hook_presence {
         Duration::from_secs(10)

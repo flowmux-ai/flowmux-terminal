@@ -1142,6 +1142,7 @@ impl WindowController {
         controller.install_editor_session_persistence();
         controller.install_scrollback_persistence();
         controller.install_agent_process_polling();
+        polling::install_heap_trim();
         controller
     }
 
