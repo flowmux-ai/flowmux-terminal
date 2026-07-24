@@ -601,11 +601,7 @@ pub enum GtkCommand {
     /// Open the system file manager at a specific surface's cwd. Fired
     /// by the pane tab right-click "Show in folder" item. Only meaningful
     /// for terminal surfaces; the caller skips browser tabs before sending.
-    ShowSurfaceFolder {
-        #[allow(dead_code)]
-        pane: PaneId,
-        surface: SurfaceId,
-    },
+    ShowSurfaceFolder { pane: PaneId, surface: SurfaceId },
     /// Copy a single surface's text identifier to the clipboard — the
     /// cwd for terminal surfaces, the current URL for browser surfaces.
     /// Fired by per-pane and per-tab "Copy path" / "Copy URL"
