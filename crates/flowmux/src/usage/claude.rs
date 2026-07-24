@@ -17,6 +17,7 @@ const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 // A locked login keychain makes `security` block on a GUI unlock/authorization
 // prompt with no timeout of its own, which would wedge the whole usage refresh.
+#[cfg(target_os = "macos")]
 const KEYCHAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) async fn collect(home: PathBuf, client: reqwest::Client) -> ProviderRefresh {
